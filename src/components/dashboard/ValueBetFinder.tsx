@@ -1,7 +1,9 @@
-import { useState } from "react";
-import { Search, Zap, ArrowRight } from "lucide-react";
+import { useState, useEffect } from "react";
+import { Search, Zap, ArrowRight, RefreshCw, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { supabase } from "@/integrations/supabase/client";
+import { useToast } from "@/hooks/use-toast";
 
 interface ValueBet {
   id: string;
@@ -12,53 +14,55 @@ interface ValueBet {
   edge: number;
   ev: number;
   confidence: "high" | "medium" | "low";
+  sport?: string;
+  commenceTime?: string;
+  bookmaker?: string;
 }
 
-const mockBets: ValueBet[] = [
-  {
-    id: "1",
-    event: "Lakers vs Celtics",
-    selection: "Lakers +5.5",
-    odds: 2.10,
-    fairOdds: 1.85,
-    edge: 13.5,
-    ev: 8.2,
-    confidence: "high"
-  },
-  {
-    id: "2",
-    event: "Man City vs Arsenal",
-    selection: "Over 2.5 Goals",
-    odds: 1.95,
-    fairOdds: 1.80,
-    edge: 8.3,
-    ev: 5.1,
-    confidence: "medium"
-  },
-  {
-    id: "3",
-    event: "Djokovic vs Alcaraz",
-    selection: "Alcaraz ML",
-    odds: 2.40,
-    fairOdds: 2.15,
-    edge: 11.6,
-    ev: 7.4,
-    confidence: "high"
-  },
-  {
-    id: "4",
-    event: "Chiefs vs Ravens",
-    selection: "Ravens +3",
-    odds: 1.90,
-    fairOdds: 1.82,
-    edge: 4.4,
-    ev: 2.8,
-    confidence: "low"
-  },
-];
-
 export function ValueBetFinder() {
-  const [bets] = useState<ValueBet[]>(mockBets);
+  const [bets, setBets] = useState<ValueBet[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const { toast } = useToast();
+
+  const fetchOdds = async () => {
+    setLoading(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('fetch-odds');
+
+      if (error) {
+        console.error('Error fetching odds:', error);
+        toast({
+          title: "Error fetching odds",
+          description: error.message || "Failed to fetch live odds",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      if (data?.bets) {
+        setBets(data.bets);
+        setLastUpdated(new Date());
+        toast({
+          title: "Odds updated",
+          description: `Found ${data.bets.length} value betting opportunities`,
+        });
+      }
+    } catch (err) {
+      console.error('Error:', err);
+      toast({
+        title: "Error",
+        description: "Failed to connect to odds service",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchOdds();
+  }, []);
 
   const getConfidenceColor = (confidence: string) => {
     switch (confidence) {
@@ -67,6 +71,17 @@ export function ValueBetFinder() {
       case "low": return "bg-muted text-muted-foreground border-border";
       default: return "bg-muted text-muted-foreground border-border";
     }
+  };
+
+  const formatTime = (isoString?: string) => {
+    if (!isoString) return '';
+    const date = new Date(isoString);
+    return date.toLocaleDateString('en-GB', { 
+      day: 'numeric', 
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
   };
 
   return (
@@ -78,62 +93,101 @@ export function ValueBetFinder() {
           </div>
           <div>
             <h3 className="text-lg font-semibold text-foreground">Value Bet Finder</h3>
-            <p className="text-sm text-muted-foreground">Positive EV opportunities detected</p>
+            <p className="text-sm text-muted-foreground">
+              {lastUpdated 
+                ? `Updated ${lastUpdated.toLocaleTimeString()}`
+                : 'Live odds from The Odds API'
+              }
+            </p>
           </div>
         </div>
-        <Button variant="outline" size="sm" className="gap-2">
-          <Zap className="h-4 w-4" />
-          Refresh
+        <Button 
+          variant="outline" 
+          size="sm" 
+          className="gap-2"
+          onClick={fetchOdds}
+          disabled={loading}
+        >
+          {loading ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <RefreshCw className="h-4 w-4" />
+          )}
+          {loading ? 'Loading...' : 'Refresh'}
         </Button>
       </div>
 
-      <div className="space-y-3">
-        {bets.map((bet) => (
-          <div
-            key={bet.id}
-            className="group rounded-lg border border-border bg-muted/30 p-4 transition-all duration-200 hover:border-primary/30 hover:bg-muted/50"
-          >
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex-1 space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-muted-foreground">{bet.event}</span>
-                  <span className={cn(
-                    "rounded-full border px-2 py-0.5 text-xs font-medium",
-                    getConfidenceColor(bet.confidence)
-                  )}>
-                    {bet.confidence}
-                  </span>
+      {loading && bets.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+          <Loader2 className="h-8 w-8 animate-spin mb-4" />
+          <p>Scanning markets for value bets...</p>
+        </div>
+      ) : bets.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+          <Search className="h-8 w-8 mb-4 opacity-50" />
+          <p>No value bets found at the moment</p>
+          <p className="text-sm">Try refreshing or check back later</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {bets.map((bet) => (
+            <div
+              key={bet.id}
+              className="group rounded-lg border border-border bg-muted/30 p-4 transition-all duration-200 hover:border-primary/30 hover:bg-muted/50"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex-1 space-y-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {bet.sport && (
+                      <span className="text-xs text-primary font-medium">{bet.sport}</span>
+                    )}
+                    <span className="text-sm text-muted-foreground">{bet.event}</span>
+                    <span className={cn(
+                      "rounded-full border px-2 py-0.5 text-xs font-medium",
+                      getConfidenceColor(bet.confidence)
+                    )}>
+                      {bet.confidence}
+                    </span>
+                  </div>
+                  <p className="font-medium text-foreground">{bet.selection}</p>
+                  <div className="flex items-center gap-4 text-sm flex-wrap">
+                    <span className="text-muted-foreground">
+                      Odds: <span className="font-mono text-foreground">{bet.odds.toFixed(2)}</span>
+                    </span>
+                    <span className="text-muted-foreground">
+                      Fair: <span className="font-mono text-foreground">{bet.fairOdds.toFixed(2)}</span>
+                    </span>
+                    {bet.bookmaker && (
+                      <span className="text-xs text-muted-foreground">
+                        @ {bet.bookmaker}
+                      </span>
+                    )}
+                  </div>
+                  {bet.commenceTime && (
+                    <p className="text-xs text-muted-foreground">{formatTime(bet.commenceTime)}</p>
+                  )}
                 </div>
-                <p className="font-medium text-foreground">{bet.selection}</p>
-                <div className="flex items-center gap-4 text-sm">
-                  <span className="text-muted-foreground">
-                    Odds: <span className="font-mono text-foreground">{bet.odds.toFixed(2)}</span>
-                  </span>
-                  <span className="text-muted-foreground">
-                    Fair: <span className="font-mono text-foreground">{bet.fairOdds.toFixed(2)}</span>
-                  </span>
+                <div className="text-right space-y-1">
+                  <div className="flex items-center gap-1">
+                    <span className="text-sm text-muted-foreground">Edge</span>
+                    <span className="font-mono font-bold text-profit">+{bet.edge.toFixed(1)}%</span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="text-sm text-muted-foreground">EV</span>
+                    <span className="font-mono font-bold text-profit">+{bet.ev.toFixed(1)}%</span>
+                  </div>
                 </div>
               </div>
-              <div className="text-right space-y-1">
-                <div className="flex items-center gap-1">
-                  <span className="text-sm text-muted-foreground">Edge</span>
-                  <span className="font-mono font-bold text-profit">+{bet.edge.toFixed(1)}%</span>
-                </div>
-                <div className="flex items-center gap-1">
-                  <span className="text-sm text-muted-foreground">EV</span>
-                  <span className="font-mono font-bold text-profit">+{bet.ev.toFixed(1)}%</span>
-                </div>
+              <div className="mt-3 pt-3 border-t border-border">
+                <Button variant="ghost" size="sm" className="w-full justify-between text-primary hover:text-primary">
+                  Analyze this bet
+                  <ArrowRight className="h-4 w-4" />
+                </Button>
               </div>
             </div>
-            <div className="mt-3 pt-3 border-t border-border">
-              <Button variant="ghost" size="sm" className="w-full justify-between text-primary hover:text-primary">
-                Analyze this bet
-                <ArrowRight className="h-4 w-4" />
-              </Button>
-            </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
