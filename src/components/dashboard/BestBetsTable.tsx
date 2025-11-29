@@ -1,124 +1,46 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { CheckCircle2, XCircle, TrendingUp, Filter, Info } from "lucide-react";
+import { CheckCircle2, XCircle, Filter, Info, RefreshCw, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { ValueBet, ConfidenceLevel } from "@/types/betting";
+import { supabase } from "@/integrations/supabase/client";
+import { useToast } from "@/hooks/use-toast";
+import type { ConfidenceLevel } from "@/types/betting";
 
-// Mock data for demonstration
-const mockBets: ValueBet[] = [
-  {
-    id: "1",
-    market: "1x2",
-    selection: "Liverpool Win",
-    offered_odds: 2.10,
-    fair_odds: 1.85,
-    implied_probability: 47.6,
-    actual_probability: 54.1,
-    expected_value: 0.136,
-    edge: 13.5,
-    confidence: "high",
-    min_odds: 1.85,
-    suggested_stake_percent: 4,
-    reasoning: "Liverpool's home form (4W-1D) combined with Arsenal's poor away record suggests value. Expected goals model favors Liverpool 1.8-1.2.",
-    meets_criteria: true,
-    is_active: true,
-    created_at: new Date().toISOString(),
-    match: {
-      id: "m1",
-      home_team: "Liverpool",
-      away_team: "Arsenal",
-      league: "Premier League",
-      match_date: new Date(Date.now() + 86400000).toISOString(),
-      home_form: "WWDWW",
-      away_form: "WLDWL"
-    }
-  },
-  {
-    id: "2",
-    market: "over_under",
-    selection: "Over 2.5 Goals",
-    offered_odds: 1.90,
-    fair_odds: 1.75,
-    implied_probability: 52.6,
-    actual_probability: 57.1,
-    expected_value: 0.085,
-    edge: 8.5,
-    confidence: "moderate",
-    min_odds: 1.75,
-    suggested_stake_percent: 2.5,
-    reasoning: "Both teams averaging 2.8 goals per game. Head-to-head shows 4/5 recent meetings over 2.5 goals.",
-    meets_criteria: true,
-    is_active: true,
-    created_at: new Date().toISOString(),
-    match: {
-      id: "m2",
-      home_team: "Man City",
-      away_team: "Chelsea",
-      league: "Premier League",
-      match_date: new Date(Date.now() + 172800000).toISOString(),
-      home_form: "WWWWL",
-      away_form: "WDWLD"
-    }
-  },
-  {
-    id: "3",
-    market: "btts",
-    selection: "Both Teams to Score - Yes",
-    offered_odds: 1.75,
-    fair_odds: 1.65,
-    implied_probability: 57.1,
-    actual_probability: 60.6,
-    expected_value: 0.061,
-    edge: 6.1,
-    confidence: "moderate",
-    min_odds: 1.65,
-    suggested_stake_percent: 2,
-    reasoning: "Barcelona's defense has conceded in 8/10 home games. Real Madrid score in every away match.",
-    meets_criteria: true,
-    is_active: true,
-    created_at: new Date().toISOString(),
-    match: {
-      id: "m3",
-      home_team: "Barcelona",
-      away_team: "Real Madrid",
-      league: "La Liga",
-      match_date: new Date(Date.now() + 259200000).toISOString(),
-      home_form: "WDWWW",
-      away_form: "WWWDW"
-    }
-  },
-  {
-    id: "4",
-    market: "1x2",
-    selection: "Juventus Draw",
-    offered_odds: 3.40,
-    fair_odds: 3.20,
-    implied_probability: 29.4,
-    actual_probability: 31.3,
-    expected_value: 0.064,
-    edge: 6.25,
-    confidence: "low",
-    min_odds: 3.20,
-    suggested_stake_percent: 1.5,
-    reasoning: "Juventus drawn 5/8 home games. AC Milan's away form (2D in last 4) supports draw potential.",
-    meets_criteria: true,
-    is_active: true,
-    created_at: new Date().toISOString(),
-    match: {
-      id: "m4",
-      home_team: "Juventus",
-      away_team: "AC Milan",
-      league: "Serie A",
-      match_date: new Date(Date.now() + 345600000).toISOString(),
-      home_form: "DDDWW",
-      away_form: "WDDLD"
-    }
-  },
-];
+interface LiveBet {
+  id: string;
+  event: string;
+  selection: string;
+  odds: number;
+  fairOdds: number;
+  edge: number;
+  ev: number;
+  confidence: "high" | "medium" | "low";
+  sport?: string;
+  commenceTime?: string;
+  bookmaker?: string;
+}
+
+interface DisplayBet {
+  id: string;
+  match: string;
+  league: string;
+  market: string;
+  selection: string;
+  offered_odds: number;
+  fair_odds: number;
+  expected_value: number;
+  edge: number;
+  confidence: ConfidenceLevel;
+  suggested_stake_percent: number;
+  reasoning: string;
+  meets_criteria: boolean;
+  bookmaker: string;
+  commenceTime: string;
+}
 
 const getConfidenceBadge = (confidence: ConfidenceLevel) => {
   switch (confidence) {
@@ -131,19 +53,92 @@ const getConfidenceBadge = (confidence: ConfidenceLevel) => {
   }
 };
 
-const getMarketLabel = (market: string) => {
-  switch (market) {
-    case "1x2": return "Win/Draw/Win";
-    case "over_under": return "Over/Under";
-    case "btts": return "Both Teams Score";
-    case "handicap": return "Handicap";
-    default: return market;
-  }
+const mapConfidence = (conf: "high" | "medium" | "low"): ConfidenceLevel => {
+  if (conf === "medium") return "moderate";
+  return conf as ConfidenceLevel;
+};
+
+const calculateStake = (edge: number, confidence: string): number => {
+  // Kelly-inspired stake calculation
+  const baseStake = edge / 100;
+  const confMultiplier = confidence === "high" ? 1.5 : confidence === "medium" ? 1 : 0.5;
+  return Math.min(Math.max(baseStake * confMultiplier * 10, 0.5), 5);
+};
+
+const formatTime = (isoString?: string) => {
+  if (!isoString) return '';
+  const date = new Date(isoString);
+  return date.toLocaleDateString('en-GB', { 
+    day: 'numeric', 
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
 };
 
 export function BestBetsTable() {
   const [filter, setFilter] = useState<string>("all");
-  const [bets] = useState<ValueBet[]>(mockBets);
+  const [bets, setBets] = useState<DisplayBet[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const { toast } = useToast();
+
+  const fetchLiveOdds = async () => {
+    setLoading(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('fetch-odds');
+
+      if (error) {
+        console.error('Error fetching odds:', error);
+        toast({
+          title: "Error fetching odds",
+          description: error.message || "Failed to fetch live odds",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      if (data?.bets) {
+        const transformedBets: DisplayBet[] = data.bets.map((bet: LiveBet) => ({
+          id: bet.id,
+          match: bet.event,
+          league: bet.sport || 'Football',
+          market: '1x2',
+          selection: bet.selection,
+          offered_odds: bet.odds,
+          fair_odds: bet.fairOdds,
+          expected_value: bet.ev / 100,
+          edge: bet.edge,
+          confidence: mapConfidence(bet.confidence),
+          suggested_stake_percent: calculateStake(bet.edge, bet.confidence),
+          reasoning: `Best odds at ${bet.bookmaker}. Fair odds calculated from ${data.bets.length > 1 ? 'multiple bookmakers' : 'market average'}. Kickoff: ${formatTime(bet.commenceTime)}`,
+          meets_criteria: bet.edge > 2,
+          bookmaker: bet.bookmaker || 'Unknown',
+          commenceTime: bet.commenceTime || '',
+        }));
+
+        setBets(transformedBets);
+        setLastUpdated(new Date());
+        toast({
+          title: "Odds updated",
+          description: `Found ${transformedBets.length} value betting opportunities`,
+        });
+      }
+    } catch (err) {
+      console.error('Error:', err);
+      toast({
+        title: "Error",
+        description: "Failed to connect to odds service",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchLiveOdds();
+  }, []);
 
   const filteredBets = bets.filter(bet => {
     if (filter === "all") return bet.meets_criteria;
@@ -157,9 +152,28 @@ export function BestBetsTable() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h3 className="text-xl font-bold text-foreground">Daily Best Bets</h3>
-          <p className="text-sm text-muted-foreground">AI-analyzed value betting opportunities</p>
+          <p className="text-sm text-muted-foreground">
+            {lastUpdated 
+              ? `Live odds • Updated ${lastUpdated.toLocaleTimeString()}`
+              : 'AI-analyzed value betting opportunities'
+            }
+          </p>
         </div>
         <div className="flex items-center gap-3">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={fetchLiveOdds}
+            disabled={loading}
+            className="gap-2"
+          >
+            {loading ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="h-4 w-4" />
+            )}
+            {loading ? 'Loading...' : 'Refresh'}
+          </Button>
           <Filter className="h-4 w-4 text-muted-foreground" />
           <Select value={filter} onValueChange={setFilter}>
             <SelectTrigger className="w-[180px] bg-muted border-border">
@@ -174,90 +188,94 @@ export function BestBetsTable() {
         </div>
       </div>
 
-      <div className="overflow-x-auto -mx-6 px-6">
-        <Table>
-          <TableHeader>
-            <TableRow className="border-border hover:bg-transparent">
-              <TableHead className="text-muted-foreground">Match</TableHead>
-              <TableHead className="text-muted-foreground">Market</TableHead>
-              <TableHead className="text-muted-foreground text-center">EV</TableHead>
-              <TableHead className="text-muted-foreground text-center">
-                <div className="flex items-center justify-center gap-1">
-                  Criteria
-                  <Tooltip>
-                    <TooltipTrigger>
-                      <Info className="h-3 w-3" />
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>EV &gt; 5%, Edge &gt; 0%, Actual Prob &gt; Implied</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </div>
-              </TableHead>
-              <TableHead className="text-muted-foreground text-center">Min Odds</TableHead>
-              <TableHead className="text-muted-foreground text-center">Offered</TableHead>
-              <TableHead className="text-muted-foreground text-center">Confidence</TableHead>
-              <TableHead className="text-muted-foreground text-center">Stake %</TableHead>
-              <TableHead className="text-muted-foreground">Reasoning</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {filteredBets.map((bet) => (
-              <TableRow key={bet.id} className="border-border hover:bg-muted/30 transition-colors">
-                <TableCell>
-                  <div>
-                    <p className="font-medium text-foreground">
-                      {bet.match?.home_team} vs {bet.match?.away_team}
-                    </p>
-                    <p className="text-xs text-muted-foreground">{bet.match?.league}</p>
+      {loading && bets.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
+          <Loader2 className="h-10 w-10 animate-spin mb-4" />
+          <p className="font-medium">Scanning live markets...</p>
+          <p className="text-sm">Fetching odds from multiple bookmakers</p>
+        </div>
+      ) : (
+        <div className="overflow-x-auto -mx-6 px-6">
+          <Table>
+            <TableHeader>
+              <TableRow className="border-border hover:bg-transparent">
+                <TableHead className="text-muted-foreground">Match</TableHead>
+                <TableHead className="text-muted-foreground">Selection</TableHead>
+                <TableHead className="text-muted-foreground text-center">Edge</TableHead>
+                <TableHead className="text-muted-foreground text-center">
+                  <div className="flex items-center justify-center gap-1">
+                    Criteria
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <Info className="h-3 w-3" />
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>Edge &gt; 2%, Best odds vs fair odds</p>
+                      </TooltipContent>
+                    </Tooltip>
                   </div>
-                </TableCell>
-                <TableCell>
-                  <div>
-                    <p className="text-sm text-foreground">{getMarketLabel(bet.market)}</p>
-                    <p className="text-xs text-primary font-medium">{bet.selection}</p>
-                  </div>
-                </TableCell>
-                <TableCell className="text-center">
-                  <span className={cn(
-                    "font-mono font-bold",
-                    bet.expected_value >= 0.1 ? "text-profit" : bet.expected_value >= 0.05 ? "text-warning" : "text-foreground"
-                  )}>
-                    +{(bet.expected_value * 100).toFixed(1)}%
-                  </span>
-                </TableCell>
-                <TableCell className="text-center">
-                  {bet.meets_criteria ? (
-                    <CheckCircle2 className="h-5 w-5 text-profit mx-auto" />
-                  ) : (
-                    <XCircle className="h-5 w-5 text-loss mx-auto" />
-                  )}
-                </TableCell>
-                <TableCell className="text-center font-mono text-foreground">{bet.min_odds.toFixed(2)}</TableCell>
-                <TableCell className="text-center">
-                  <span className="font-mono font-bold text-profit">{bet.offered_odds.toFixed(2)}</span>
-                </TableCell>
-                <TableCell className="text-center">{getConfidenceBadge(bet.confidence)}</TableCell>
-                <TableCell className="text-center">
-                  <span className={cn(
-                    "font-mono font-medium",
-                    bet.suggested_stake_percent >= 3 ? "text-profit" : "text-foreground"
-                  )}>
-                    {bet.suggested_stake_percent}%
-                  </span>
-                </TableCell>
-                <TableCell className="max-w-xs">
-                  <p className="text-xs text-muted-foreground line-clamp-2">{bet.reasoning}</p>
-                </TableCell>
+                </TableHead>
+                <TableHead className="text-muted-foreground text-center">Fair Odds</TableHead>
+                <TableHead className="text-muted-foreground text-center">Best Odds</TableHead>
+                <TableHead className="text-muted-foreground text-center">Bookmaker</TableHead>
+                <TableHead className="text-muted-foreground text-center">Confidence</TableHead>
+                <TableHead className="text-muted-foreground text-center">Stake %</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
+            </TableHeader>
+            <TableBody>
+              {filteredBets.map((bet) => (
+                <TableRow key={bet.id} className="border-border hover:bg-muted/30 transition-colors">
+                  <TableCell>
+                    <div>
+                      <p className="font-medium text-foreground">{bet.match}</p>
+                      <p className="text-xs text-muted-foreground">{bet.league}</p>
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <p className="font-medium text-primary">{bet.selection}</p>
+                  </TableCell>
+                  <TableCell className="text-center">
+                    <span className={cn(
+                      "font-mono font-bold",
+                      bet.edge >= 15 ? "text-profit" : bet.edge >= 8 ? "text-warning" : "text-foreground"
+                    )}>
+                      +{bet.edge.toFixed(1)}%
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-center">
+                    {bet.meets_criteria ? (
+                      <CheckCircle2 className="h-5 w-5 text-profit mx-auto" />
+                    ) : (
+                      <XCircle className="h-5 w-5 text-loss mx-auto" />
+                    )}
+                  </TableCell>
+                  <TableCell className="text-center font-mono text-muted-foreground">{bet.fair_odds.toFixed(2)}</TableCell>
+                  <TableCell className="text-center">
+                    <span className="font-mono font-bold text-profit">{bet.offered_odds.toFixed(2)}</span>
+                  </TableCell>
+                  <TableCell className="text-center">
+                    <span className="text-xs text-muted-foreground">{bet.bookmaker}</span>
+                  </TableCell>
+                  <TableCell className="text-center">{getConfidenceBadge(bet.confidence)}</TableCell>
+                  <TableCell className="text-center">
+                    <span className={cn(
+                      "font-mono font-medium",
+                      bet.suggested_stake_percent >= 3 ? "text-profit" : "text-foreground"
+                    )}>
+                      {bet.suggested_stake_percent.toFixed(1)}%
+                    </span>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
 
-      {filteredBets.length === 0 && (
+      {!loading && filteredBets.length === 0 && (
         <div className="text-center py-8">
           <p className="text-muted-foreground">No value bets found matching your criteria.</p>
+          <p className="text-sm text-muted-foreground mt-1">Try refreshing or adjusting filters</p>
         </div>
       )}
     </div>
