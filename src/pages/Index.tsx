@@ -7,8 +7,19 @@ import { PerformanceChart } from "@/components/dashboard/PerformanceChart";
 import { BestBetsTable } from "@/components/dashboard/BestBetsTable";
 import { MatchAnalyzer } from "@/components/dashboard/MatchAnalyzer";
 import { BetHistory } from "@/components/dashboard/BetHistory";
+import { useBetSlip } from "@/contexts/BetSlipContext";
 
 const Index = () => {
+  const { slipBets, totalStake, potentialReturn } = useBetSlip();
+  
+  // Calculate stats from bet slips (currently all pending, so profit-related stats are 0)
+  const totalProfit = 0; // No settled bets yet
+  const winRate = 0; // No settled bets yet
+  const roi = 0; // No settled bets yet
+  const avgEdge = slipBets.length > 0 
+    ? (slipBets.reduce((sum, b) => sum + ((b.odds - 1) / b.odds * 100), 0) / slipBets.length)
+    : 0;
+
   return (
     <div className="min-h-screen bg-background">
       <Header />
@@ -19,30 +30,30 @@ const Index = () => {
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
             <StatCard
               title="Total Profit"
-              value="$3,850"
-              change="+12.5% from last month"
-              changeType="profit"
+              value={`$${totalProfit.toFixed(2)}`}
+              change={slipBets.length > 0 ? `${slipBets.length} pending bet${slipBets.length !== 1 ? 's' : ''}` : "No bets placed"}
+              changeType="neutral"
               icon={DollarSign}
             />
             <StatCard
               title="Win Rate"
-              value="58.3%"
-              change="+2.1% improvement"
-              changeType="profit"
+              value={`${winRate.toFixed(1)}%`}
+              change="No settled bets yet"
+              changeType="neutral"
               icon={Target}
             />
             <StatCard
               title="ROI"
-              value="8.7%"
-              change="Above target of 5%"
-              changeType="profit"
+              value={`${roi.toFixed(1)}%`}
+              change="No settled bets yet"
+              changeType="neutral"
               icon={TrendingUp}
             />
             <StatCard
               title="Avg Edge"
-              value="6.2%"
-              change="Consistent edge maintained"
-              changeType="neutral"
+              value={`${avgEdge.toFixed(1)}%`}
+              change={slipBets.length > 0 ? `From ${slipBets.length} selection${slipBets.length !== 1 ? 's' : ''}` : "Add bets to calculate"}
+              changeType={avgEdge > 0 ? "profit" : "neutral"}
               icon={Percent}
             />
           </div>
