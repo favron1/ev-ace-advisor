@@ -14,3 +14,6 @@ verify_jwt = false
 
 [functions.analyze-value-bets]
 verify_jwt = false
+
+[functions.analyze-racing-bets]
+verify_jwt = false
