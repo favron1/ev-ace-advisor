@@ -2,7 +2,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Trash2, Receipt, X, Check, XCircle, Clock, Send, ListChecks } from "lucide-react";
+import { Trash2, Receipt, X, Check, XCircle, Clock, Send, ListChecks, RefreshCw, Loader2 } from "lucide-react";
 import { useBetSlip } from "@/contexts/BetSlipContext";
 import { cn } from "@/lib/utils";
 
@@ -15,6 +15,7 @@ export function BetSlipDrawer() {
     updateStake,
     updateOdds,
     placeBets,
+    checkResults,
     updateResult,
     undoResult,
     clearSlip,
@@ -24,7 +25,9 @@ export function BetSlipDrawer() {
     winCount,
     lossCount,
     isOpen,
-    setIsOpen
+    setIsOpen,
+    isChecking,
+    isPlacing
   } = useBetSlip();
 
   const formatTime = (isoString?: string) => {
@@ -163,9 +166,14 @@ export function BetSlipDrawer() {
                   <Button 
                     className="flex-1 bg-profit hover:bg-profit/90 text-background"
                     onClick={placeBets}
+                    disabled={isPlacing}
                   >
-                    <Send className="h-4 w-4 mr-2" />
-                    Place Bets
+                    {isPlacing ? (
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                      <Send className="h-4 w-4 mr-2" />
+                    )}
+                    {isPlacing ? 'Placing...' : 'Place Bets'}
                   </Button>
                 </div>
               </div>
@@ -191,7 +199,7 @@ export function BetSlipDrawer() {
                       <div className="flex-1">
                         <p className="text-xs text-muted-foreground">{bet.league}</p>
                         <p className="font-medium text-foreground text-sm">{bet.match}</p>
-                        <p className="text-xs text-muted-foreground">{formatTime(bet.commenceTime)}</p>
+                        <p className="text-xs text-muted-foreground">{formatTime(bet.commenceTime || bet.placedAt)}</p>
                       </div>
                       <div className="px-2 py-1 rounded text-xs font-medium bg-primary/20 text-primary">
                         PLACED
@@ -200,7 +208,7 @@ export function BetSlipDrawer() {
 
                     <div className="flex items-center justify-between">
                       <p className="text-sm font-medium text-primary">{bet.selection}</p>
-                      <span className="text-xs text-muted-foreground">@ {bet.bookmaker}</span>
+                      <span className="text-xs text-muted-foreground">@ {bet.bookmaker || 'Best odds'}</span>
                     </div>
 
                     <div className="flex items-center justify-between text-sm">
@@ -238,13 +246,26 @@ export function BetSlipDrawer() {
             </div>
 
             {placedBets.length > 0 && (
-              <div className="border-t border-border pt-4">
+              <div className="border-t border-border pt-4 space-y-3">
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-muted-foreground">Total at Risk</span>
                   <span className="font-mono font-medium text-foreground">
                     ${placedBets.reduce((sum, b) => sum + b.stake, 0).toFixed(2)}
                   </span>
                 </div>
+                <Button 
+                  variant="outline" 
+                  className="w-full"
+                  onClick={checkResults}
+                  disabled={isChecking}
+                >
+                  {isChecking ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                  )}
+                  {isChecking ? 'Checking...' : 'Check Results Automatically'}
+                </Button>
               </div>
             )}
           </TabsContent>
