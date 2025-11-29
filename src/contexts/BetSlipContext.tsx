@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, ReactNode, useEffect, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
+import { User } from "@supabase/supabase-js";
 
 export type BetStatus = 'draft' | 'placed' | 'won' | 'lost';
 
@@ -52,50 +53,77 @@ export function BetSlipProvider({ children }: { children: ReactNode }) {
   const [isOpen, setIsOpen] = useState(false);
   const [isChecking, setIsChecking] = useState(false);
   const [isPlacing, setIsPlacing] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
   const { toast } = useToast();
 
-  // Load bets from database on mount
-  useEffect(() => {
-    const loadBetsFromDB = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+  // Load bets from database
+  const loadBetsFromDB = useCallback(async (userId: string) => {
+    console.log('Loading bets for user:', userId);
+    
+    const { data: dbBets, error } = await supabase
+      .from('bet_history')
+      .select('*')
+      .eq('user_id', userId)
+      .order('placed_at', { ascending: false });
 
-      const { data: dbBets, error } = await supabase
-        .from('bet_history')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('placed_at', { ascending: false });
+    if (error) {
+      console.error('Error loading bets:', error);
+      return;
+    }
 
-      if (error) {
-        console.error('Error loading bets:', error);
-        return;
-      }
+    console.log('Loaded bets from DB:', dbBets);
 
-      if (dbBets && dbBets.length > 0) {
-        const loadedBets: SlipBet[] = dbBets.map(bet => ({
-          id: bet.id,
-          dbId: bet.id,
-          match: bet.match_description,
-          selection: bet.selection,
-          odds: Number(bet.odds),
-          stake: Number(bet.stake),
-          league: '',
-          commenceTime: bet.placed_at || '',
-          bookmaker: '',
-          status: bet.status === 'pending' ? 'placed' : bet.status as BetStatus,
-          profitLoss: bet.profit_loss ? Number(bet.profit_loss) : undefined,
-          placedAt: bet.placed_at || undefined
-        }));
-        setSlipBets(prev => {
-          // Merge with existing draft bets
-          const drafts = prev.filter(b => b.status === 'draft');
-          return [...drafts, ...loadedBets];
-        });
-      }
-    };
-
-    loadBetsFromDB();
+    if (dbBets && dbBets.length > 0) {
+      const loadedBets: SlipBet[] = dbBets.map(bet => ({
+        id: bet.id,
+        dbId: bet.id,
+        match: bet.match_description,
+        selection: bet.selection,
+        odds: Number(bet.odds),
+        stake: Number(bet.stake),
+        league: '',
+        commenceTime: bet.placed_at || '',
+        bookmaker: '',
+        status: bet.status === 'pending' ? 'placed' : bet.status as BetStatus,
+        profitLoss: bet.profit_loss ? Number(bet.profit_loss) : undefined,
+        placedAt: bet.placed_at || undefined
+      }));
+      setSlipBets(prev => {
+        // Keep only draft bets from local state, add DB bets
+        const drafts = prev.filter(b => b.status === 'draft');
+        return [...drafts, ...loadedBets];
+      });
+    }
   }, []);
+
+  // Listen for auth state changes
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      console.log('Auth state changed:', event, session?.user?.id);
+      setUser(session?.user ?? null);
+      
+      if (session?.user) {
+        // Defer the DB call to avoid deadlock
+        setTimeout(() => {
+          loadBetsFromDB(session.user.id);
+        }, 0);
+      } else {
+        // Clear non-draft bets when logged out
+        setSlipBets(prev => prev.filter(b => b.status === 'draft'));
+      }
+    });
+
+    // Check for existing session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      console.log('Initial session check:', session?.user?.id);
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        loadBetsFromDB(session.user.id);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, [loadBetsFromDB]);
 
   const addToSlip = (bet: Omit<SlipBet, "stake" | "status" | "profitLoss" | "placedAt">) => {
     if (!slipBets.find(b => b.id === bet.id)) {
