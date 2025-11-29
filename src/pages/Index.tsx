@@ -10,12 +10,12 @@ import { BetHistory } from "@/components/dashboard/BetHistory";
 import { useBetSlip } from "@/contexts/BetSlipContext";
 
 const Index = () => {
-  const { slipBets, totalStake, potentialReturn } = useBetSlip();
+  const { slipBets, pendingBets, settledBets, totalProfit, winCount, totalStake } = useBetSlip();
   
-  // Calculate stats from bet slips (currently all pending, so profit-related stats are 0)
-  const totalProfit = 0; // No settled bets yet
-  const winRate = 0; // No settled bets yet
-  const roi = 0; // No settled bets yet
+  // Calculate stats from settled bets
+  const winRate = settledBets.length > 0 ? (winCount / settledBets.length * 100) : 0;
+  const totalStaked = settledBets.reduce((sum, b) => sum + b.stake, 0);
+  const roi = totalStaked > 0 ? (totalProfit / totalStaked * 100) : 0;
   const avgEdge = slipBets.length > 0 
     ? (slipBets.reduce((sum, b) => sum + ((b.odds - 1) / b.odds * 100), 0) / slipBets.length)
     : 0;
@@ -30,29 +30,29 @@ const Index = () => {
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
             <StatCard
               title="Total Profit"
-              value={`$${totalProfit.toFixed(2)}`}
-              change={slipBets.length > 0 ? `${slipBets.length} pending bet${slipBets.length !== 1 ? 's' : ''}` : "No bets placed"}
-              changeType="neutral"
+              value={`${totalProfit >= 0 ? '+' : ''}$${totalProfit.toFixed(2)}`}
+              change={settledBets.length > 0 ? `${settledBets.length} settled bet${settledBets.length !== 1 ? 's' : ''}` : "No settled bets"}
+              changeType={totalProfit > 0 ? "profit" : totalProfit < 0 ? "loss" : "neutral"}
               icon={DollarSign}
             />
             <StatCard
               title="Win Rate"
               value={`${winRate.toFixed(1)}%`}
-              change="No settled bets yet"
-              changeType="neutral"
+              change={settledBets.length > 0 ? `${winCount}W - ${settledBets.length - winCount}L` : "No settled bets"}
+              changeType={winRate >= 50 ? "profit" : winRate > 0 ? "loss" : "neutral"}
               icon={Target}
             />
             <StatCard
               title="ROI"
-              value={`${roi.toFixed(1)}%`}
-              change="No settled bets yet"
-              changeType="neutral"
+              value={`${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%`}
+              change={totalStaked > 0 ? `On $${totalStaked.toFixed(0)} staked` : "No settled bets"}
+              changeType={roi > 0 ? "profit" : roi < 0 ? "loss" : "neutral"}
               icon={TrendingUp}
             />
             <StatCard
               title="Avg Edge"
               value={`${avgEdge.toFixed(1)}%`}
-              change={slipBets.length > 0 ? `From ${slipBets.length} selection${slipBets.length !== 1 ? 's' : ''}` : "Add bets to calculate"}
+              change={pendingBets.length > 0 ? `${pendingBets.length} pending bet${pendingBets.length !== 1 ? 's' : ''}` : "Add bets to calculate"}
               changeType={avgEdge > 0 ? "profit" : "neutral"}
               icon={Percent}
             />
