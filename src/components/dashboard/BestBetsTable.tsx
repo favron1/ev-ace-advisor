@@ -3,11 +3,12 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { CheckCircle2, XCircle, Filter, Info, RefreshCw, Loader2 } from "lucide-react";
+import { CheckCircle2, XCircle, Filter, Info, RefreshCw, Loader2, Plus, Check, Clock, Calendar } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
+import { useBetSlip } from "@/contexts/BetSlipContext";
 import type { ConfidenceLevel } from "@/types/betting";
 
 interface LiveBet {
@@ -40,6 +41,7 @@ interface DisplayBet {
   meets_criteria: boolean;
   bookmaker: string;
   commenceTime: string;
+  status: "upcoming" | "live" | "resulted";
 }
 
 const getConfidenceBadge = (confidence: ConfidenceLevel) => {
@@ -53,35 +55,55 @@ const getConfidenceBadge = (confidence: ConfidenceLevel) => {
   }
 };
 
+const getStatusBadge = (status: string) => {
+  switch (status) {
+    case "live":
+      return <Badge className="bg-loss/20 text-loss border-loss/30 animate-pulse">LIVE</Badge>;
+    case "resulted":
+      return <Badge className="bg-muted text-muted-foreground border-border">Ended</Badge>;
+    default:
+      return null;
+  }
+};
+
 const mapConfidence = (conf: "high" | "medium" | "low"): ConfidenceLevel => {
   if (conf === "medium") return "moderate";
   return conf as ConfidenceLevel;
 };
 
 const calculateStake = (edge: number, confidence: string): number => {
-  // Kelly-inspired stake calculation
   const baseStake = edge / 100;
   const confMultiplier = confidence === "high" ? 1.5 : confidence === "medium" ? 1 : 0.5;
   return Math.min(Math.max(baseStake * confMultiplier * 10, 0.5), 5);
 };
 
-const formatTime = (isoString?: string) => {
-  if (!isoString) return '';
+const getMatchStatus = (commenceTime: string): "upcoming" | "live" | "resulted" => {
+  const now = new Date();
+  const matchTime = new Date(commenceTime);
+  const matchEndEstimate = new Date(matchTime.getTime() + 2 * 60 * 60 * 1000); // +2 hours
+  
+  if (now < matchTime) return "upcoming";
+  if (now >= matchTime && now <= matchEndEstimate) return "live";
+  return "resulted";
+};
+
+const formatDateTime = (isoString?: string) => {
+  if (!isoString) return { date: '', time: '' };
   const date = new Date(isoString);
-  return date.toLocaleDateString('en-GB', { 
-    day: 'numeric', 
-    month: 'short',
-    hour: '2-digit',
-    minute: '2-digit'
-  });
+  return {
+    date: date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }),
+    time: date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+  };
 };
 
 export function BestBetsTable() {
   const [filter, setFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<string>("all");
   const [bets, setBets] = useState<DisplayBet[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const { toast } = useToast();
+  const { addToSlip, isInSlip } = useBetSlip();
 
   const fetchLiveOdds = async () => {
     setLoading(true);
@@ -99,23 +121,27 @@ export function BestBetsTable() {
       }
 
       if (data?.bets) {
-        const transformedBets: DisplayBet[] = data.bets.map((bet: LiveBet) => ({
-          id: bet.id,
-          match: bet.event,
-          league: bet.sport || 'Football',
-          market: '1x2',
-          selection: bet.selection,
-          offered_odds: bet.odds,
-          fair_odds: bet.fairOdds,
-          expected_value: bet.ev / 100,
-          edge: bet.edge,
-          confidence: mapConfidence(bet.confidence),
-          suggested_stake_percent: calculateStake(bet.edge, bet.confidence),
-          reasoning: `Best odds at ${bet.bookmaker}. Fair odds calculated from ${data.bets.length > 1 ? 'multiple bookmakers' : 'market average'}. Kickoff: ${formatTime(bet.commenceTime)}`,
-          meets_criteria: bet.edge > 2,
-          bookmaker: bet.bookmaker || 'Unknown',
-          commenceTime: bet.commenceTime || '',
-        }));
+        const transformedBets: DisplayBet[] = data.bets.map((bet: LiveBet) => {
+          const status = getMatchStatus(bet.commenceTime || '');
+          return {
+            id: bet.id,
+            match: bet.event,
+            league: bet.sport || 'Football',
+            market: '1x2',
+            selection: bet.selection,
+            offered_odds: bet.odds,
+            fair_odds: bet.fairOdds,
+            expected_value: bet.ev / 100,
+            edge: bet.edge,
+            confidence: mapConfidence(bet.confidence),
+            suggested_stake_percent: calculateStake(bet.edge, bet.confidence),
+            reasoning: `Best odds at ${bet.bookmaker}.`,
+            meets_criteria: bet.edge > 2,
+            bookmaker: bet.bookmaker || 'Unknown',
+            commenceTime: bet.commenceTime || '',
+            status: status,
+          };
+        });
 
         setBets(transformedBets);
         setLastUpdated(new Date());
@@ -141,11 +167,32 @@ export function BestBetsTable() {
   }, []);
 
   const filteredBets = bets.filter(bet => {
-    if (filter === "all") return bet.meets_criteria;
-    if (filter === "high") return bet.confidence === "high" && bet.meets_criteria;
-    if (filter === "value") return bet.expected_value > 0.1 && bet.meets_criteria;
-    return bet.meets_criteria;
+    // Confidence filter
+    let passesConfidence = true;
+    if (filter === "high") passesConfidence = bet.confidence === "high" && bet.meets_criteria;
+    else if (filter === "value") passesConfidence = bet.expected_value > 0.1 && bet.meets_criteria;
+    else passesConfidence = bet.meets_criteria;
+
+    // Status filter
+    let passesStatus = true;
+    if (statusFilter === "live") passesStatus = bet.status === "live";
+    else if (statusFilter === "upcoming") passesStatus = bet.status === "upcoming";
+    else if (statusFilter === "resulted") passesStatus = bet.status === "resulted";
+
+    return passesConfidence && passesStatus;
   });
+
+  const handleAddToSlip = (bet: DisplayBet) => {
+    addToSlip({
+      id: bet.id,
+      match: bet.match,
+      selection: bet.selection,
+      odds: bet.offered_odds,
+      league: bet.league,
+      commenceTime: bet.commenceTime,
+      bookmaker: bet.bookmaker,
+    });
+  };
 
   return (
     <div className="stat-card space-y-6">
@@ -159,7 +206,7 @@ export function BestBetsTable() {
             }
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <Button
             variant="outline"
             size="sm"
@@ -174,9 +221,23 @@ export function BestBetsTable() {
             )}
             {loading ? 'Loading...' : 'Refresh'}
           </Button>
+          
+          <Select value={statusFilter} onValueChange={setStatusFilter}>
+            <SelectTrigger className="w-[140px] bg-muted border-border">
+              <Clock className="h-4 w-4 mr-2 text-muted-foreground" />
+              <SelectValue placeholder="Status" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Games</SelectItem>
+              <SelectItem value="upcoming">Upcoming</SelectItem>
+              <SelectItem value="live">In Progress</SelectItem>
+              <SelectItem value="resulted">Resulted</SelectItem>
+            </SelectContent>
+          </Select>
+
           <Filter className="h-4 w-4 text-muted-foreground" />
           <Select value={filter} onValueChange={setFilter}>
-            <SelectTrigger className="w-[180px] bg-muted border-border">
+            <SelectTrigger className="w-[160px] bg-muted border-border">
               <SelectValue placeholder="Filter bets" />
             </SelectTrigger>
             <SelectContent>
@@ -199,6 +260,12 @@ export function BestBetsTable() {
           <Table>
             <TableHeader>
               <TableRow className="border-border hover:bg-transparent">
+                <TableHead className="text-muted-foreground w-[100px]">
+                  <div className="flex items-center gap-1">
+                    <Calendar className="h-3 w-3" />
+                    Time
+                  </div>
+                </TableHead>
                 <TableHead className="text-muted-foreground">Match</TableHead>
                 <TableHead className="text-muted-foreground">Selection</TableHead>
                 <TableHead className="text-muted-foreground text-center">Edge</TableHead>
@@ -220,53 +287,90 @@ export function BestBetsTable() {
                 <TableHead className="text-muted-foreground text-center">Bookmaker</TableHead>
                 <TableHead className="text-muted-foreground text-center">Confidence</TableHead>
                 <TableHead className="text-muted-foreground text-center">Stake %</TableHead>
+                <TableHead className="text-muted-foreground text-center">Action</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filteredBets.map((bet) => (
-                <TableRow key={bet.id} className="border-border hover:bg-muted/30 transition-colors">
-                  <TableCell>
-                    <div>
-                      <p className="font-medium text-foreground">{bet.match}</p>
-                      <p className="text-xs text-muted-foreground">{bet.league}</p>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <p className="font-medium text-primary">{bet.selection}</p>
-                  </TableCell>
-                  <TableCell className="text-center">
-                    <span className={cn(
-                      "font-mono font-bold",
-                      bet.edge >= 15 ? "text-profit" : bet.edge >= 8 ? "text-warning" : "text-foreground"
-                    )}>
-                      +{bet.edge.toFixed(1)}%
-                    </span>
-                  </TableCell>
-                  <TableCell className="text-center">
-                    {bet.meets_criteria ? (
-                      <CheckCircle2 className="h-5 w-5 text-profit mx-auto" />
-                    ) : (
-                      <XCircle className="h-5 w-5 text-loss mx-auto" />
-                    )}
-                  </TableCell>
-                  <TableCell className="text-center font-mono text-muted-foreground">{bet.fair_odds.toFixed(2)}</TableCell>
-                  <TableCell className="text-center">
-                    <span className="font-mono font-bold text-profit">{bet.offered_odds.toFixed(2)}</span>
-                  </TableCell>
-                  <TableCell className="text-center">
-                    <span className="text-xs text-muted-foreground">{bet.bookmaker}</span>
-                  </TableCell>
-                  <TableCell className="text-center">{getConfidenceBadge(bet.confidence)}</TableCell>
-                  <TableCell className="text-center">
-                    <span className={cn(
-                      "font-mono font-medium",
-                      bet.suggested_stake_percent >= 3 ? "text-profit" : "text-foreground"
-                    )}>
-                      {bet.suggested_stake_percent.toFixed(1)}%
-                    </span>
-                  </TableCell>
-                </TableRow>
-              ))}
+              {filteredBets.map((bet) => {
+                const { date, time } = formatDateTime(bet.commenceTime);
+                const inSlip = isInSlip(bet.id);
+                
+                return (
+                  <TableRow key={bet.id} className="border-border hover:bg-muted/30 transition-colors">
+                    <TableCell>
+                      <div className="flex flex-col items-start gap-1">
+                        <span className="text-xs font-medium text-foreground">{date}</span>
+                        <span className="text-xs text-muted-foreground">{time}</span>
+                        {getStatusBadge(bet.status)}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div>
+                        <p className="font-medium text-foreground">{bet.match}</p>
+                        <p className="text-xs text-muted-foreground">{bet.league}</p>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <p className="font-medium text-primary">{bet.selection}</p>
+                    </TableCell>
+                    <TableCell className="text-center">
+                      <span className={cn(
+                        "font-mono font-bold",
+                        bet.edge >= 15 ? "text-profit" : bet.edge >= 8 ? "text-warning" : "text-foreground"
+                      )}>
+                        +{bet.edge.toFixed(1)}%
+                      </span>
+                    </TableCell>
+                    <TableCell className="text-center">
+                      {bet.meets_criteria ? (
+                        <CheckCircle2 className="h-5 w-5 text-profit mx-auto" />
+                      ) : (
+                        <XCircle className="h-5 w-5 text-loss mx-auto" />
+                      )}
+                    </TableCell>
+                    <TableCell className="text-center font-mono text-muted-foreground">{bet.fair_odds.toFixed(2)}</TableCell>
+                    <TableCell className="text-center">
+                      <span className="font-mono font-bold text-profit">{bet.offered_odds.toFixed(2)}</span>
+                    </TableCell>
+                    <TableCell className="text-center">
+                      <span className="text-xs text-muted-foreground">{bet.bookmaker}</span>
+                    </TableCell>
+                    <TableCell className="text-center">{getConfidenceBadge(bet.confidence)}</TableCell>
+                    <TableCell className="text-center">
+                      <span className={cn(
+                        "font-mono font-medium",
+                        bet.suggested_stake_percent >= 3 ? "text-profit" : "text-foreground"
+                      )}>
+                        {bet.suggested_stake_percent.toFixed(1)}%
+                      </span>
+                    </TableCell>
+                    <TableCell className="text-center">
+                      <Button
+                        variant={inSlip ? "secondary" : "outline"}
+                        size="sm"
+                        onClick={() => handleAddToSlip(bet)}
+                        disabled={inSlip || bet.status === "resulted"}
+                        className={cn(
+                          "gap-1",
+                          inSlip && "bg-profit/20 text-profit border-profit/30"
+                        )}
+                      >
+                        {inSlip ? (
+                          <>
+                            <Check className="h-3 w-3" />
+                            Added
+                          </>
+                        ) : (
+                          <>
+                            <Plus className="h-3 w-3" />
+                            Add
+                          </>
+                        )}
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
         </div>
