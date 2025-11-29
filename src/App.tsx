@@ -7,6 +7,7 @@ import { BetSlipProvider } from "@/contexts/BetSlipContext";
 import { BetSlipDrawer } from "@/components/dashboard/BetSlipDrawer";
 import Index from "./pages/Index";
 import Auth from "./pages/Auth";
+import DailyBets from "./pages/DailyBets";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -22,6 +23,7 @@ const App = () => (
           <Routes>
             <Route path="/" element={<Index />} />
             <Route path="/auth" element={<Auth />} />
+            <Route path="/daily-bets" element={<DailyBets />} />
             {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
             <Route path="*" element={<NotFound />} />
           </Routes>
