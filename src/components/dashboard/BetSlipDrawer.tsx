@@ -201,8 +201,18 @@ export function BetSlipDrawer() {
                         <p className="font-medium text-foreground text-sm">{bet.match}</p>
                         <p className="text-xs text-muted-foreground">{formatTime(bet.commenceTime || bet.placedAt)}</p>
                       </div>
-                      <div className="px-2 py-1 rounded text-xs font-medium bg-primary/20 text-primary">
-                        PLACED
+                      <div className="flex items-center gap-1">
+                        <div className="px-2 py-1 rounded text-xs font-medium bg-primary/20 text-primary">
+                          PLACED
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-muted-foreground hover:text-loss"
+                          onClick={() => removeFromSlip(bet.id)}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </Button>
                       </div>
                     </div>
 
@@ -309,11 +319,21 @@ export function BetSlipDrawer() {
                         <p className="text-xs text-muted-foreground">{bet.league}</p>
                         <p className="font-medium text-foreground text-sm">{bet.match}</p>
                       </div>
-                      <div className={cn(
-                        "px-2 py-1 rounded text-xs font-medium",
-                        bet.status === 'won' ? "bg-profit/20 text-profit" : "bg-loss/20 text-loss"
-                      )}>
-                        {bet.status === 'won' ? 'WON' : 'LOST'}
+                      <div className="flex items-center gap-1">
+                        <div className={cn(
+                          "px-2 py-1 rounded text-xs font-medium",
+                          bet.status === 'won' ? "bg-profit/20 text-profit" : "bg-loss/20 text-loss"
+                        )}>
+                          {bet.status === 'won' ? 'WON' : 'LOST'}
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-muted-foreground hover:text-loss"
+                          onClick={() => removeFromSlip(bet.id)}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </Button>
                       </div>
                     </div>
 

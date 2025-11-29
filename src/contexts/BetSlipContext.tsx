@@ -132,8 +132,32 @@ export function BetSlipProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const removeFromSlip = (id: string) => {
+  const removeFromSlip = async (id: string) => {
+    const bet = slipBets.find(b => b.id === id);
+    
+    // Delete from database if it has a dbId
+    if (bet?.dbId) {
+      const { error } = await supabase
+        .from('bet_history')
+        .delete()
+        .eq('id', bet.dbId);
+      
+      if (error) {
+        console.error('Error deleting bet:', error);
+        toast({
+          title: "Error",
+          description: "Failed to delete bet from database",
+          variant: "destructive"
+        });
+        return;
+      }
+    }
+    
     setSlipBets(prev => prev.filter(b => b.id !== id));
+    toast({
+      title: "Bet Deleted",
+      description: "Bet has been removed"
+    });
   };
 
   const updateStake = (id: string, stake: number) => {
