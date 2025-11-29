@@ -1,83 +1,100 @@
-export interface RaceRunner {
-  id: string;
-  name: string;
-  number: number;
-  barrier: number;
-  jockey?: string;
-  trainer?: string;
-  weight?: number;
-  form: string;
-  lastStarts: string[];
-  odds: number;
-  impliedProbability: number;
+export interface RunnerValueRating {
   actualProbability: number;
-  edge: number;
-  expectedValue: number;
-  confidence: 'low' | 'moderate' | 'high';
-  suggestedStakePercent: number;
-  reasoning: string;
+  impliedProbability: number;
+  offeredOdds: number;
+  ev: number;
   meetsCriteria: boolean;
 }
 
+export interface RaceRunner {
+  runnerName: string;
+  runnerNumber: number;
+  trapOrBarrier: number;
+  jockey?: string;
+  trainer?: string;
+  weightKg?: number;
+  recentForm: string[];
+  lastRaceTime?: string;
+  surfacePref?: string;
+  classLastRace?: string;
+  daysSinceLastRun?: number;
+  earlySpeed?: 'High' | 'Medium' | 'Low';
+  runningStyle?: 'Front-runner' | 'Stalker' | 'Closer' | 'Rail' | 'Wide';
+  valueRating: RunnerValueRating;
+  confidenceLevel: 'High' | 'Moderate' | 'Low';
+  suggestedBetPercent: string;
+  marketType: 'Win' | 'Place' | 'Each-Way';
+  reasoning: string;
+}
+
 export interface Race {
-  id: string;
-  trackName: string;
-  raceNumber: number;
-  raceName: string;
-  distance: number;
-  raceClass: string;
-  raceType: 'horse' | 'greyhound';
-  startTime: string;
+  raceId: string;
+  track: string;
+  sport: 'horse' | 'greyhound';
+  date: string;
+  time: string;
+  raceType: string;
+  distanceM: number;
   trackCondition: string;
   weather: string;
+  raceNumber: number;
   runners: RaceRunner[];
   status: 'upcoming' | 'live' | 'completed';
 }
 
 export interface RaceMeeting {
   id: string;
-  trackName: string;
+  track: string;
   state: string;
   country: string;
-  meetingDate: string;
-  raceType: 'horse' | 'greyhound';
+  date: string;
+  sport: 'horse' | 'greyhound';
   races: Race[];
   weather: string;
   trackCondition: string;
 }
 
-export interface RacingValueBet {
-  id: string;
+export interface RacingBestBet {
   raceId: string;
-  raceName: string;
-  trackName: string;
-  raceNumber: number;
-  raceType: 'horse' | 'greyhound';
-  startTime: string;
-  runnerName: string;
+  match: string;
+  runner: string;
   runnerNumber: number;
-  barrier: number;
+  trapOrBarrier: number;
   jockey?: string;
   trainer?: string;
-  market: 'win' | 'place' | 'each_way';
-  odds: number;
-  impliedProbability: number;
-  actualProbability: number;
-  edge: number;
-  expectedValue: number;
-  fairOdds: number;
-  confidence: 'low' | 'moderate' | 'high';
-  suggestedStakePercent: number;
-  reasoning: string;
-  meetsCriteria: boolean;
-  form: string;
+  market: 'Win' | 'Place' | 'Each-Way';
+  sport: 'horse' | 'greyhound';
+  track: string;
+  raceNumber: number;
+  raceTime: string;
+  distanceM: number;
   trackCondition: string;
-  distance: number;
-  raceClass: string;
+  weather: string;
+  raceType: string;
+  recentForm: string[];
+  earlySpeed?: string;
+  runningStyle?: string;
+  daysSinceLastRun?: number;
+  surfacePref?: string;
+  classLastRace?: string;
+  ev: number;
+  meetsCriteria: boolean;
+  minOdds: number;
+  offeredOdds: number;
+  actualProbability: number;
+  impliedProbability: number;
+  fairOdds: number;
+  edge: number;
+  confidence: 'High' | 'Moderate' | 'Low';
+  suggestedBetPercent: string;
+  reasoning: string;
 }
 
 export interface RacingAnalysis {
-  meetings: RaceMeeting[];
-  valueBets: RacingValueBet[];
+  date: string;
+  sport: 'all' | 'horse' | 'greyhound';
+  races: Race[];
+  bestBets: RacingBestBet[];
   lastUpdated: string;
+  totalRacesAnalyzed: number;
 }

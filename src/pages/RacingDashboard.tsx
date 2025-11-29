@@ -8,17 +8,17 @@ import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { Loader2, RefreshCw, Trophy, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { RacingValueBet } from "@/types/racing";
+import type { RacingBestBet } from "@/types/racing";
 
 export default function RacingDashboard() {
-  const [valueBets, setValueBets] = useState<RacingValueBet[]>([]);
+  const [bestBets, setBestBets] = useState<RacingBestBet[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const { toast } = useToast();
 
   // Filters
   const [raceTypeFilter, setRaceTypeFilter] = useState<'all' | 'horse' | 'greyhound'>('all');
-  const [confidenceFilter, setConfidenceFilter] = useState<'all' | 'low' | 'moderate' | 'high'>('all');
+  const [confidenceFilter, setConfidenceFilter] = useState<'all' | 'Low' | 'Moderate' | 'High'>('all');
   const [sortBy, setSortBy] = useState<'ev' | 'edge' | 'odds' | 'time'>('ev');
 
   const fetchRacingBets = async () => {
@@ -37,11 +37,11 @@ export default function RacingDashboard() {
       }
 
       if (data) {
-        setValueBets(data.valueBets || []);
+        setBestBets(data.bestBets || []);
         setLastUpdated(new Date());
         toast({
           title: "Updated",
-          description: `Found ${data.valueBets?.length || 0} value bets`,
+          description: `Found ${data.bestBets?.length || 0} value bets across ${data.totalRacesAnalyzed || 0} races`,
         });
       }
     } catch (err) {
@@ -64,32 +64,37 @@ export default function RacingDashboard() {
   }, []);
 
   // Filter and sort bets
-  const filteredBets = valueBets
-    .filter(bet => raceTypeFilter === 'all' || bet.raceType === raceTypeFilter)
-    .filter(bet => confidenceFilter === 'all' || bet.confidence === confidenceFilter)
+  const filteredBets = bestBets
+    .filter(bet => raceTypeFilter === 'all' || bet.sport === raceTypeFilter)
+    .filter(bet => {
+      if (confidenceFilter === 'all') return true;
+      if (confidenceFilter === 'High') return bet.confidence === 'High';
+      if (confidenceFilter === 'Moderate') return bet.confidence === 'High' || bet.confidence === 'Moderate';
+      return true;
+    })
     .sort((a, b) => {
       switch (sortBy) {
-        case 'ev': return b.expectedValue - a.expectedValue;
+        case 'ev': return b.ev - a.ev;
         case 'edge': return b.edge - a.edge;
-        case 'odds': return a.odds - b.odds;
-        case 'time': return new Date(a.startTime).getTime() - new Date(b.startTime).getTime();
+        case 'odds': return a.offeredOdds - b.offeredOdds;
+        case 'time': return a.raceTime.localeCompare(b.raceTime);
         default: return 0;
       }
     });
 
   const exportToCSV = () => {
-    const headers = ['Track', 'Race', 'Runner', 'Type', 'Odds', 'Edge %', 'EV %', 'Confidence', 'Stake %', 'Start Time'];
+    const headers = ['Match', 'Runner', 'Type', 'Odds', 'EV', 'Edge %', 'Confidence', 'Stake', 'Time', 'Reasoning'];
     const rows = filteredBets.map(bet => [
-      bet.trackName,
-      `R${bet.raceNumber}`,
-      bet.runnerName,
-      bet.raceType,
-      bet.odds,
-      bet.edge,
-      bet.expectedValue,
+      bet.match,
+      `${bet.runnerNumber}. ${bet.runner}`,
+      bet.sport,
+      bet.offeredOdds,
+      (bet.ev * 100).toFixed(0) + '%',
+      bet.edge.toFixed(1) + '%',
       bet.confidence,
-      bet.suggestedStakePercent,
-      new Date(bet.startTime).toLocaleString(),
+      bet.suggestedBetPercent,
+      bet.raceTime,
+      `"${bet.reasoning}"`,
     ]);
     
     const csv = [headers.join(','), ...rows.map(row => row.join(','))].join('\n');
@@ -97,7 +102,7 @@ export default function RacingDashboard() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `racing-bets-${new Date().toISOString().split('T')[0]}.csv`;
+    a.download = `racing-best-bets-${new Date().toISOString().split('T')[0]}.csv`;
     a.click();
   };
 
@@ -151,7 +156,7 @@ export default function RacingDashboard() {
         </div>
 
         {/* Summary Cards */}
-        <RacingSummary bets={valueBets} />
+        <RacingSummary bets={bestBets} />
 
         {/* Main Content Grid */}
         <div className="grid gap-6 lg:grid-cols-[300px_1fr]">
@@ -168,12 +173,12 @@ export default function RacingDashboard() {
             />
             
             {/* Next to Jump */}
-            <RacingNextToJump bets={valueBets} />
+            <RacingNextToJump bets={bestBets} />
           </div>
 
           {/* Main Table */}
           <div className="stat-card">
-            {loading && valueBets.length === 0 ? (
+            {loading && bestBets.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16">
                 <Loader2 className="h-12 w-12 animate-spin text-primary mb-4" />
                 <p className="text-muted-foreground">Analyzing racing markets...</p>

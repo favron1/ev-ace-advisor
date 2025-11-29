@@ -13,8 +13,8 @@ import { cn } from "@/lib/utils";
 interface RacingFiltersProps {
   raceTypeFilter: 'all' | 'horse' | 'greyhound';
   setRaceTypeFilter: (value: 'all' | 'horse' | 'greyhound') => void;
-  confidenceFilter: 'all' | 'low' | 'moderate' | 'high';
-  setConfidenceFilter: (value: 'all' | 'low' | 'moderate' | 'high') => void;
+  confidenceFilter: 'all' | 'Low' | 'Moderate' | 'High';
+  setConfidenceFilter: (value: 'all' | 'Low' | 'Moderate' | 'High') => void;
   sortBy: 'ev' | 'edge' | 'odds' | 'time';
   setSortBy: (value: 'ev' | 'edge' | 'odds' | 'time') => void;
 }
@@ -79,15 +79,15 @@ export function RacingFilters({
       {/* Confidence Filter */}
       <div className="space-y-2">
         <Label className="text-sm text-muted-foreground">Confidence Level</Label>
-        <Select value={confidenceFilter} onValueChange={(v) => setConfidenceFilter(v as any)}>
+        <Select value={confidenceFilter} onValueChange={(v) => setConfidenceFilter(v as 'all' | 'Low' | 'Moderate' | 'High')}>
           <SelectTrigger className="w-full">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All Levels</SelectItem>
-            <SelectItem value="high">High Only</SelectItem>
-            <SelectItem value="moderate">Moderate & Above</SelectItem>
-            <SelectItem value="low">Including Low</SelectItem>
+            <SelectItem value="High">High Only</SelectItem>
+            <SelectItem value="Moderate">Moderate & Above</SelectItem>
+            <SelectItem value="Low">Including Low</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -98,7 +98,7 @@ export function RacingFilters({
           <ArrowUpDown className="h-3 w-3" />
           Sort By
         </Label>
-        <Select value={sortBy} onValueChange={(v) => setSortBy(v as any)}>
+        <Select value={sortBy} onValueChange={(v) => setSortBy(v as 'ev' | 'edge' | 'odds' | 'time')}>
           <SelectTrigger className="w-full">
             <SelectValue />
           </SelectTrigger>

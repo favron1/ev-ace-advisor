@@ -1,37 +1,16 @@
 import { Clock, Trophy, Dog } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { RacingValueBet } from "@/types/racing";
+import type { RacingBestBet } from "@/types/racing";
 
 interface RacingNextToJumpProps {
-  bets: RacingValueBet[];
+  bets: RacingBestBet[];
 }
 
 export function RacingNextToJump({ bets }: RacingNextToJumpProps) {
-  const now = new Date();
-  
-  // Get upcoming races sorted by time
-  const upcomingBets = bets
-    .filter(b => new Date(b.startTime) > now)
-    .sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime())
+  // Sort by race time
+  const upcomingBets = [...bets]
+    .sort((a, b) => a.raceTime.localeCompare(b.raceTime))
     .slice(0, 5);
-
-  const formatTimeUntil = (startTime: string) => {
-    const start = new Date(startTime);
-    const diff = start.getTime() - now.getTime();
-    const mins = Math.floor(diff / 60000);
-    
-    if (mins < 60) return `${mins}m`;
-    const hours = Math.floor(mins / 60);
-    const remainingMins = mins % 60;
-    return `${hours}h ${remainingMins}m`;
-  };
-
-  const formatTime = (isoString: string) => {
-    return new Date(isoString).toLocaleTimeString('en-GB', {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  };
 
   if (upcomingBets.length === 0) {
     return (
@@ -57,7 +36,7 @@ export function RacingNextToJump({ bets }: RacingNextToJumpProps) {
       <div className="space-y-3">
         {upcomingBets.map((bet, index) => (
           <div
-            key={bet.id}
+            key={bet.raceId + bet.runner}
             className={cn(
               "flex items-center gap-3 p-2 rounded-lg border transition-all",
               index === 0 
@@ -67,9 +46,9 @@ export function RacingNextToJump({ bets }: RacingNextToJumpProps) {
           >
             <div className={cn(
               "flex items-center justify-center w-8 h-8 rounded-lg",
-              bet.raceType === 'horse' ? "bg-warning/10" : "bg-blue-400/10"
+              bet.sport === 'horse' ? "bg-warning/10" : "bg-blue-400/10"
             )}>
-              {bet.raceType === 'horse' ? (
+              {bet.sport === 'horse' ? (
                 <Trophy className="h-4 w-4 text-warning" />
               ) : (
                 <Dog className="h-4 w-4 text-blue-400" />
@@ -78,10 +57,10 @@ export function RacingNextToJump({ bets }: RacingNextToJumpProps) {
             
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-foreground truncate">
-                {bet.trackName} R{bet.raceNumber}
+                {bet.track} R{bet.raceNumber}
               </p>
               <p className="text-xs text-muted-foreground truncate">
-                {bet.runnerNumber}. {bet.runnerName}
+                {bet.runnerNumber}. {bet.runner}
               </p>
             </div>
             
@@ -90,10 +69,10 @@ export function RacingNextToJump({ bets }: RacingNextToJumpProps) {
                 "text-sm font-mono font-bold",
                 index === 0 ? "text-primary" : "text-foreground"
               )}>
-                {formatTimeUntil(bet.startTime)}
+                {bet.raceTime}
               </p>
-              <p className="text-xs text-muted-foreground">
-                {formatTime(bet.startTime)}
+              <p className="text-xs text-profit">
+                +{(bet.ev * 100).toFixed(0)}% EV
               </p>
             </div>
           </div>
