@@ -51,6 +51,7 @@ const DailyBets = () => {
   const [confidenceFilter, setConfidenceFilter] = useState<string>("all");
   const [marketFilter, setMarketFilter] = useState<string>("all");
   const [sortBy, setSortBy] = useState<string>("ev");
+  const [timeFrame, setTimeFrame] = useState<string>("24");
   const { toast } = useToast();
 
   const fetchAnalyzedBets = async () => {
@@ -100,6 +101,13 @@ const DailyBets = () => {
   // Filter and sort bets
   const filteredBets = bets
     .filter(bet => {
+      // Time frame filter
+      const now = new Date();
+      const betTime = new Date(bet.commenceTime);
+      const hoursUntilMatch = (betTime.getTime() - now.getTime()) / (1000 * 60 * 60);
+      const maxHours = parseInt(timeFrame);
+      if (hoursUntilMatch < 0 || hoursUntilMatch > maxHours) return false;
+      
       if (confidenceFilter !== "all" && bet.confidence !== confidenceFilter) return false;
       if (marketFilter !== "all" && bet.market !== marketFilter) return false;
       return true;
@@ -243,6 +251,8 @@ const DailyBets = () => {
           setMarketFilter={setMarketFilter}
           sortBy={sortBy}
           setSortBy={setSortBy}
+          timeFrame={timeFrame}
+          setTimeFrame={setTimeFrame}
         />
 
         {/* Main Table */}
