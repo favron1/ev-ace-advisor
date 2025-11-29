@@ -73,6 +73,19 @@ export function LiveScores() {
     });
   };
 
+  const getMatchMinute = (commenceTime: string) => {
+    const start = new Date(commenceTime).getTime();
+    const now = Date.now();
+    const diffMs = now - start;
+    const diffMins = Math.floor(diffMs / 60000);
+    
+    // Cap at 90+ for regular time, show actual for extra time
+    if (diffMins <= 45) return `${diffMins}'`;
+    if (diffMins <= 60) return `45+${diffMins - 45}'`; // First half stoppage/halftime
+    if (diffMins <= 105) return `${diffMins - 15}'`; // Second half (15 min break)
+    return `90+${diffMins - 105}'`; // Extra time
+  };
+
   const getLeagueColor = (league: string) => {
     if (league.includes('EPL') || league.includes('Premier')) return 'text-purple-400';
     if (league.includes('La Liga')) return 'text-orange-400';
@@ -92,9 +105,14 @@ export function LiveScores() {
           {match.league}
         </span>
         {match.status === 'live' && (
-          <span className="flex items-center gap-1 text-xs font-bold text-profit animate-pulse">
-            <span className="h-2 w-2 rounded-full bg-profit"></span>
-            LIVE
+          <span className="flex items-center gap-2 text-xs font-bold text-profit">
+            <span className="flex items-center gap-1 animate-pulse">
+              <span className="h-2 w-2 rounded-full bg-profit"></span>
+              LIVE
+            </span>
+            <span className="font-mono bg-profit/20 px-1.5 py-0.5 rounded">
+              {getMatchMinute(match.commenceTime)}
+            </span>
           </span>
         )}
         {match.status === 'upcoming' && (
