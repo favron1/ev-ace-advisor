@@ -10,7 +10,7 @@ import { BetHistory } from "@/components/dashboard/BetHistory";
 import { useBetSlip } from "@/contexts/BetSlipContext";
 
 const Index = () => {
-  const { slipBets, pendingBets, settledBets, totalProfit, winCount, totalStake } = useBetSlip();
+  const { slipBets, draftBets, settledBets, totalProfit, winCount, totalStake } = useBetSlip();
   
   // Calculate stats from settled bets
   const winRate = settledBets.length > 0 ? (winCount / settledBets.length * 100) : 0;
@@ -52,7 +52,7 @@ const Index = () => {
             <StatCard
               title="Avg Edge"
               value={`${avgEdge.toFixed(1)}%`}
-              change={pendingBets.length > 0 ? `${pendingBets.length} pending bet${pendingBets.length !== 1 ? 's' : ''}` : "Add bets to calculate"}
+              change={draftBets.length > 0 ? `${draftBets.length} draft bet${draftBets.length !== 1 ? 's' : ''}` : "Add bets to calculate"}
               changeType={avgEdge > 0 ? "profit" : "neutral"}
               icon={Percent}
             />

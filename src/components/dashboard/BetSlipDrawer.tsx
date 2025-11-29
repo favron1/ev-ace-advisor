@@ -2,18 +2,21 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Trash2, Receipt, X, Check, XCircle, Clock } from "lucide-react";
+import { Trash2, Receipt, X, Check, XCircle, Clock, Send, ListChecks } from "lucide-react";
 import { useBetSlip } from "@/contexts/BetSlipContext";
 import { cn } from "@/lib/utils";
 
 export function BetSlipDrawer() {
   const {
-    pendingBets,
+    draftBets,
+    placedBets,
     settledBets,
     removeFromSlip,
     updateStake,
     updateOdds,
+    placeBets,
     updateResult,
+    undoResult,
     clearSlip,
     totalStake,
     potentialReturn,
@@ -47,28 +50,33 @@ export function BetSlipDrawer() {
           </SheetTitle>
         </SheetHeader>
 
-        <Tabs defaultValue="pending" className="flex-1 flex flex-col mt-4">
-          <TabsList className="grid w-full grid-cols-2">
-            <TabsTrigger value="pending" className="gap-2">
-              <Clock className="h-4 w-4" />
-              Pending ({pendingBets.length})
+        <Tabs defaultValue="draft" className="flex-1 flex flex-col mt-4">
+          <TabsList className="grid w-full grid-cols-3">
+            <TabsTrigger value="draft" className="gap-1 text-xs">
+              <Clock className="h-3 w-3" />
+              Draft ({draftBets.length})
             </TabsTrigger>
-            <TabsTrigger value="results" className="gap-2">
-              <Check className="h-4 w-4" />
+            <TabsTrigger value="placed" className="gap-1 text-xs">
+              <Send className="h-3 w-3" />
+              Placed ({placedBets.length})
+            </TabsTrigger>
+            <TabsTrigger value="results" className="gap-1 text-xs">
+              <ListChecks className="h-3 w-3" />
               Results ({settledBets.length})
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="pending" className="flex-1 flex flex-col">
+          {/* Draft Bets Tab */}
+          <TabsContent value="draft" className="flex-1 flex flex-col">
             <div className="flex-1 space-y-4 max-h-[calc(100vh-400px)] overflow-y-auto py-4">
-              {pendingBets.length === 0 ? (
+              {draftBets.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
                   <Receipt className="h-12 w-12 mb-4 opacity-30" />
-                  <p className="font-medium">No pending bets</p>
+                  <p className="font-medium">No draft bets</p>
                   <p className="text-sm">Add selections from the Best Bets table</p>
                 </div>
               ) : (
-                pendingBets.map((bet) => (
+                draftBets.map((bet) => (
                   <div
                     key={bet.id}
                     className="rounded-lg border border-border bg-muted/30 p-4 space-y-3"
@@ -125,8 +133,86 @@ export function BetSlipDrawer() {
                         ${(bet.stake * bet.odds).toFixed(2)}
                       </span>
                     </div>
+                  </div>
+                ))
+              )}
+            </div>
 
-                    <div className="flex gap-2 pt-2">
+            {draftBets.length > 0 && (
+              <div className="border-t border-border pt-4 space-y-4">
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">Total Stake</span>
+                    <span className="font-mono font-medium text-foreground">${totalStake.toFixed(2)}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Total Potential Return</span>
+                    <span className="font-mono font-bold text-profit text-lg">${potentialReturn.toFixed(2)}</span>
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    className="flex-1"
+                    onClick={clearSlip}
+                  >
+                    <Trash2 className="h-4 w-4 mr-2" />
+                    Clear
+                  </Button>
+                  <Button 
+                    className="flex-1 bg-profit hover:bg-profit/90 text-background"
+                    onClick={placeBets}
+                  >
+                    <Send className="h-4 w-4 mr-2" />
+                    Place Bets
+                  </Button>
+                </div>
+              </div>
+            )}
+          </TabsContent>
+
+          {/* Placed Bets Tab */}
+          <TabsContent value="placed" className="flex-1 flex flex-col">
+            <div className="flex-1 space-y-3 max-h-[calc(100vh-400px)] overflow-y-auto py-4">
+              {placedBets.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+                  <Send className="h-12 w-12 mb-4 opacity-30" />
+                  <p className="font-medium">No placed bets</p>
+                  <p className="text-sm">Place bets from the Draft tab</p>
+                </div>
+              ) : (
+                placedBets.map((bet) => (
+                  <div
+                    key={bet.id}
+                    className="rounded-lg border border-primary/30 bg-primary/5 p-4 space-y-3"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1">
+                        <p className="text-xs text-muted-foreground">{bet.league}</p>
+                        <p className="font-medium text-foreground text-sm">{bet.match}</p>
+                        <p className="text-xs text-muted-foreground">{formatTime(bet.commenceTime)}</p>
+                      </div>
+                      <div className="px-2 py-1 rounded text-xs font-medium bg-primary/20 text-primary">
+                        PLACED
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-medium text-primary">{bet.selection}</p>
+                      <span className="text-xs text-muted-foreground">@ {bet.bookmaker}</span>
+                    </div>
+
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-muted-foreground">
+                        ${bet.stake.toFixed(2)} @ {bet.odds}
+                      </span>
+                      <span className="font-mono font-medium text-foreground">
+                        Return: ${(bet.stake * bet.odds).toFixed(2)}
+                      </span>
+                    </div>
+
+                    <div className="flex gap-2 pt-2 border-t border-border">
                       <Button
                         variant="outline"
                         size="sm"
@@ -151,31 +237,19 @@ export function BetSlipDrawer() {
               )}
             </div>
 
-            {pendingBets.length > 0 && (
-              <div className="border-t border-border pt-4 space-y-4">
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-muted-foreground">Total Stake</span>
-                    <span className="font-mono font-medium text-foreground">${totalStake.toFixed(2)}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-muted-foreground">Total Potential Return</span>
-                    <span className="font-mono font-bold text-profit text-lg">${potentialReturn.toFixed(2)}</span>
-                  </div>
+            {placedBets.length > 0 && (
+              <div className="border-t border-border pt-4">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">Total at Risk</span>
+                  <span className="font-mono font-medium text-foreground">
+                    ${placedBets.reduce((sum, b) => sum + b.stake, 0).toFixed(2)}
+                  </span>
                 </div>
-
-                <Button
-                  variant="outline"
-                  className="w-full"
-                  onClick={clearSlip}
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  Clear All
-                </Button>
               </div>
             )}
           </TabsContent>
 
+          {/* Results Tab */}
           <TabsContent value="results" className="flex-1 flex flex-col">
             {/* Results Summary */}
             <div className="grid grid-cols-3 gap-3 py-4 border-b border-border">
@@ -198,7 +272,7 @@ export function BetSlipDrawer() {
                 <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
                   <Check className="h-12 w-12 mb-4 opacity-30" />
                   <p className="font-medium">No results yet</p>
-                  <p className="text-sm">Mark bets as won or lost to see results</p>
+                  <p className="text-sm">Mark placed bets as won or lost</p>
                 </div>
               ) : (
                 settledBets.map((bet) => (
@@ -206,7 +280,7 @@ export function BetSlipDrawer() {
                     key={bet.id}
                     className={cn(
                       "rounded-lg border p-3 space-y-2",
-                      bet.result === 'won' ? "border-profit/30 bg-profit/5" : "border-loss/30 bg-loss/5"
+                      bet.status === 'won' ? "border-profit/30 bg-profit/5" : "border-loss/30 bg-loss/5"
                     )}
                   >
                     <div className="flex items-start justify-between gap-2">
@@ -216,9 +290,9 @@ export function BetSlipDrawer() {
                       </div>
                       <div className={cn(
                         "px-2 py-1 rounded text-xs font-medium",
-                        bet.result === 'won' ? "bg-profit/20 text-profit" : "bg-loss/20 text-loss"
+                        bet.status === 'won' ? "bg-profit/20 text-profit" : "bg-loss/20 text-loss"
                       )}>
-                        {bet.result === 'won' ? 'WON' : 'LOST'}
+                        {bet.status === 'won' ? 'WON' : 'LOST'}
                       </div>
                     </div>
 
@@ -226,9 +300,9 @@ export function BetSlipDrawer() {
                       <span className="text-muted-foreground">{bet.selection} @ {bet.odds}</span>
                       <span className={cn(
                         "font-mono font-bold",
-                        bet.result === 'won' ? "text-profit" : "text-loss"
+                        bet.status === 'won' ? "text-profit" : "text-loss"
                       )}>
-                        {bet.result === 'won' ? '+' : ''}{bet.profitLoss?.toFixed(2)}
+                        {bet.status === 'won' ? '+' : ''}{bet.profitLoss?.toFixed(2)}
                       </span>
                     </div>
 
@@ -238,7 +312,7 @@ export function BetSlipDrawer() {
                         variant="ghost"
                         size="sm"
                         className="h-6 text-xs"
-                        onClick={() => updateResult(bet.id, 'pending')}
+                        onClick={() => undoResult(bet.id)}
                       >
                         Undo
                       </Button>
