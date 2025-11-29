@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Activity, Settings, Bell, LogOut, User, Receipt } from "lucide-react";
+import { Activity, Settings, Bell, LogOut, User, Receipt, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import { useNavigate, Link } from "react-router-dom";
@@ -12,6 +12,15 @@ export function Header() {
   const { toast } = useToast();
   const [user, setUser] = useState<SupabaseUser | null>(null);
   const { slipBets, setIsOpen } = useBetSlip();
+  const [currentTime, setCurrentTime] = useState(new Date());
+
+  // Update clock every second
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -31,6 +40,23 @@ export function Header() {
     navigate("/auth");
   };
 
+  const formatTime = (date: Date) => {
+    return date.toLocaleTimeString('en-GB', { 
+      hour: '2-digit', 
+      minute: '2-digit', 
+      second: '2-digit',
+      hour12: false 
+    });
+  };
+
+  const formatDate = (date: Date) => {
+    return date.toLocaleDateString('en-GB', { 
+      weekday: 'short',
+      day: 'numeric', 
+      month: 'short'
+    });
+  };
+
   return (
     <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-xl">
       <div className="container flex h-16 items-center justify-between">
@@ -43,6 +69,19 @@ export function Header() {
             <p className="text-xs text-muted-foreground">Positive EV Betting</p>
           </div>
         </Link>
+
+        {/* 24-Hour Clock */}
+        <div className="hidden lg:flex items-center gap-2 px-4 py-2 rounded-lg bg-muted/50 border border-border">
+          <Clock className="h-4 w-4 text-primary" />
+          <div className="flex flex-col items-center">
+            <span className="font-mono text-lg font-bold text-foreground tracking-wider">
+              {formatTime(currentTime)}
+            </span>
+            <span className="text-xs text-muted-foreground">
+              {formatDate(currentTime)}
+            </span>
+          </div>
+        </div>
 
         <nav className="hidden md:flex items-center gap-6">
           <Link to="/" className="text-sm font-medium text-foreground hover:text-primary transition-colors">Dashboard</Link>
