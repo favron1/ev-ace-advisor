@@ -5,6 +5,8 @@ import { supabase } from "@/integrations/supabase/client";
 import { useNavigate, Link } from "react-router-dom";
 import { useToast } from "@/hooks/use-toast";
 import { useBetSlip } from "@/contexts/BetSlipContext";
+import { useSport } from "@/contexts/SportContext";
+import { SportToggle } from "@/components/layout/SportToggle";
 import type { User as SupabaseUser } from "@supabase/supabase-js";
 
 export function Header() {
@@ -66,7 +68,7 @@ export function Header() {
           </div>
           <div>
             <h1 className="text-lg font-bold text-foreground">EdgeBet Pro</h1>
-            <p className="text-xs text-muted-foreground">Positive EV Betting</p>
+            <SportToggle />
           </div>
         </Link>
 
