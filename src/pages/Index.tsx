@@ -7,6 +7,7 @@ import { PerformanceChart } from "@/components/dashboard/PerformanceChart";
 import { BestBetsTable } from "@/components/dashboard/BestBetsTable";
 import { MatchAnalyzer } from "@/components/dashboard/MatchAnalyzer";
 import { BetHistory } from "@/components/dashboard/BetHistory";
+import { LiveScores } from "@/components/dashboard/LiveScores";
 import { useBetSlip } from "@/contexts/BetSlipContext";
 
 const Index = () => {
@@ -64,8 +65,9 @@ const Index = () => {
           <BestBetsTable />
         </section>
 
-        {/* AI Analyzer & Performance */}
-        <section id="analyzer" className="grid gap-6 lg:grid-cols-2">
+        {/* Live Scores & AI Analyzer */}
+        <section id="analyzer" className="grid gap-6 lg:grid-cols-3">
+          <LiveScores />
           <MatchAnalyzer />
           <PerformanceChart />
         </section>
