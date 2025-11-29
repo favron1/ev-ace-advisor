@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.fetch-odds]
 verify_jwt = false
+
+[functions.check-results]
+verify_jwt = false
