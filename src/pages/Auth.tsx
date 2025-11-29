@@ -179,13 +179,14 @@ const Auth = () => {
           </form>
 
           <div className="mt-6 text-center">
-            <button
+            <Button
               type="button"
+              variant="ghost"
               onClick={() => setIsLogin(!isLogin)}
-              className="text-sm text-primary hover:underline"
+              className="text-sm text-primary hover:text-primary/80 hover:bg-primary/10 px-4 py-2"
             >
               {isLogin ? "Need an account? Sign up" : "Already have an account? Sign in"}
-            </button>
+            </Button>
           </div>
         </div>
 
