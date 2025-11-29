@@ -2,3 +2,6 @@ project_id = "tjwqkbyyplaycvnjwqbh"
 
 [functions.analyze-bet]
 verify_jwt = false
+
+[functions.fetch-odds]
+verify_jwt = false
