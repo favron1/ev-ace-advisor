@@ -85,7 +85,7 @@ export function Header() {
 
         <nav className="hidden md:flex items-center gap-6">
           <Link to="/" className="text-sm font-medium text-foreground hover:text-primary transition-colors">Dashboard</Link>
-          <a href="#best-bets" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">Best Bets</a>
+          <Link to="/daily-bets" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">Daily Best Bets</Link>
           <a href="#analyzer" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">Analyzer</a>
           <button 
             onClick={() => setIsOpen(true)}
