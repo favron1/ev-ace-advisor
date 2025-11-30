@@ -2,7 +2,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { CheckCircle2, Info, Plus, Check, Calendar, Clock, TrendingUp, AlertCircle } from "lucide-react";
+import { CheckCircle2, Info, Plus, Check, Clock, AlertCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useBetSlip } from "@/contexts/BetSlipContext";
 import type { AnalyzedBet } from "@/pages/DailyBets";
@@ -24,22 +24,27 @@ const getConfidenceBadge = (confidence: string) => {
   }
 };
 
-const formatDateTime = (isoString: string) => {
-  const date = new Date(isoString);
-  return {
-    date: date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }),
-    time: date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
-  };
-};
-
-const getMatchStatus = (commenceTime: string): "upcoming" | "live" | "resulted" => {
+const formatTimeUntil = (isoString: string) => {
   const now = new Date();
-  const matchTime = new Date(commenceTime);
-  const matchEndEstimate = new Date(matchTime.getTime() + 2 * 60 * 60 * 1000);
+  const eventTime = new Date(isoString);
+  const diffMs = eventTime.getTime() - now.getTime();
   
-  if (now < matchTime) return "upcoming";
-  if (now >= matchTime && now <= matchEndEstimate) return "live";
-  return "resulted";
+  if (diffMs <= 0) return { text: "Started", isLive: true, isSoon: false };
+  
+  const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+  const diffMins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+  
+  if (diffHours >= 24) {
+    const days = Math.floor(diffHours / 24);
+    const hours = diffHours % 24;
+    return { text: `${days}d ${hours}h`, isLive: false, isSoon: false };
+  }
+  
+  if (diffHours > 0) {
+    return { text: `${diffHours}h ${diffMins}m`, isLive: false, isSoon: false };
+  }
+  
+  return { text: `${diffMins}m`, isLive: false, isSoon: diffMins <= 30 };
 };
 
 export function DailyBetsTable({ bets }: DailyBetsTableProps) {
@@ -73,10 +78,10 @@ export function DailyBetsTable({ bets }: DailyBetsTableProps) {
         <Table>
           <TableHeader>
             <TableRow className="border-border hover:bg-transparent">
-              <TableHead className="text-muted-foreground w-[90px]">
+              <TableHead className="text-muted-foreground w-[100px]">
                 <div className="flex items-center gap-1">
-                  <Calendar className="h-3 w-3" />
-                  Time
+                  <Clock className="h-3 w-3" />
+                  Starts In
                 </div>
               </TableHead>
               <TableHead className="text-muted-foreground min-w-[200px]">Match</TableHead>
@@ -130,19 +135,22 @@ export function DailyBetsTable({ bets }: DailyBetsTableProps) {
           </TableHeader>
           <TableBody>
             {bets.map((bet) => {
-              const { date, time } = formatDateTime(bet.commenceTime);
-              const status = getMatchStatus(bet.commenceTime);
+              const timeUntil = formatTimeUntil(bet.commenceTime);
               const inSlip = isInSlip(bet.id);
 
               return (
                 <TableRow key={bet.id} className="border-border hover:bg-muted/30 transition-colors">
                   <TableCell>
-                    <div className="flex flex-col items-start gap-1">
-                      <span className="text-xs font-medium text-foreground">{date}</span>
-                      <span className="text-xs text-muted-foreground">{time}</span>
-                      {status === "live" && (
-                        <Badge className="bg-loss/20 text-loss border-loss/30 animate-pulse text-[10px]">LIVE</Badge>
-                      )}
+                    <div className={cn(
+                      "inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium",
+                      timeUntil.isLive 
+                        ? "bg-loss/20 text-loss" 
+                        : timeUntil.isSoon 
+                          ? "bg-warning/20 text-warning" 
+                          : "bg-primary/10 text-primary"
+                    )}>
+                      <Clock className="h-3 w-3" />
+                      {timeUntil.text}
                     </div>
                   </TableCell>
                   <TableCell>
@@ -222,7 +230,7 @@ export function DailyBetsTable({ bets }: DailyBetsTableProps) {
                       variant={inSlip ? "secondary" : "outline"}
                       size="sm"
                       onClick={() => handleAddToSlip(bet)}
-                      disabled={inSlip || status === "resulted"}
+                      disabled={inSlip || timeUntil.isLive}
                       className={cn(
                         "gap-1",
                         inSlip && "bg-profit/20 text-profit border-profit/30"
