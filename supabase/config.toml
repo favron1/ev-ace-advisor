@@ -20,3 +20,6 @@ verify_jwt = false
 
 [functions.fetch-historical-odds]
 verify_jwt = false
+
+[functions.ai-analyze-bets]
+verify_jwt = false
