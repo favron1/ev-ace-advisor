@@ -18,11 +18,14 @@ export interface SlipBet {
   profitLoss?: number;
   placedAt?: string;
   dbId?: string; // Database ID for synced bets
+  suggestedStakePercent?: number; // Suggested stake % from analysis
 }
+
+const DEFAULT_BANKROLL = 1000;
 
 interface BetSlipContextType {
   slipBets: SlipBet[];
-  addToSlip: (bet: Omit<SlipBet, "stake" | "status" | "profitLoss" | "placedAt">) => void;
+  addToSlip: (bet: Omit<SlipBet, "stake" | "status" | "profitLoss" | "placedAt" | "dbId">) => void;
   removeFromSlip: (id: string) => void;
   updateStake: (id: string, stake: number) => void;
   updateOdds: (id: string, odds: number) => void;
@@ -125,9 +128,13 @@ export function BetSlipProvider({ children }: { children: ReactNode }) {
     return () => subscription.unsubscribe();
   }, [loadBetsFromDB]);
 
-  const addToSlip = (bet: Omit<SlipBet, "stake" | "status" | "profitLoss" | "placedAt">) => {
+  const addToSlip = (bet: Omit<SlipBet, "stake" | "status" | "profitLoss" | "placedAt" | "dbId">) => {
     if (!slipBets.find(b => b.id === bet.id)) {
-      setSlipBets(prev => [...prev, { ...bet, stake: 10, status: 'draft' }]);
+      // Calculate stake based on suggested percentage and $1000 bankroll
+      const calculatedStake = bet.suggestedStakePercent 
+        ? Math.round((bet.suggestedStakePercent / 100) * DEFAULT_BANKROLL)
+        : 10;
+      setSlipBets(prev => [...prev, { ...bet, stake: calculatedStake, status: 'draft' }]);
       setIsOpen(true);
     }
   };

@@ -59,6 +59,7 @@ export function DailyBetsTable({ bets }: DailyBetsTableProps) {
       league: bet.sport,
       commenceTime: bet.commenceTime,
       bookmaker: bet.bookmaker,
+      suggestedStakePercent: bet.suggestedStakePercent,
     });
   };
 

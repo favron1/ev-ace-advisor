@@ -117,8 +117,15 @@ export function BetSlipDrawer() {
                           className="h-9 bg-background border-border font-mono"
                         />
                       </div>
-                      <div>
-                        <label className="text-xs text-muted-foreground mb-1 block">Stake ($)</label>
+                      <div className="relative">
+                        <label className="text-xs text-muted-foreground mb-1 block flex items-center justify-between">
+                          <span>Stake ($)</span>
+                          {bet.suggestedStakePercent && (
+                            <span className="text-[10px] text-primary font-medium">
+                              Sugg: {bet.suggestedStakePercent.toFixed(1)}%
+                            </span>
+                          )}
+                        </label>
                         <Input
                           type="number"
                           step="1"
