@@ -158,21 +158,51 @@ function calculateFractionalKelly(fairProb: number, bestOdds: number): number {
   return Math.min(stakePercent, 1.5); // Cap at 1.5%
 }
 
-// Determine confidence level
-function determineConfidence(edge: number, bookCount: number, bestOdds: number): 'high' | 'moderate' | 'low' {
-  let score = 0;
+// Determine confidence level - using stable thresholds to prevent flip-flopping
+function determineConfidence(edge: number, bookCount: number, bestOdds: number, hasSharp: boolean): 'high' | 'moderate' | 'low' {
+  // Primary factor: edge percentage with wider bands for stability
+  // High: edge >= 8% (strong mathematical value)
+  // Moderate: edge >= 4%
+  // Low: edge < 4%
   
-  if (edge >= 10) score += 3;
-  else if (edge >= 6) score += 2;
-  else if (edge >= 3) score += 1;
+  // Secondary factors that can boost confidence
+  const hasGoodLiquidity = bookCount >= 4;
+  const hasGreatLiquidity = bookCount >= 6;
+  const inOptimalOddsRange = bestOdds >= 1.5 && bestOdds <= 6.0;
   
-  if (bookCount >= 5) score += 2;
-  else if (bookCount >= 3) score += 1;
+  // Edge is the primary determinant for stability
+  if (edge >= 12) {
+    // Very high edge - always high confidence
+    return 'high';
+  }
   
-  if (bestOdds >= 1.5 && bestOdds <= 5.0) score += 1;
+  if (edge >= 8) {
+    // High edge - high if any supporting factor, otherwise moderate
+    if (hasSharp || hasGoodLiquidity || inOptimalOddsRange) {
+      return 'high';
+    }
+    return 'moderate';
+  }
   
-  if (score >= 5) return 'high';
-  if (score >= 3) return 'moderate';
+  if (edge >= 5) {
+    // Medium edge - needs strong support for high, otherwise moderate
+    if (hasSharp && hasGreatLiquidity && inOptimalOddsRange) {
+      return 'high';
+    }
+    if (hasGoodLiquidity || inOptimalOddsRange) {
+      return 'moderate';
+    }
+    return 'moderate';
+  }
+  
+  if (edge >= 3) {
+    // Lower edge - moderate if good support, otherwise low
+    if (hasSharp || hasGoodLiquidity) {
+      return 'moderate';
+    }
+    return 'low';
+  }
+  
   return 'low';
 }
 
@@ -366,7 +396,7 @@ serve(async (req) => {
                 if (currentExposure + stake > 3.5) continue;
                 matchExposure.set(matchKey, currentExposure + stake);
                 
-                const confidence = determineConfidence(edge, outcome.bookmakers.length, bestOdds);
+                const confidence = determineConfidence(edge, outcome.bookmakers.length, bestOdds, hasSharp);
                 
                 const reasoning = generateReasoning(
                   outcome.name,
