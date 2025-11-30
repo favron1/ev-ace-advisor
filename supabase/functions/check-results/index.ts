@@ -33,7 +33,7 @@ serve(async (req) => {
 
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-    // Fetch pending placed bets from database
+    // Fetch pending placed bets from bet_history
     const { data: pendingBets, error: fetchError } = await supabase
       .from('bet_history')
       .select('*')
@@ -44,12 +44,39 @@ serve(async (req) => {
       throw fetchError;
     }
 
-    console.log(`Found ${pendingBets?.length || 0} pending bets to check`);
+    // Also fetch pending value_bets for simulation tracking
+    const { data: pendingValueBets, error: valueBetsError } = await supabase
+      .from('value_bets')
+      .select(`
+        id,
+        selection,
+        market,
+        match_id,
+        matches (
+          id,
+          home_team,
+          away_team,
+          match_date,
+          league
+        )
+      `)
+      .eq('result', 'pending')
+      .not('match_id', 'is', null);
 
-    if (!pendingBets || pendingBets.length === 0) {
+    if (valueBetsError) {
+      console.error('Error fetching pending value bets:', valueBetsError);
+    }
+
+    console.log(`Found ${pendingBets?.length || 0} pending bet_history entries`);
+    console.log(`Found ${pendingValueBets?.length || 0} pending value_bets entries`);
+
+    const hasPendingBets = (pendingBets && pendingBets.length > 0) || (pendingValueBets && pendingValueBets.length > 0);
+
+    if (!hasPendingBets) {
       return new Response(JSON.stringify({ 
         message: 'No pending bets to check',
-        updated: 0 
+        updated: 0,
+        valueBetsUpdated: 0
       }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
@@ -174,11 +201,75 @@ serve(async (req) => {
       }
     }
 
-    console.log(`Updated ${updatedCount} bets`);
+    // Now check value_bets for simulation tracking
+    let valueBetsUpdated = 0;
+    if (pendingValueBets && pendingValueBets.length > 0) {
+      for (const bet of pendingValueBets) {
+        const match = bet.matches as unknown as { home_team: string; away_team: string } | null;
+        if (!match) continue;
+
+        // Find matching completed game
+        const completedGame = allScores.find(score => {
+          const homeMatch = score.home_team.toLowerCase().includes(match.home_team.toLowerCase().split(' ')[0]) ||
+                           match.home_team.toLowerCase().includes(score.home_team.toLowerCase().split(' ')[0]);
+          const awayMatch = score.away_team.toLowerCase().includes(match.away_team.toLowerCase().split(' ')[0]) ||
+                           match.away_team.toLowerCase().includes(score.away_team.toLowerCase().split(' ')[0]);
+          return homeMatch && awayMatch;
+        });
+
+        if (!completedGame || !completedGame.scores) continue;
+
+        const homeScore = parseInt(completedGame.scores.find(s => s.name === completedGame.home_team)?.score || '0');
+        const awayScore = parseInt(completedGame.scores.find(s => s.name === completedGame.away_team)?.score || '0');
+        const scoreString = `${homeScore}-${awayScore}`;
+
+        // Determine if bet won based on selection and market
+        let won = false;
+        const selection = bet.selection.toLowerCase();
+        const market = bet.market;
+
+        if (market === '1x2') {
+          if (selection.includes('home') || selection.includes(match.home_team.toLowerCase())) {
+            won = homeScore > awayScore;
+          } else if (selection.includes('away') || selection.includes(match.away_team.toLowerCase())) {
+            won = awayScore > homeScore;
+          } else if (selection.includes('draw')) {
+            won = homeScore === awayScore;
+          }
+        } else if (market === 'over_under') {
+          const totalGoals = homeScore + awayScore;
+          if (selection.includes('over 2.5')) won = totalGoals > 2.5;
+          else if (selection.includes('under 2.5')) won = totalGoals < 2.5;
+          else if (selection.includes('over 1.5')) won = totalGoals > 1.5;
+          else if (selection.includes('under 1.5')) won = totalGoals < 1.5;
+        } else if (market === 'btts') {
+          const bothScored = homeScore > 0 && awayScore > 0;
+          if (selection.includes('yes')) won = bothScored;
+          else if (selection.includes('no')) won = !bothScored;
+        }
+
+        const { error: updateError } = await supabase
+          .from('value_bets')
+          .update({
+            result: won ? 'won' : 'lost',
+            actual_score: scoreString,
+            settled_at: new Date().toISOString()
+          })
+          .eq('id', bet.id);
+
+        if (!updateError) {
+          valueBetsUpdated++;
+          console.log(`Updated value_bet ${bet.id}: ${won ? 'won' : 'lost'} (${scoreString})`);
+        }
+      }
+    }
+
+    console.log(`Updated ${updatedCount} bet_history entries, ${valueBetsUpdated} value_bets`);
 
     return new Response(JSON.stringify({ 
-      message: `Checked ${pendingBets.length} bets, updated ${updatedCount}`,
+      message: `Checked bets, updated ${updatedCount} bet_history and ${valueBetsUpdated} value_bets`,
       updated: updatedCount,
+      valueBetsUpdated,
       results
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },

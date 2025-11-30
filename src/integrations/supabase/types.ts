@@ -163,6 +163,7 @@ export type Database = {
       value_bets: {
         Row: {
           actual_probability: number
+          actual_score: string | null
           confidence: Database["public"]["Enums"]["confidence_level"]
           created_at: string | null
           edge: number
@@ -177,11 +178,14 @@ export type Database = {
           min_odds: number
           offered_odds: number
           reasoning: string | null
+          result: string | null
           selection: string
+          settled_at: string | null
           suggested_stake_percent: number
         }
         Insert: {
           actual_probability: number
+          actual_score?: string | null
           confidence?: Database["public"]["Enums"]["confidence_level"]
           created_at?: string | null
           edge: number
@@ -196,11 +200,14 @@ export type Database = {
           min_odds: number
           offered_odds: number
           reasoning?: string | null
+          result?: string | null
           selection: string
+          settled_at?: string | null
           suggested_stake_percent: number
         }
         Update: {
           actual_probability?: number
+          actual_score?: string | null
           confidence?: Database["public"]["Enums"]["confidence_level"]
           created_at?: string | null
           edge?: number
@@ -215,7 +222,9 @@ export type Database = {
           min_odds?: number
           offered_odds?: number
           reasoning?: string | null
+          result?: string | null
           selection?: string
+          settled_at?: string | null
           suggested_stake_percent?: number
         }
         Relationships: [
