@@ -62,6 +62,16 @@ export function DailyBetsTable({ bets }: DailyBetsTableProps) {
     });
   };
 
+  // Get bets that can be added (not started and not already in slip)
+  const addableBets = bets.filter(bet => {
+    const timeUntil = formatTimeUntil(bet.commenceTime);
+    return !timeUntil.isLive && !isInSlip(bet.id);
+  });
+
+  const handleAddAll = () => {
+    addableBets.forEach(bet => handleAddToSlip(bet));
+  };
+
   if (bets.length === 0) {
     return (
       <div className="stat-card text-center py-12">
@@ -74,6 +84,21 @@ export function DailyBetsTable({ bets }: DailyBetsTableProps) {
 
   return (
     <div className="stat-card overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+        <p className="text-sm text-muted-foreground">
+          {bets.length} bet{bets.length !== 1 ? 's' : ''} found
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleAddAll}
+          disabled={addableBets.length === 0}
+          className="gap-2"
+        >
+          <Plus className="h-4 w-4" />
+          Add All ({addableBets.length})
+        </Button>
+      </div>
       <div className="overflow-x-auto">
         <Table>
           <TableHeader>
