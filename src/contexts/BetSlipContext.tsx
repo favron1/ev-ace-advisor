@@ -61,7 +61,7 @@ export function BetSlipProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const { toast } = useToast();
 
-  // Load bets from database
+  // Load bets from database - replaces all non-draft bets with DB state
   const loadBetsFromDB = useCallback(async (userId: string) => {
     console.log('Loading bets for user:', userId);
     
@@ -76,29 +76,29 @@ export function BetSlipProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    console.log('Loaded bets from DB:', dbBets);
+    console.log('Loaded bets from DB:', dbBets?.length || 0, 'bets');
 
-    if (dbBets && dbBets.length > 0) {
-      const loadedBets: SlipBet[] = dbBets.map(bet => ({
-        id: bet.id,
-        dbId: bet.id,
-        match: bet.match_description,
-        selection: bet.selection,
-        odds: Number(bet.odds),
-        stake: Number(bet.stake),
-        league: '',
-        commenceTime: bet.placed_at || '',
-        bookmaker: '',
-        status: bet.status === 'pending' ? 'placed' : bet.status as BetStatus,
-        profitLoss: bet.profit_loss ? Number(bet.profit_loss) : undefined,
-        placedAt: bet.placed_at || undefined
-      }));
-      setSlipBets(prev => {
-        // Keep only draft bets from local state, add DB bets
-        const drafts = prev.filter(b => b.status === 'draft');
-        return [...drafts, ...loadedBets];
-      });
-    }
+    // Always replace non-draft bets with what's in the database (single source of truth)
+    const loadedBets: SlipBet[] = (dbBets || []).map(bet => ({
+      id: bet.id,
+      dbId: bet.id,
+      match: bet.match_description,
+      selection: bet.selection,
+      odds: Number(bet.odds),
+      stake: Number(bet.stake),
+      league: '',
+      commenceTime: bet.placed_at || '',
+      bookmaker: '',
+      status: bet.status === 'pending' ? 'placed' : bet.status as BetStatus,
+      profitLoss: bet.profit_loss ? Number(bet.profit_loss) : undefined,
+      placedAt: bet.placed_at || undefined
+    }));
+    
+    setSlipBets(prev => {
+      // Keep only draft bets from local state, replace everything else with DB state
+      const drafts = prev.filter(b => b.status === 'draft');
+      return [...drafts, ...loadedBets];
+    });
   }, []);
 
   // Listen for auth state changes
@@ -409,11 +409,13 @@ export function BetSlipProvider({ children }: { children: ReactNode }) {
 
   const clearPlacedBets = async () => {
     const placed = slipBets.filter(b => b.status === 'placed');
+    if (placed.length === 0) return;
     
-    // Delete from database
+    // Delete from database first
     const dbIds = placed.filter(b => b.dbId).map(b => b.dbId!);
     if (dbIds.length > 0) {
-      const { error } = await supabase
+      console.log('Deleting placed bets from DB:', dbIds);
+      const { error, count } = await supabase
         .from('bet_history')
         .delete()
         .in('id', dbIds);
@@ -422,27 +424,31 @@ export function BetSlipProvider({ children }: { children: ReactNode }) {
         console.error('Error clearing placed bets:', error);
         toast({
           title: "Error",
-          description: "Failed to clear placed bets from database",
+          description: "Failed to clear placed bets from database. Please try again.",
           variant: "destructive"
         });
         return;
       }
+      console.log('Deleted', count, 'placed bets from DB');
     }
     
+    // Only update local state after successful DB deletion
     setSlipBets(prev => prev.filter(b => b.status !== 'placed'));
     toast({
       title: "Cleared",
-      description: `${placed.length} placed bet(s) removed`
+      description: `${placed.length} placed bet(s) permanently removed`
     });
   };
 
   const clearSettledBets = async () => {
     const settled = slipBets.filter(b => b.status === 'won' || b.status === 'lost');
+    if (settled.length === 0) return;
     
-    // Delete from database
+    // Delete from database first
     const dbIds = settled.filter(b => b.dbId).map(b => b.dbId!);
     if (dbIds.length > 0) {
-      const { error } = await supabase
+      console.log('Deleting settled bets from DB:', dbIds);
+      const { error, count } = await supabase
         .from('bet_history')
         .delete()
         .in('id', dbIds);
@@ -451,17 +457,19 @@ export function BetSlipProvider({ children }: { children: ReactNode }) {
         console.error('Error clearing settled bets:', error);
         toast({
           title: "Error",
-          description: "Failed to clear results from database",
+          description: "Failed to clear results from database. Please try again.",
           variant: "destructive"
         });
         return;
       }
+      console.log('Deleted', count, 'settled bets from DB');
     }
     
+    // Only update local state after successful DB deletion
     setSlipBets(prev => prev.filter(b => b.status !== 'won' && b.status !== 'lost'));
     toast({
       title: "Cleared",
-      description: `${settled.length} result(s) removed`
+      description: `${settled.length} result(s) permanently removed`
     });
   };
 
