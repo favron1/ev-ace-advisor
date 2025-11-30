@@ -17,3 +17,6 @@ verify_jwt = false
 
 [functions.analyze-racing-bets]
 verify_jwt = false
+
+[functions.fetch-historical-odds]
+verify_jwt = false
