@@ -180,35 +180,50 @@ serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    let targetDate: string;
+    // Parse request body for configuration
+    let daysBack = 90; // Default: look back 90 days
+    let minBets = 50;  // Default: aim for at least 50 settled bets
     try {
       const body = await req.json();
-      targetDate = body.date || getDateDaysAgo(3);
+      daysBack = body.daysBack || 90;
+      minBets = body.minBets || 50;
     } catch {
-      targetDate = getDateDaysAgo(3);
+      // Use defaults
     }
 
-    console.log(`Fetching historical odds for: ${targetDate}`);
+    console.log(`Fetching historical odds for last ${daysBack} days`);
     console.log('Using de-vigged fair probabilities strategy');
 
     const sports = TIER_1_LEAGUES;
     const valueBets: any[] = [];
     const matchExposure = new Map<string, number>(); // Track exposure per match
+    const processedMatches = new Set<string>(); // Avoid duplicate bets
     
-    // Step 1: Fetch completed match scores
+    // Generate dates to fetch - sample dates throughout the period
+    // The historical API allows specific dates, so we'll fetch every 3-4 days
+    const datesToFetch: string[] = [];
+    for (let d = 3; d <= daysBack; d += 3) {
+      datesToFetch.push(getDateDaysAgo(d));
+    }
+    console.log(`Will fetch historical odds from ${datesToFetch.length} dates`);
+    
+    // Step 1: Fetch completed match scores from historical events
+    // The scores endpoint only supports up to 3 days, so we need to use historical odds
+    // and match them with score data from the historical API responses
     const matchScores = new Map<string, { home: number; away: number }>();
     
+    // Fetch recent scores (last 3 days) from scores endpoint
     for (const sport of sports) {
       try {
         const scoresUrl = `https://api.the-odds-api.com/v4/sports/${sport}/scores/?apiKey=${ODDS_API_KEY}&daysFrom=3`;
-        console.log(`Fetching scores for ${sport}...`);
+        console.log(`Fetching recent scores for ${sport}...`);
         
         const response = await fetch(scoresUrl);
         if (!response.ok) continue;
         
         const scores: ScoreEvent[] = await response.json();
         const completed = scores.filter(s => s.completed && s.scores);
-        console.log(`${sport}: ${completed.length} completed matches`);
+        console.log(`${sport}: ${completed.length} completed matches (recent)`);
         
         for (const match of completed) {
           const key = normalizeTeamKey(match.home_team, match.away_team);
@@ -221,28 +236,57 @@ serve(async (req) => {
       }
     }
     
-    console.log(`Loaded ${matchScores.size} completed matches`);
-
-    // Step 2: Fetch historical odds
-    for (const sport of sports) {
-      const tier = getLeagueTier(sport);
-      const minEdge = getMinEdge(tier);
-      
-      try {
-        const histUrl = `https://api.the-odds-api.com/v4/historical/sports/${sport}/odds/?apiKey=${ODDS_API_KEY}&regions=uk,eu&markets=h2h,totals&oddsFormat=decimal&date=${targetDate}`;
-        console.log(`Trying historical endpoint for ${sport} (Tier ${tier}, min edge ${minEdge}%)...`);
-        
-        let events: OddsEvent[] = [];
-        const histResponse = await fetch(histUrl);
-        
-        if (histResponse.ok) {
-          const histData: HistoricalApiResponse = await histResponse.json();
-          events = histData.data || [];
-          console.log(`Historical: Got ${events.length} events for ${sport}`);
-        } else {
-          console.log(`Historical not available for ${sport}, skipping`);
-          continue;
+    // Fetch historical scores using the historical/scores endpoint
+    for (const dateStr of datesToFetch) {
+      for (const sport of sports) {
+        try {
+          const histScoresUrl = `https://api.the-odds-api.com/v4/historical/sports/${sport}/scores/?apiKey=${ODDS_API_KEY}&date=${dateStr}`;
+          const response = await fetch(histScoresUrl);
+          if (!response.ok) continue;
+          
+          const histData = await response.json();
+          const scores: ScoreEvent[] = histData.data || [];
+          const completed = scores.filter(s => s.completed && s.scores);
+          
+          for (const match of completed) {
+            const key = normalizeTeamKey(match.home_team, match.away_team);
+            if (!matchScores.has(key)) {
+              const homeScore = parseInt(match.scores!.find(s => s.name === match.home_team)?.score || '0');
+              const awayScore = parseInt(match.scores!.find(s => s.name === match.away_team)?.score || '0');
+              matchScores.set(key, { home: homeScore, away: awayScore });
+            }
+          }
+        } catch (err) {
+          // Silent fail for historical scores - they may not always be available
         }
+      }
+    }
+    
+    console.log(`Loaded ${matchScores.size} completed matches total`);
+
+    // Step 2: Fetch historical odds from multiple dates
+    for (const targetDate of datesToFetch) {
+      console.log(`\n--- Processing date: ${targetDate} ---`);
+      
+      for (const sport of sports) {
+        const tier = getLeagueTier(sport);
+        const minEdge = getMinEdge(tier);
+        
+        try {
+          const histUrl = `https://api.the-odds-api.com/v4/historical/sports/${sport}/odds/?apiKey=${ODDS_API_KEY}&regions=uk,eu&markets=h2h,totals&oddsFormat=decimal&date=${targetDate}`;
+          
+          let events: OddsEvent[] = [];
+          const histResponse = await fetch(histUrl);
+          
+          if (histResponse.ok) {
+            const histData: HistoricalApiResponse = await histResponse.json();
+            events = histData.data || [];
+            if (events.length > 0) {
+              console.log(`${sport} @ ${targetDate.split('T')[0]}: ${events.length} events`);
+            }
+          } else {
+            continue; // Skip if historical not available
+          }
 
         for (const event of events) {
           // FILTER: Minimum 3 bookmakers
@@ -251,7 +295,19 @@ serve(async (req) => {
           }
           
           const matchKey = normalizeTeamKey(event.home_team, event.away_team);
+          
+          // Skip already processed matches to avoid duplicates across dates
+          if (processedMatches.has(matchKey)) {
+            continue;
+          }
+          processedMatches.add(matchKey);
+          
           const result = matchScores.get(matchKey);
+          
+          // For simulation, we only want bets with real results
+          if (!result) {
+            continue; // Skip matches without results
+          }
           
           // Get or create match record
           const { data: existingMatch } = await supabase
@@ -470,6 +526,7 @@ serve(async (req) => {
         console.error(`Error processing ${sport}:`, err);
       }
     }
+    } // End datesToFetch loop
 
     // Clear and insert
     console.log(`Clearing old data and inserting ${valueBets.length} value bets...`);
@@ -490,14 +547,17 @@ serve(async (req) => {
     
     return new Response(JSON.stringify({
       success: true,
-      message: `Loaded ${valueBets.length} de-vigged value bets (${settled.length} settled, ${won.length} won)`,
+      message: `Loaded ${settled.length} settled bets from last ${daysBack} days (${won.length} won, ${settled.length - won.length} lost)`,
       totalBets: valueBets.length,
       settledBets: settled.length,
       wonBets: won.length,
+      lostBets: settled.length - won.length,
       winRate: settled.length > 0 ? `${((won.length / settled.length) * 100).toFixed(1)}%` : 'N/A',
       avgEdge: `${avgEdge.toFixed(1)}%`,
       avgEV: `${(avgEV * 100).toFixed(1)}%`,
+      matchesProcessed: processedMatches.size,
       matchesWithResults: matchScores.size,
+      daysBack: daysBack,
       strategy: 'De-vigged fair probabilities with 25% Kelly, 3-8% edge thresholds'
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
