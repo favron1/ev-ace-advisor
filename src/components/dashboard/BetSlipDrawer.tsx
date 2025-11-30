@@ -281,9 +281,9 @@ export function BetSlipDrawer() {
           </TabsContent>
 
           {/* Results Tab */}
-          <TabsContent value="results" className="flex-1 flex flex-col">
+          <TabsContent value="results" className="flex flex-col">
             {/* Results Summary */}
-            <div className="grid grid-cols-3 gap-3 py-4 border-b border-border">
+            <div className="grid grid-cols-3 gap-3 pt-2 pb-4 border-b border-border">
               <div className="text-center">
                 <p className="text-2xl font-bold text-foreground">{settledBets.length}</p>
                 <p className="text-xs text-muted-foreground">Total Bets</p>
