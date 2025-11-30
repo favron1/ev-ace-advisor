@@ -5,6 +5,13 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+// Sharp bookmakers - prioritize these for fair odds calculation
+const SHARP_BOOKS = ['pinnacle', 'pinnacle_us', 'betfair_ex_uk', 'matchbook', 'sbobet'];
+
+// League tiers for edge thresholds
+const TIER_1_LEAGUES = ['soccer_epl', 'soccer_spain_la_liga', 'soccer_germany_bundesliga', 'soccer_italy_serie_a', 'soccer_france_ligue_one'];
+const TIER_2_LEAGUES = ['soccer_netherlands_eredivisie', 'soccer_portugal_primeira_liga', 'soccer_belgium_first_div'];
+
 interface OddsApiResponse {
   id: string;
   sport_key: string;
@@ -15,14 +22,21 @@ interface OddsApiResponse {
   bookmakers: {
     key: string;
     title: string;
+    last_update: string;
     markets: {
       key: string;
-      outcomes: {
-        name: string;
-        price: number;
-      }[];
+      outcomes: { name: string; price: number; point?: number }[];
     }[];
   }[];
+}
+
+interface OutcomeData {
+  name: string;
+  odds: number[];
+  sharpOdds: number[];
+  bookmakers: string[];
+  bestOdds: number;
+  bestBookmaker: string;
 }
 
 interface ValueBet {
@@ -34,8 +48,8 @@ interface ValueBet {
   market: string;
   offeredOdds: number;
   fairOdds: number;
+  fairProbability: number;
   impliedProbability: number;
-  actualProbability: number;
   expectedValue: number;
   edge: number;
   confidence: "high" | "moderate" | "low";
@@ -47,97 +61,200 @@ interface ValueBet {
   sport: string;
   commenceTime: string;
   bookmaker: string;
+  bookmakerCount: number;
 }
 
-// Calculate Kelly Criterion stake percentage
-function calculateKellyStake(actualProb: number, odds: number, confidence: string): number {
-  // Kelly formula: (bp - q) / b where b = odds - 1, p = win prob, q = lose prob
-  const b = odds - 1;
-  const p = actualProb;
-  const q = 1 - p;
-  
-  let kelly = (b * p - q) / b;
-  
-  // Apply fractional Kelly based on confidence
-  const fractionMultiplier = confidence === "high" ? 0.5 : confidence === "moderate" ? 0.25 : 0.15;
-  kelly = kelly * fractionMultiplier;
-  
-  // Cap Kelly stake
-  const maxStake = confidence === "high" ? 5 : confidence === "moderate" ? 3 : 2;
-  
-  return Math.max(0, Math.min(kelly * 100, maxStake));
+// Get league tier for edge threshold
+function getLeagueTier(sportKey: string): number {
+  if (TIER_1_LEAGUES.includes(sportKey)) return 1;
+  if (TIER_2_LEAGUES.includes(sportKey)) return 2;
+  return 3;
 }
 
-// Calculate suggested stake based on bankroll strategy
-function calculateSuggestedStake(confidence: string, edge: number, kelly: number): number {
-  // High confidence: Kelly-based (max 5%)
-  // Moderate: Flat 2-3%
-  // Low: 1-2%
-  
-  if (confidence === "high") {
-    return Math.min(Math.max(kelly, 3), 5);
-  } else if (confidence === "moderate") {
-    return Math.min(Math.max(edge / 5, 2), 3);
-  } else {
-    return Math.min(Math.max(edge / 8, 1), 2);
+// Get minimum edge based on league tier
+function getMinEdge(tier: number): number {
+  switch (tier) {
+    case 1: return 3;  // 3% for tier 1
+    case 2: return 5;  // 5% for tier 2
+    default: return 8; // 8% for unknown/minor leagues
   }
 }
 
-// Determine confidence level based on edge and other factors
-function determineConfidence(edge: number, oddsCount: number, maxOdds: number): "high" | "moderate" | "low" {
-  // More bookmakers = more reliable fair odds
-  // Higher edge = more confidence (if consistent across bookmakers)
+// De-vig odds to get fair probabilities
+function deVigOdds(outcomes: OutcomeData[]): Map<string, { fairProb: number; fairOdds: number }> {
+  const result = new Map<string, { fairProb: number; fairOdds: number }>();
   
-  let score = 0;
+  // Prefer sharp book odds if available
+  let oddsToUse: { name: string; odds: number }[] = [];
   
-  if (edge >= 12) score += 3;
-  else if (edge >= 7) score += 2;
-  else if (edge >= 4) score += 1;
+  // Check if we have sharp book odds for all outcomes
+  const hasSharpForAll = outcomes.every(o => o.sharpOdds.length > 0);
   
-  if (oddsCount >= 5) score += 2;
-  else if (oddsCount >= 3) score += 1;
+  if (hasSharpForAll) {
+    // Use average of sharp book odds
+    oddsToUse = outcomes.map(o => ({
+      name: o.name,
+      odds: o.sharpOdds.reduce((a, b) => a + b, 0) / o.sharpOdds.length
+    }));
+    console.log('Using sharp book odds for de-vig');
+  } else {
+    // Use average of all odds (excluding obvious outliers)
+    oddsToUse = outcomes.map(o => {
+      if (o.odds.length === 0) return { name: o.name, odds: 0 };
+      
+      // Remove outliers (odds > 2 std dev from mean)
+      const mean = o.odds.reduce((a, b) => a + b, 0) / o.odds.length;
+      const stdDev = Math.sqrt(o.odds.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / o.odds.length);
+      const filtered = o.odds.filter(odd => Math.abs(odd - mean) <= 2 * stdDev);
+      
+      return {
+        name: o.name,
+        odds: filtered.length > 0 ? filtered.reduce((a, b) => a + b, 0) / filtered.length : mean
+      };
+    });
+  }
   
-  // Reasonable odds range (not extreme favorites or long shots)
-  if (maxOdds >= 1.5 && maxOdds <= 4.0) score += 1;
+  // Calculate raw implied probabilities
+  const rawProbs = oddsToUse.map(o => ({
+    name: o.name,
+    rawProb: o.odds > 0 ? 1 / o.odds : 0
+  }));
   
-  if (score >= 5) return "high";
-  if (score >= 3) return "moderate";
-  return "low";
+  // Calculate overround (sum of all implied probabilities)
+  const overround = rawProbs.reduce((sum, p) => sum + p.rawProb, 0);
+  
+  if (overround === 0) return result;
+  
+  // De-vig: divide each probability by overround to normalize to 100%
+  for (const p of rawProbs) {
+    const fairProb = p.rawProb / overround;
+    const fairOdds = fairProb > 0 ? 1 / fairProb : 0;
+    result.set(p.name, { fairProb, fairOdds });
+  }
+  
+  return result;
 }
 
-// Generate expert reasoning
+// Calculate fractional Kelly stake with caps
+function calculateFractionalKelly(fairProb: number, bestOdds: number): number {
+  const p = fairProb;
+  const q = 1 - p;
+  const b = bestOdds - 1;
+  
+  if (b <= 0) return 0;
+  
+  // Full Kelly: (bp - q) / b
+  const kellyFull = (b * p - q) / b;
+  
+  if (kellyFull <= 0) return 0;
+  
+  // Use 25% Kelly to reduce variance
+  const kellyFraction = kellyFull * 0.25;
+  
+  // Apply caps: 0.25% to 1.5% of bankroll
+  const stakePercent = kellyFraction * 100;
+  
+  if (stakePercent < 0.25) return 0; // Skip if below minimum
+  return Math.min(stakePercent, 1.5); // Cap at 1.5%
+}
+
+// Determine confidence level
+function determineConfidence(edge: number, bookCount: number, bestOdds: number): 'high' | 'moderate' | 'low' {
+  let score = 0;
+  
+  if (edge >= 10) score += 3;
+  else if (edge >= 6) score += 2;
+  else if (edge >= 3) score += 1;
+  
+  if (bookCount >= 5) score += 2;
+  else if (bookCount >= 3) score += 1;
+  
+  if (bestOdds >= 1.5 && bestOdds <= 5.0) score += 1;
+  
+  if (score >= 5) return 'high';
+  if (score >= 3) return 'moderate';
+  return 'low';
+}
+
+// Generate reasoning
 function generateReasoning(
   selection: string,
-  homeTeam: string,
-  awayTeam: string,
   edge: number,
-  impliedProb: number,
-  actualProb: number,
-  bookmaker: string,
-  oddsCount: number
+  ev: number,
+  fairProb: number,
+  bestOdds: number,
+  fairOdds: number,
+  bookCount: number,
+  hasSharp: boolean,
+  tier: number
 ): string {
   const reasons: string[] = [];
   
-  if (edge >= 10) {
-    reasons.push(`Strong value detected with ${edge.toFixed(1)}% edge`);
+  if (edge >= 8) {
+    reasons.push(`Strong de-vigged value with ${edge.toFixed(1)}% edge`);
   } else if (edge >= 5) {
     reasons.push(`Solid value opportunity with ${edge.toFixed(1)}% edge`);
   } else {
-    reasons.push(`Marginal value with ${edge.toFixed(1)}% edge`);
+    reasons.push(`Value detected with ${edge.toFixed(1)}% edge`);
   }
   
-  const probDiff = (actualProb - impliedProb) * 100;
-  if (probDiff > 5) {
-    reasons.push(`Market underestimates ${selection} by ${probDiff.toFixed(1)}%`);
+  reasons.push(`Fair prob: ${(fairProb * 100).toFixed(1)}%`);
+  reasons.push(`Best: ${bestOdds.toFixed(2)} vs Fair: ${fairOdds.toFixed(2)}`);
+  reasons.push(`EV: ${(ev * 100).toFixed(1)}%`);
+  
+  if (hasSharp) {
+    reasons.push('Sharp line used');
   }
   
-  if (oddsCount >= 5) {
-    reasons.push(`Fair odds calculated from ${oddsCount} bookmakers`);
+  reasons.push(`${bookCount} bookmakers`);
+  reasons.push(`Tier ${tier} league`);
+  
+  return reasons.join('. ') + '.';
+}
+
+// Extract outcome data from event
+function extractOutcomeData(event: OddsApiResponse, marketKey: string): OutcomeData[] {
+  const outcomeMap = new Map<string, OutcomeData>();
+  
+  for (const bm of event.bookmakers) {
+    const market = bm.markets.find(m => m.key === marketKey);
+    if (!market) continue;
+    
+    const isSharp = SHARP_BOOKS.includes(bm.key.toLowerCase());
+    
+    for (const outcome of market.outcomes) {
+      const key = marketKey === 'totals' 
+        ? `${outcome.name} ${outcome.point || ''}`.trim()
+        : outcome.name;
+        
+      let data = outcomeMap.get(key);
+      if (!data) {
+        data = { 
+          name: key, 
+          odds: [], 
+          sharpOdds: [], 
+          bookmakers: [],
+          bestOdds: 0,
+          bestBookmaker: ''
+        };
+        outcomeMap.set(key, data);
+      }
+      
+      data.odds.push(outcome.price);
+      data.bookmakers.push(bm.title);
+      
+      if (outcome.price > data.bestOdds) {
+        data.bestOdds = outcome.price;
+        data.bestBookmaker = bm.title;
+      }
+      
+      if (isSharp) {
+        data.sharpOdds.push(outcome.price);
+      }
+    }
   }
   
-  reasons.push(`Best price at ${bookmaker}`);
-  
-  return reasons.join(". ") + ".";
+  return Array.from(outcomeMap.values());
 }
 
 serve(async (req) => {
@@ -156,7 +273,8 @@ serve(async (req) => {
       );
     }
 
-    // Fetch odds for multiple football leagues
+    console.log('Analyzing value bets with de-vigged fair probabilities strategy');
+
     const sports = [
       'soccer_epl',
       'soccer_spain_la_liga', 
@@ -166,18 +284,18 @@ serve(async (req) => {
     ];
     
     const allValueBets: ValueBet[] = [];
-    const MIN_EV_THRESHOLD = 0.05; // EV > 5%
-    const MIN_ODDS_THRESHOLD = 1.50; // Odds > 1.50
-    const MIN_EDGE_THRESHOLD = 2; // Edge > 2%
+    const matchExposure = new Map<string, number>(); // Track exposure per match
 
     for (const sport of sports) {
-      // Fetch h2h (1X2) and totals (over/under) markets
+      const tier = getLeagueTier(sport);
+      const minEdge = getMinEdge(tier);
+      
       const markets = ['h2h', 'totals'];
       
       for (const market of markets) {
         const url = `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${oddsApiKey}&regions=eu,uk&markets=${market}&oddsFormat=decimal`;
         
-        console.log(`Fetching ${market} odds for ${sport}...`);
+        console.log(`Fetching ${market} odds for ${sport} (Tier ${tier}, min edge ${minEdge}%)...`);
         
         try {
           const response = await fetch(url);
@@ -191,96 +309,100 @@ serve(async (req) => {
           console.log(`Got ${data.length} events for ${sport} ${market}`);
 
           for (const event of data) {
-            if (!event.bookmakers || event.bookmakers.length < 2) continue;
+            // FILTER: Minimum 3 bookmakers
+            if (!event.bookmakers || event.bookmakers.length < 3) continue;
 
-            const outcomeOdds: { [key: string]: { odds: number; bookmaker: string }[] } = {};
-
-            for (const bookmaker of event.bookmakers) {
-              const targetMarket = bookmaker.markets.find(m => m.key === market);
-              if (!targetMarket) continue;
-
-              for (const outcome of targetMarket.outcomes) {
-                const key = market === 'totals' 
-                  ? `${outcome.name} ${(outcome as any).point || ''}`.trim()
-                  : outcome.name;
-                  
-                if (!outcomeOdds[key]) {
-                  outcomeOdds[key] = [];
-                }
-                outcomeOdds[key].push({
-                  odds: outcome.price,
-                  bookmaker: bookmaker.title
-                });
+            const outcomes = extractOutcomeData(event, market);
+            
+            // Group outcomes for de-vigging (need all outcomes for a market together)
+            let outcomeGroups: OutcomeData[][] = [];
+            
+            if (market === 'h2h') {
+              // H2H: Home, Away, Draw are one group
+              outcomeGroups = [outcomes];
+            } else {
+              // Totals: Group Over/Under by point value
+              const byPoint = new Map<string, OutcomeData[]>();
+              for (const o of outcomes) {
+                const point = o.name.split(' ')[1] || '2.5';
+                const existing = byPoint.get(point) || [];
+                existing.push(o);
+                byPoint.set(point, existing);
               }
+              outcomeGroups = Array.from(byPoint.values()).filter(g => g.length === 2);
             }
-
-            for (const [selection, oddsArray] of Object.entries(outcomeOdds)) {
-              if (oddsArray.length < 2) continue;
-
-              // Calculate fair odds using sharp bookmaker weighting
-              // Weight odds more heavily from sharper books if available
-              const avgOdds = oddsArray.reduce((sum, o) => sum + o.odds, 0) / oddsArray.length;
-              const maxOdds = Math.max(...oddsArray.map(o => o.odds));
-              const bestBookmaker = oddsArray.find(o => o.odds === maxOdds)!;
-
-              const fairOdds = avgOdds;
-              const impliedProbability = 1 / fairOdds;
+            
+            for (const group of outcomeGroups) {
+              // FILTER: Need at least 3 bookmakers per outcome
+              if (!group.every(o => o.odds.length >= 3)) continue;
               
-              // Adjust actual probability slightly higher than implied to account for market efficiency
-              // This is a conservative estimate based on betting market research
-              const edgeFactor = (maxOdds - fairOdds) / fairOdds;
-              const actualProbability = Math.min(impliedProbability * (1 + edgeFactor * 0.3), 0.95);
+              const fairValues = deVigOdds(group);
+              const hasSharp = group.some(o => o.sharpOdds.length > 0);
               
-              const edge = ((maxOdds - fairOdds) / fairOdds) * 100;
-              
-              // Calculate Expected Value: (P_actual × Odds) - (1 - P_actual)
-              const expectedValue = (actualProbability * maxOdds) - 1;
-              
-              const confidence = determineConfidence(edge, oddsArray.length, maxOdds);
-              const kellyStake = calculateKellyStake(actualProbability, maxOdds, confidence);
-              const suggestedStake = calculateSuggestedStake(confidence, edge, kellyStake);
-
-              // Apply strict filtering criteria
-              const meetsCriteria = 
-                expectedValue > MIN_EV_THRESHOLD &&
-                maxOdds >= MIN_ODDS_THRESHOLD &&
-                actualProbability > impliedProbability &&
-                edge >= MIN_EDGE_THRESHOLD;
-
-              if (meetsCriteria) {
+              for (const outcome of group) {
+                const fair = fairValues.get(outcome.name);
+                if (!fair) continue;
+                
+                const bestOdds = outcome.bestOdds;
+                
+                // FILTER: Odds range 1.30 - 10.00
+                if (bestOdds < 1.30 || bestOdds > 10.00) continue;
+                
+                const edge = ((bestOdds - fair.fairOdds) / fair.fairOdds) * 100;
+                const ev = fair.fairProb * (bestOdds - 1) - (1 - fair.fairProb);
+                
+                // FILTER: Edge >= tier minimum
+                if (edge < minEdge) continue;
+                
+                // FILTER: EV > 0, prefer >= 0.02 (2%)
+                if (ev <= 0 || ev < 0.02) continue;
+                
+                const stake = calculateFractionalKelly(fair.fairProb, bestOdds);
+                if (stake === 0) continue;
+                
+                // FILTER: Match exposure limit (3.5% max per match)
+                const matchKey = `${event.home_team}_${event.away_team}`;
+                const currentExposure = matchExposure.get(matchKey) || 0;
+                if (currentExposure + stake > 3.5) continue;
+                matchExposure.set(matchKey, currentExposure + stake);
+                
+                const confidence = determineConfidence(edge, outcome.bookmakers.length, bestOdds);
+                
                 const reasoning = generateReasoning(
-                  selection,
-                  event.home_team,
-                  event.away_team,
+                  outcome.name,
                   edge,
-                  impliedProbability,
-                  actualProbability,
-                  bestBookmaker.bookmaker,
-                  oddsArray.length
+                  ev,
+                  fair.fairProb,
+                  bestOdds,
+                  fair.fairOdds,
+                  outcome.bookmakers.length,
+                  hasSharp,
+                  tier
                 );
 
                 allValueBets.push({
-                  id: `${event.id}-${market}-${selection}`,
+                  id: `${event.id}-${market}-${outcome.name}`,
                   event: `${event.home_team} vs ${event.away_team}`,
                   homeTeam: event.home_team,
                   awayTeam: event.away_team,
-                  selection: selection,
+                  selection: outcome.name,
                   market: market === 'h2h' ? '1X2' : 'Over/Under',
-                  offeredOdds: maxOdds,
-                  fairOdds: fairOdds,
-                  impliedProbability: impliedProbability,
-                  actualProbability: actualProbability,
-                  expectedValue: expectedValue,
+                  offeredOdds: bestOdds,
+                  fairOdds: fair.fairOdds,
+                  fairProbability: fair.fairProb,
+                  impliedProbability: 1 / bestOdds,
+                  expectedValue: ev,
                   edge: edge,
                   confidence: confidence,
-                  suggestedStakePercent: suggestedStake,
-                  kellyStake: kellyStake,
+                  suggestedStakePercent: stake,
+                  kellyStake: stake,
                   reasoning: reasoning,
-                  meetsCriteria: meetsCriteria,
-                  minOdds: MIN_ODDS_THRESHOLD,
+                  meetsCriteria: true,
+                  minOdds: 1.30,
                   sport: event.sport_title,
                   commenceTime: event.commence_time,
-                  bookmaker: bestBookmaker.bookmaker
+                  bookmaker: outcome.bestBookmaker,
+                  bookmakerCount: outcome.bookmakers.length
                 });
               }
             }
@@ -294,10 +416,10 @@ serve(async (req) => {
     // Sort by expected value (highest first)
     allValueBets.sort((a, b) => b.expectedValue - a.expectedValue);
     
-    // Return all qualifying bets (no arbitrary limit)
+    // Return all qualifying bets
     const topBets = allValueBets.slice(0, 50);
 
-    console.log(`Found ${allValueBets.length} value bets meeting criteria, returning top ${topBets.length}`);
+    console.log(`Found ${allValueBets.length} de-vigged value bets meeting criteria, returning top ${topBets.length}`);
 
     // Calculate summary stats
     const summary = {
@@ -308,7 +430,8 @@ serve(async (req) => {
       avgEdge: topBets.length > 0 ? topBets.reduce((sum, b) => sum + b.edge, 0) / topBets.length : 0,
       avgEV: topBets.length > 0 ? topBets.reduce((sum, b) => sum + b.expectedValue, 0) / topBets.length : 0,
       totalSuggestedStake: topBets.reduce((sum, b) => sum + b.suggestedStakePercent, 0),
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      strategy: 'De-vigged fair probabilities with 25% Kelly, tiered edge thresholds (3-8%)'
     };
 
     return new Response(
