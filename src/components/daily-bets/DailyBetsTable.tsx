@@ -67,22 +67,26 @@ const formatTimeUntil = (isoString: string) => {
   const eventTime = new Date(isoString);
   const diffMs = eventTime.getTime() - now.getTime();
   
-  if (diffMs <= 0) return { text: "Started", isLive: true, isSoon: false };
+  if (diffMs <= 0) return { text: "Started", isLive: true, isSoon: false, isOptimalWindow: false, hoursUntil: 0 };
   
   const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
   const diffMins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+  const totalHours = diffMs / (1000 * 60 * 60);
+  
+  // Optimal betting window is under 12 hours before match starts
+  const isOptimalWindow = totalHours <= 12 && totalHours > 0;
   
   if (diffHours >= 24) {
     const days = Math.floor(diffHours / 24);
     const hours = diffHours % 24;
-    return { text: `${days}d ${hours}h`, isLive: false, isSoon: false };
+    return { text: `${days}d ${hours}h`, isLive: false, isSoon: false, isOptimalWindow: false, hoursUntil: totalHours };
   }
   
   if (diffHours > 0) {
-    return { text: `${diffHours}h ${diffMins}m`, isLive: false, isSoon: false };
+    return { text: `${diffHours}h ${diffMins}m`, isLive: false, isSoon: false, isOptimalWindow, hoursUntil: totalHours };
   }
   
-  return { text: `${diffMins}m`, isLive: false, isSoon: diffMins <= 30 };
+  return { text: `${diffMins}m`, isLive: false, isSoon: diffMins <= 30, isOptimalWindow: true, hoursUntil: totalHours };
 };
 
 export function DailyBetsTable({ bets, showAiAnalysis = false }: DailyBetsTableProps) {
@@ -222,6 +226,7 @@ export function DailyBetsTable({ bets, showAiAnalysis = false }: DailyBetsTableP
                   key={bet.id} 
                   className={cn(
                     "border-border hover:bg-muted/30 transition-colors",
+                    timeUntil.isOptimalWindow && !timeUntil.isLive && "bg-profit/10 border-l-2 border-l-profit",
                     ai?.recommendation === 'STRONG_BET' && "bg-profit/5",
                     ai?.recommendation === 'AVOID' && "bg-loss/5 opacity-60"
                   )}
@@ -234,16 +239,25 @@ export function DailyBetsTable({ bets, showAiAnalysis = false }: DailyBetsTableP
                     </TableCell>
                   )}
                   <TableCell>
-                    <div className={cn(
-                      "inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium",
-                      timeUntil.isLive 
-                        ? "bg-loss/20 text-loss" 
-                        : timeUntil.isSoon 
-                          ? "bg-warning/20 text-warning" 
-                          : "bg-primary/10 text-primary"
-                    )}>
-                      <Clock className="h-3 w-3" />
-                      {timeUntil.text}
+                    <div className="flex flex-col items-start gap-1">
+                      <div className={cn(
+                        "inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium",
+                        timeUntil.isLive 
+                          ? "bg-loss/20 text-loss" 
+                          : timeUntil.isOptimalWindow
+                            ? "bg-profit/20 text-profit ring-2 ring-profit/40 ring-offset-1 ring-offset-background"
+                            : timeUntil.isSoon 
+                              ? "bg-warning/20 text-warning" 
+                              : "bg-primary/10 text-primary"
+                      )}>
+                        <Clock className="h-3 w-3" />
+                        {timeUntil.text}
+                      </div>
+                      {timeUntil.isOptimalWindow && !timeUntil.isLive && (
+                        <span className="text-[10px] font-semibold text-profit animate-pulse">
+                          🔥 BET NOW
+                        </span>
+                      )}
                     </div>
                   </TableCell>
                   <TableCell>
