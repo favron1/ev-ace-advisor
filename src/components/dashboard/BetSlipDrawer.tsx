@@ -53,8 +53,8 @@ export function BetSlipDrawer() {
           </SheetTitle>
         </SheetHeader>
 
-        <Tabs defaultValue="draft" className="flex-1 flex flex-col mt-4">
-          <TabsList className="grid w-full grid-cols-3">
+        <Tabs defaultValue="draft" className="flex-1 flex flex-col mt-4 min-h-0">
+          <TabsList className="grid w-full grid-cols-3 shrink-0">
             <TabsTrigger value="draft" className="gap-1 text-xs">
               <Clock className="h-3 w-3" />
               Draft ({draftBets.length})
@@ -70,8 +70,8 @@ export function BetSlipDrawer() {
           </TabsList>
 
           {/* Draft Bets Tab */}
-          <TabsContent value="draft" className="flex-1 flex flex-col">
-            <div className="flex-1 space-y-4 max-h-[calc(100vh-400px)] overflow-y-auto py-4">
+          <TabsContent value="draft" className="mt-3 flex flex-col h-full min-h-0">
+            <div className="flex-1 space-y-4 overflow-y-auto min-h-0">
               {draftBets.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
                   <Receipt className="h-12 w-12 mb-4 opacity-30" />
@@ -181,8 +181,8 @@ export function BetSlipDrawer() {
           </TabsContent>
 
           {/* Placed Bets Tab */}
-          <TabsContent value="placed" className="flex-1 flex flex-col">
-            <div className="flex-1 space-y-3 max-h-[calc(100vh-400px)] overflow-y-auto py-4">
+          <TabsContent value="placed" className="mt-3 flex flex-col h-full min-h-0">
+            <div className="flex-1 space-y-3 overflow-y-auto min-h-0">
               {placedBets.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
                   <Send className="h-12 w-12 mb-4 opacity-30" />
@@ -281,9 +281,9 @@ export function BetSlipDrawer() {
           </TabsContent>
 
           {/* Results Tab */}
-          <TabsContent value="results" className="flex flex-col">
+          <TabsContent value="results" className="mt-3 flex flex-col h-full">
             {/* Results Summary */}
-            <div className="grid grid-cols-3 gap-3 pt-2 pb-4 border-b border-border">
+            <div className="grid grid-cols-3 gap-3 pb-3 border-b border-border">
               <div className="text-center">
                 <p className="text-2xl font-bold text-foreground">{settledBets.length}</p>
                 <p className="text-xs text-muted-foreground">Total Bets</p>
@@ -298,7 +298,7 @@ export function BetSlipDrawer() {
               </div>
             </div>
 
-            <div className="flex-1 space-y-3 max-h-[calc(100vh-500px)] overflow-y-auto py-4">
+            <div className="flex-1 space-y-3 overflow-y-auto py-3 min-h-0">
               {settledBets.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
                   <Check className="h-12 w-12 mb-4 opacity-30" />
