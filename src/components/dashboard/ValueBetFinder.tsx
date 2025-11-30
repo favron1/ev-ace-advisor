@@ -91,6 +91,8 @@ export function ValueBetFinder() {
     if (!b.commenceTime) return -1;
     return new Date(a.commenceTime).getTime() - new Date(b.commenceTime).getTime();
   });
+  
+  console.log('Sorted bets by time:', sortedBets.map(b => ({ event: b.event, time: b.commenceTime })));
 
   return (
     <div className="stat-card space-y-6">
