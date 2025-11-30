@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -5,6 +6,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { CheckCircle2, Info, Plus, Check, Clock, AlertCircle, Brain, AlertTriangle, XCircle, TrendingUp, Users, BarChart3, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useBetSlip } from "@/contexts/BetSlipContext";
+import { AddAllApprovalDialog } from "./AddAllApprovalDialog";
 import type { AnalyzedBet } from "@/pages/DailyBets";
 
 interface DailyBetsTableProps {
@@ -85,6 +87,7 @@ const formatTimeUntil = (isoString: string) => {
 
 export function DailyBetsTable({ bets, showAiAnalysis = false }: DailyBetsTableProps) {
   const { addToSlip, isInSlip } = useBetSlip();
+  const [showApprovalDialog, setShowApprovalDialog] = useState(false);
 
   const handleAddToSlip = (bet: AnalyzedBet) => {
     addToSlip({
@@ -111,8 +114,12 @@ export function DailyBetsTable({ bets, showAiAnalysis = false }: DailyBetsTableP
     return !timeUntil.isLive && !isInSlip(bet.id);
   });
 
-  const handleAddAll = () => {
-    addableBets.forEach(bet => handleAddToSlip(bet));
+  const handleAddAllClick = () => {
+    setShowApprovalDialog(true);
+  };
+
+  const handleApprovalConfirm = (selectedBets: AnalyzedBet[]) => {
+    selectedBets.forEach(bet => handleAddToSlip(bet));
   };
 
   if (bets.length === 0) {
@@ -127,6 +134,12 @@ export function DailyBetsTable({ bets, showAiAnalysis = false }: DailyBetsTableP
 
   return (
     <div className="stat-card overflow-hidden">
+      <AddAllApprovalDialog
+        open={showApprovalDialog}
+        onOpenChange={setShowApprovalDialog}
+        bets={addableBets}
+        onConfirm={handleApprovalConfirm}
+      />
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
         <p className="text-sm text-muted-foreground">
           {bets.length} bet{bets.length !== 1 ? 's' : ''} found
@@ -135,7 +148,7 @@ export function DailyBetsTable({ bets, showAiAnalysis = false }: DailyBetsTableP
         <Button
           variant="outline"
           size="sm"
-          onClick={handleAddAll}
+          onClick={handleAddAllClick}
           disabled={addableBets.length === 0}
           className="gap-2"
         >
