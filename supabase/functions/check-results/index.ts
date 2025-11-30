@@ -144,6 +144,32 @@ serve(async (req) => {
         } else {
           updatedCount++;
           results.push({ id: bet.id, status, profit_loss: profitLoss });
+          
+          // Update user profile statistics
+          const { data: userStats } = await supabase
+            .from('bet_history')
+            .select('stake, profit_loss, status')
+            .eq('user_id', bet.user_id)
+            .neq('status', 'pending');
+          
+          if (userStats) {
+            const totalBets = userStats.length;
+            const totalWins = userStats.filter(b => b.status === 'won').length;
+            const totalProfit = userStats.reduce((sum, b) => sum + (b.profit_loss || 0), 0);
+            
+            await supabase
+              .from('profiles')
+              .update({
+                total_bets: totalBets,
+                total_wins: totalWins,
+                total_profit: totalProfit,
+                bankroll: 1000 + totalProfit,
+                updated_at: new Date().toISOString()
+              })
+              .eq('user_id', bet.user_id);
+            
+            console.log(`Updated profile for user ${bet.user_id}: ${totalBets} bets, ${totalWins} wins, ${totalProfit} profit`);
+          }
         }
       }
     }
