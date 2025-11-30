@@ -57,7 +57,7 @@ export function BetSlipDrawer() {
           <TabsList className="grid w-full grid-cols-3 shrink-0">
             <TabsTrigger value="draft" className="gap-1 text-xs">
               <Clock className="h-3 w-3" />
-              Draft ({draftBets.length})
+              Picks ({draftBets.length})
             </TabsTrigger>
             <TabsTrigger value="placed" className="gap-1 text-xs">
               <Send className="h-3 w-3" />
@@ -75,7 +75,7 @@ export function BetSlipDrawer() {
               {draftBets.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
                   <Receipt className="h-12 w-12 mb-4 opacity-30" />
-                  <p className="font-medium">No draft bets</p>
+                  <p className="font-medium">No picks yet</p>
                   <p className="text-sm">Add selections from the Best Bets table</p>
                 </div>
               ) : (
