@@ -84,6 +84,14 @@ export function ValueBetFinder() {
     });
   };
 
+  // Sort bets by commence time (soonest first)
+  const sortedBets = [...bets].sort((a, b) => {
+    if (!a.commenceTime && !b.commenceTime) return 0;
+    if (!a.commenceTime) return 1;
+    if (!b.commenceTime) return -1;
+    return new Date(a.commenceTime).getTime() - new Date(b.commenceTime).getTime();
+  });
+
   return (
     <div className="stat-card space-y-6">
       <div className="flex items-center justify-between">
@@ -130,7 +138,7 @@ export function ValueBetFinder() {
         </div>
       ) : (
         <div className="space-y-3">
-          {bets.map((bet) => (
+          {sortedBets.map((bet) => (
             <div
               key={bet.id}
               className="group rounded-lg border border-border bg-muted/30 p-4 transition-all duration-200 hover:border-primary/30 hover:bg-muted/50"
