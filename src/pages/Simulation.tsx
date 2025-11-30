@@ -64,38 +64,72 @@ const defaultConfig: SimulationConfig = {
 export default function Simulation() {
   const [config, setConfig] = useState<SimulationConfig>(defaultConfig);
   const [isRunning, setIsRunning] = useState(false);
+  const [isCheckingResults, setIsCheckingResults] = useState(false);
   const [simulatedBets, setSimulatedBets] = useState<SimulatedBet[]>([]);
   const [stats, setStats] = useState<SimulationStats | null>(null);
   const [valueBets, setValueBets] = useState<any[]>([]);
   const [progress, setProgress] = useState(0);
   const { toast } = useToast();
 
+  // Count settled bets (with real results)
+  const settledBets = valueBets.filter(bet => bet.result === 'won' || bet.result === 'lost').length;
+
   // Fetch historical value bets
-  useEffect(() => {
-    async function fetchValueBets() {
-      const { data, error } = await supabase
-        .from('value_bets')
-        .select(`
-          *,
-          matches (
-            home_team,
-            away_team,
-            league,
-            match_date
-          )
-        `)
-        .order('created_at', { ascending: false });
+  const fetchValueBets = async () => {
+    const { data, error } = await supabase
+      .from('value_bets')
+      .select(`
+        *,
+        matches (
+          home_team,
+          away_team,
+          league,
+          match_date
+        )
+      `)
+      .order('created_at', { ascending: false });
 
-      if (error) {
-        console.error('Error fetching value bets:', error);
-        return;
-      }
-
-      setValueBets(data || []);
+    if (error) {
+      console.error('Error fetching value bets:', error);
+      return;
     }
 
+    setValueBets(data || []);
+  };
+
+  useEffect(() => {
     fetchValueBets();
   }, []);
+
+  // Check results from real matches
+  const checkResults = async () => {
+    setIsCheckingResults(true);
+    try {
+      const response = await supabase.functions.invoke('check-results');
+      
+      if (response.error) {
+        throw response.error;
+      }
+
+      const data = response.data;
+      toast({
+        title: "Results checked",
+        description: `Updated ${data.valueBetsUpdated || 0} value bets with real match outcomes.`,
+      });
+
+      // Refresh value bets to get updated results
+      await fetchValueBets();
+    } catch (error) {
+      console.error('Error checking results:', error);
+      toast({
+        title: "Error checking results",
+        description: error instanceof Error ? error.message : "Failed to check match results",
+        variant: "destructive",
+      });
+    } finally {
+      setIsCheckingResults(false);
+    }
+  };
 
   const calculateKellyStake = (edge: number, odds: number, bankroll: number): number => {
     // Kelly Criterion: f* = (bp - q) / b
@@ -122,13 +156,17 @@ export default function Simulation() {
     setProgress(0);
     setSimulatedBets([]);
 
-    // Filter value bets based on config
+    // Filter value bets based on config - prioritize bets with real results
     let filteredBets = valueBets.filter(bet => {
       const edgeMatch = bet.edge >= config.minEdge && bet.edge <= config.maxEdge;
       const oddsMatch = bet.offered_odds >= config.minOdds && bet.offered_odds <= config.maxOdds;
       const confidenceMatch = config.confidenceLevel === 'all' || bet.confidence === config.confidenceLevel;
       return edgeMatch && oddsMatch && confidenceMatch;
     });
+
+    // Separate bets with real results from pending ones
+    const settledBets = filteredBets.filter(bet => bet.result === 'won' || bet.result === 'lost');
+    const pendingBets = filteredBets.filter(bet => bet.result === 'pending' || !bet.result);
 
     if (filteredBets.length === 0) {
       toast({
@@ -140,18 +178,44 @@ export default function Simulation() {
       return;
     }
 
-    // If we need more bets than available, repeat the dataset
+    // Show info about data source
+    if (settledBets.length === 0 && pendingBets.length > 0) {
+      toast({
+        title: "No settled bets yet",
+        description: `All ${pendingBets.length} bets are still pending. Run 'Check Results' first to get real outcomes.`,
+        variant: "default",
+      });
+    } else if (settledBets.length > 0) {
+      toast({
+        title: "Using real results",
+        description: `${settledBets.length} bets with real outcomes, ${pendingBets.length} still pending.`,
+        variant: "default",
+      });
+    }
+
+    // Build simulation pool - prioritize settled bets, fill with pending if needed
     const betsNeeded = config.numberOfBets;
     let simulationPool: any[] = [];
-    while (simulationPool.length < betsNeeded) {
-      simulationPool = [...simulationPool, ...filteredBets];
+    
+    // First add all settled bets (real results)
+    simulationPool = [...settledBets];
+    
+    // If we need more and have pending bets, we can't use them without results
+    // Only use settled bets for accurate backtesting
+    if (simulationPool.length === 0) {
+      toast({
+        title: "No settled bets",
+        description: "Check results first to get actual match outcomes for backtesting.",
+        variant: "destructive",
+      });
+      setIsRunning(false);
+      return;
     }
+
+    // Limit to requested number
     simulationPool = simulationPool.slice(0, betsNeeded);
 
-    // Shuffle for randomness
-    simulationPool = simulationPool.sort(() => Math.random() - 0.5);
-
-    // Run simulation
+    // Run simulation with REAL results (no randomness!)
     let bankroll = config.initialBankroll;
     let maxBankroll = bankroll;
     let maxDrawdown = 0;
@@ -180,9 +244,8 @@ export default function Simulation() {
       stake = Math.min(stake, bankroll);
       if (stake <= 0) break;
 
-      // Determine result based on actual probability
-      const random = Math.random();
-      const isWin = random < bet.actual_probability;
+      // Use ACTUAL RESULT from database - no random!
+      const isWin = bet.result === 'won';
 
       const profitLoss = isWin 
         ? stake * (bet.offered_odds - 1) 
@@ -253,7 +316,7 @@ export default function Simulation() {
 
     toast({
       title: "Simulation complete",
-      description: `Ran ${results.length} bets. ${totalProfit >= 0 ? 'Profit' : 'Loss'}: $${Math.abs(totalProfit).toFixed(2)}`,
+      description: `Ran ${results.length} bets with REAL results. ${totalProfit >= 0 ? 'Profit' : 'Loss'}: $${Math.abs(totalProfit).toFixed(2)}`,
     });
   };
 
@@ -291,9 +354,12 @@ export default function Simulation() {
                 setConfig={setConfig}
                 onRun={runSimulation}
                 onReset={resetSimulation}
+                onCheckResults={checkResults}
                 isRunning={isRunning}
+                isCheckingResults={isCheckingResults}
                 progress={progress}
                 availableBets={valueBets.length}
+                settledBets={settledBets}
               />
             </div>
 

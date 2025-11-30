@@ -1,4 +1,4 @@
-import { Play, RotateCcw, Loader2, Database } from "lucide-react";
+import { Play, RotateCcw, Loader2, Database, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -12,9 +12,12 @@ interface SimulationControlsProps {
   setConfig: (config: SimulationConfig) => void;
   onRun: () => void;
   onReset: () => void;
+  onCheckResults: () => void;
   isRunning: boolean;
+  isCheckingResults: boolean;
   progress: number;
   availableBets: number;
+  settledBets: number;
 }
 
 export function SimulationControls({
@@ -22,9 +25,12 @@ export function SimulationControls({
   setConfig,
   onRun,
   onReset,
+  onCheckResults,
   isRunning,
+  isCheckingResults,
   progress,
   availableBets,
+  settledBets,
 }: SimulationControlsProps) {
   const updateConfig = (key: keyof SimulationConfig, value: any) => {
     setConfig({ ...config, [key]: value });
@@ -34,11 +40,31 @@ export function SimulationControls({
     <div className="stat-card space-y-6">
       <div className="flex items-center justify-between">
         <h3 className="text-lg font-semibold text-foreground">Simulation Settings</h3>
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Database className="h-4 w-4" />
-          {availableBets} bets available
+        <div className="flex flex-col items-end gap-1 text-sm">
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <Database className="h-4 w-4" />
+            {availableBets} bets available
+          </div>
+          <div className="text-xs text-primary">
+            {settledBets} with real results
+          </div>
         </div>
       </div>
+
+      {/* Check Results Button */}
+      <Button
+        onClick={onCheckResults}
+        variant="outline"
+        className="w-full"
+        disabled={isCheckingResults || isRunning}
+      >
+        {isCheckingResults ? (
+          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+        ) : (
+          <RefreshCw className="h-4 w-4 mr-2" />
+        )}
+        {isCheckingResults ? 'Checking...' : 'Check Match Results'}
+      </Button>
 
       {/* Number of Bets */}
       <div className="space-y-2">
