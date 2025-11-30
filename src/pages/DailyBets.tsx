@@ -171,11 +171,85 @@ const DailyBets = () => {
     }
   };
 
+  // Auto-run AI analysis after bets are fetched
+  const runFullAnalysis = async () => {
+    setLoading(true);
+    setAiAnalyzed(false);
+    try {
+      const { data, error } = await supabase.functions.invoke('analyze-value-bets');
+
+      if (error) {
+        console.error('Error fetching analyzed bets:', error);
+        toast({
+          title: "Error fetching bets",
+          description: error.message || "Failed to analyze value bets",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      if (data?.bets && data.bets.length > 0) {
+        // Run AI analysis automatically
+        setAiAnalyzing(true);
+        toast({
+          title: "AI Analysis Started",
+          description: "Cross-checking bets with historical data, market sentiment, team form & pro tipster knowledge...",
+        });
+
+        const { data: aiData, error: aiError } = await supabase.functions.invoke('ai-analyze-bets', {
+          body: { bets: data.bets }
+        });
+
+        if (aiError) {
+          console.error('AI analysis error:', aiError);
+          // Still show the bets without AI analysis
+          setBets(data.bets);
+          setSummary(data.summary);
+          toast({
+            title: "AI Analysis Failed",
+            description: "Showing bets without AI cross-check",
+            variant: "destructive",
+          });
+        } else if (aiData?.bets) {
+          setBets(aiData.bets);
+          setSummary(prev => ({
+            ...data.summary,
+            ...aiData.summary,
+            totalBets: aiData.bets.length,
+          }));
+          setAiAnalyzed(true);
+          
+          const { strongBets, goodBets, cautionBets, avoidBets } = aiData.summary;
+          toast({
+            title: "Analysis Complete",
+            description: `${strongBets} strong, ${goodBets} good, ${cautionBets} caution, ${avoidBets} avoid`,
+          });
+        }
+        setAiAnalyzing(false);
+        setLastUpdated(new Date());
+      } else {
+        setBets(data?.bets || []);
+        setSummary(data?.summary || null);
+        setLastUpdated(new Date());
+      }
+    } catch (err) {
+      console.error('Error:', err);
+      toast({
+        title: "Error",
+        description: "Failed to connect to analysis service",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+      setAiAnalyzing(false);
+    }
+  };
+
   useEffect(() => {
-    fetchAnalyzedBets();
+    runFullAnalysis();
     
     // Auto-refresh every 5 minutes
-    const interval = setInterval(fetchAnalyzedBets, 5 * 60 * 1000);
+    const interval = setInterval(runFullAnalysis, 5 * 60 * 1000);
     return () => clearInterval(interval);
   }, []);
 
@@ -313,32 +387,18 @@ const DailyBets = () => {
               Export CSV
             </Button>
             <Button
-              variant="outline"
+              variant="default"
               size="sm"
-              onClick={fetchAnalyzedBets}
-              disabled={loading}
-              className="gap-2"
+              onClick={runFullAnalysis}
+              disabled={loading || aiAnalyzing}
+              className="gap-2 bg-gradient-to-r from-primary to-purple-600 hover:from-primary/90 hover:to-purple-600/90"
             >
-              {loading ? (
+              {loading || aiAnalyzing ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
                 <RefreshCw className="h-4 w-4" />
               )}
-              Refresh
-            </Button>
-            <Button
-              variant="default"
-              size="sm"
-              onClick={runAIAnalysis}
-              disabled={loading || aiAnalyzing || bets.length === 0}
-              className="gap-2 bg-gradient-to-r from-primary to-purple-600 hover:from-primary/90 hover:to-purple-600/90"
-            >
-              {aiAnalyzing ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Brain className="h-4 w-4" />
-              )}
-              {aiAnalyzing ? 'AI Analyzing...' : aiAnalyzed ? 'Re-analyze' : 'AI Cross-Check'}
+              {loading ? 'Loading...' : aiAnalyzing ? 'AI Analyzing...' : 'Refresh Analysis'}
             </Button>
           </div>
         </div>
