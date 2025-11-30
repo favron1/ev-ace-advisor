@@ -107,7 +107,10 @@ export default function Simulation() {
   const fetchHistorical = async () => {
     setIsFetchingHistorical(true);
     try {
-      const response = await supabase.functions.invoke('fetch-historical-odds');
+      // Fetch historical data from last 90 days to get more settled bets
+      const response = await supabase.functions.invoke('fetch-historical-odds', {
+        body: { daysBack: 90 }
+      });
       
       if (response.error) {
         throw response.error;
@@ -116,7 +119,7 @@ export default function Simulation() {
       const data = response.data;
       toast({
         title: "Historical data loaded",
-        description: `${data.totalBets} bets loaded (${data.settledBets} settled, ${data.winRate} win rate)`,
+        description: `${data.settledBets} settled bets from last ${data.daysBack} days (${data.winRate} win rate)`,
       });
 
       // Refresh value bets
