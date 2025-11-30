@@ -6,10 +6,7 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Sharp bookmakers - prioritize these for fair odds calculation
 const SHARP_BOOKS = ['pinnacle', 'pinnacle_us', 'betfair_ex_uk', 'matchbook', 'sbobet'];
-
-// League tiers for edge thresholds
 const TIER_1_LEAGUES = ['soccer_epl', 'soccer_spain_la_liga', 'soccer_germany_bundesliga', 'soccer_italy_serie_a', 'soccer_france_ligue_one'];
 
 interface OddsEvent {
@@ -52,16 +49,9 @@ interface OutcomeData {
   bookmakers: string[];
 }
 
-function getLeagueTier(sportKey: string): number {
-  if (TIER_1_LEAGUES.includes(sportKey)) return 1;
-  return 3;
-}
-
-function getMinEdge(tier: number): number {
-  switch (tier) {
-    case 1: return 3;
-    default: return 8;
-  }
+function getMinEdge(sportKey: string): number {
+  if (TIER_1_LEAGUES.includes(sportKey)) return 3;
+  return 8;
 }
 
 function deVigOdds(outcomes: OutcomeData[]): Map<string, { fairProb: number; fairOdds: number }> {
@@ -191,119 +181,91 @@ serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    let daysBack = 14; // Reduced default to avoid timeout
+    let daysBack = 30;
     try {
       const body = await req.json();
-      daysBack = Math.min(body.daysBack || 14, 30); // Cap at 30 days max
+      daysBack = Math.min(body.daysBack || 30, 60);
     } catch {
       // Use defaults
     }
 
-    console.log(`Fetching historical odds for last ${daysBack} days (limited to prevent timeout)`);
+    console.log(`Fetching historical data for last ${daysBack} days`);
 
     const sports = TIER_1_LEAGUES;
     const valueBets: any[] = [];
     const matchExposure = new Map<string, number>();
     const processedMatches = new Set<string>();
     
-    // Sample fewer dates - every 7 days instead of 3
+    // Generate dates - every 7 days
     const datesToFetch: string[] = [];
-    for (let d = 3; d <= daysBack; d += 7) {
+    for (let d = 7; d <= daysBack; d += 7) {
       datesToFetch.push(getDateDaysAgo(d));
     }
-    console.log(`Will fetch from ${datesToFetch.length} dates`);
-    
-    // Step 1: Fetch completed match scores (only recent 3 days from scores endpoint)
-    const matchScores = new Map<string, { home: number; away: number }>();
-    
-    for (const sport of sports) {
-      try {
-        const scoresUrl = `https://api.the-odds-api.com/v4/sports/${sport}/scores/?apiKey=${ODDS_API_KEY}&daysFrom=3`;
-        const response = await fetch(scoresUrl);
-        if (!response.ok) continue;
-        
-        const scores: ScoreEvent[] = await response.json();
-        const completed = scores.filter(s => s.completed && s.scores);
-        console.log(`${sport}: ${completed.length} completed (recent)`);
-        
-        for (const match of completed) {
-          const key = normalizeTeamKey(match.home_team, match.away_team);
-          const homeScore = parseInt(match.scores!.find(s => s.name === match.home_team)?.score || '0');
-          const awayScore = parseInt(match.scores!.find(s => s.name === match.away_team)?.score || '0');
-          matchScores.set(key, { home: homeScore, away: awayScore });
-        }
-      } catch (err) {
-        console.error(`Error fetching ${sport} scores:`, err);
+    console.log(`Will process ${datesToFetch.length} date snapshots`);
+
+    // Process each date - fetch BOTH odds and scores for same date
+    for (const targetDate of datesToFetch) {
+      if (valueBets.length >= 100) {
+        console.log(`Reached 100 bets, stopping`);
+        break;
       }
-    }
-    
-    // Fetch historical scores - but limit API calls
-    for (const dateStr of datesToFetch.slice(0, 3)) { // Only first 3 dates for scores
-      for (const sport of sports.slice(0, 3)) { // Only first 3 sports
+      
+      const dateStr = targetDate.split('T')[0];
+      console.log(`\n=== Processing ${dateStr} ===`);
+      
+      // For each sport, fetch historical scores first, then odds
+      for (const sport of sports) {
+        if (valueBets.length >= 100) break;
+        
+        const minEdge = getMinEdge(sport);
+        const matchScores = new Map<string, { home: number; away: number }>();
+        
         try {
-          const histScoresUrl = `https://api.the-odds-api.com/v4/historical/sports/${sport}/scores/?apiKey=${ODDS_API_KEY}&date=${dateStr}`;
-          const response = await fetch(histScoresUrl);
-          if (!response.ok) continue;
+          // Fetch historical SCORES for this date and sport
+          const scoresUrl = `https://api.the-odds-api.com/v4/historical/sports/${sport}/scores/?apiKey=${ODDS_API_KEY}&date=${targetDate}`;
+          const scoresResponse = await fetch(scoresUrl);
           
-          const histData = await response.json();
-          const scores: ScoreEvent[] = histData.data || [];
-          const completed = scores.filter(s => s.completed && s.scores);
-          
-          for (const match of completed) {
-            const key = normalizeTeamKey(match.home_team, match.away_team);
-            if (!matchScores.has(key)) {
+          if (scoresResponse.ok) {
+            const scoresData = await scoresResponse.json();
+            const scores: ScoreEvent[] = scoresData.data || [];
+            const completed = scores.filter(s => s.completed && s.scores);
+            
+            for (const match of completed) {
+              const key = normalizeTeamKey(match.home_team, match.away_team);
               const homeScore = parseInt(match.scores!.find(s => s.name === match.home_team)?.score || '0');
               const awayScore = parseInt(match.scores!.find(s => s.name === match.away_team)?.score || '0');
               matchScores.set(key, { home: homeScore, away: awayScore });
             }
+            
+            if (completed.length > 0) {
+              console.log(`${sport}: ${completed.length} completed matches with scores`);
+            }
           }
-        } catch {
-          // Silent fail
-        }
-      }
-    }
-    
-    console.log(`Loaded ${matchScores.size} completed matches`);
-
-    // Step 2: Fetch historical odds - limit to prevent timeout
-    for (const targetDate of datesToFetch) {
-      // Early exit if we have enough bets
-      if (valueBets.length >= 50) {
-        console.log(`Reached 50 bets, stopping early`);
-        break;
-      }
-      
-      console.log(`Processing date: ${targetDate.split('T')[0]}`);
-      
-      for (const sport of sports) {
-        if (valueBets.length >= 50) break;
-        
-        const tier = getLeagueTier(sport);
-        const minEdge = getMinEdge(tier);
-        
-        try {
-          const histUrl = `https://api.the-odds-api.com/v4/historical/sports/${sport}/odds/?apiKey=${ODDS_API_KEY}&regions=uk,eu&markets=h2h&oddsFormat=decimal&date=${targetDate}`;
           
-          const histResponse = await fetch(histUrl);
-          if (!histResponse.ok) continue;
-          
-          const histData: HistoricalApiResponse = await histResponse.json();
-          const events = histData.data || [];
-          
-          if (events.length > 0) {
-            console.log(`${sport}: ${events.length} events`);
+          if (matchScores.size === 0) {
+            continue; // No scores for this sport/date, skip odds
           }
+          
+          // Fetch historical ODDS for this date and sport
+          const oddsUrl = `https://api.the-odds-api.com/v4/historical/sports/${sport}/odds/?apiKey=${ODDS_API_KEY}&regions=uk,eu&markets=h2h&oddsFormat=decimal&date=${targetDate}`;
+          const oddsResponse = await fetch(oddsUrl);
+          
+          if (!oddsResponse.ok) continue;
+          
+          const oddsData: HistoricalApiResponse = await oddsResponse.json();
+          const events = oddsData.data || [];
 
           for (const event of events) {
-            if (valueBets.length >= 50) break;
+            if (valueBets.length >= 100) break;
             if (!event.bookmakers || event.bookmakers.length < 3) continue;
             
             const matchKey = normalizeTeamKey(event.home_team, event.away_team);
             if (processedMatches.has(matchKey)) continue;
-            processedMatches.add(matchKey);
             
             const result = matchScores.get(matchKey);
             if (!result) continue; // Only bets with real results
+            
+            processedMatches.add(matchKey);
             
             // Get or create match record
             const { data: existingMatch } = await supabase
@@ -332,7 +294,7 @@ serve(async (req) => {
               matchId = newMatch.id;
             }
 
-            // Process H2H market with de-vigging
+            // Process H2H market
             const h2hOutcomes = extractOutcomeData(event, 'h2h');
             
             if (h2hOutcomes.length >= 2 && h2hOutcomes.every(o => o.odds.length >= 3)) {
@@ -345,7 +307,7 @@ serve(async (req) => {
               ];
 
               for (const sel of selections) {
-                if (valueBets.length >= 50) break;
+                if (valueBets.length >= 100) break;
                 
                 const outcomeData = h2hOutcomes.find(o => o.name === sel.name);
                 const fair = fairValues.get(sel.name);
@@ -389,20 +351,26 @@ serve(async (req) => {
                   actual_score: `${result.home}-${result.away}`,
                   settled_at: new Date().toISOString(),
                 });
+                
+                console.log(`+ ${sel.displayName} @ ${bestOdds.toFixed(2)} (edge: ${edge.toFixed(1)}%) - ${sel.winner ? 'WON' : 'LOST'}`);
               }
             }
           }
         } catch (err) {
-          console.error(`Error processing ${sport}:`, err);
+          console.error(`Error processing ${sport} for ${dateStr}:`, err);
         }
       }
     }
 
-    console.log(`Found ${valueBets.length} value bets with real results`);
+    console.log(`\nTotal: ${valueBets.length} value bets with real results`);
+    
+    const wins = valueBets.filter(b => b.result === 'won').length;
+    const losses = valueBets.filter(b => b.result === 'lost').length;
+    console.log(`Results: ${wins} wins, ${losses} losses (${((wins / (wins + losses)) * 100).toFixed(1)}% win rate)`);
 
-    // Save to database
+    // Save to database - clear old historical bets first
     if (valueBets.length > 0) {
-      // Clear old simulation data and insert new
+      // Delete old historical/settled bets (keep active ones)
       await supabase.from('value_bets').delete().eq('is_active', false).not('result', 'is', null);
       
       const { error: insertError } = await supabase.from('value_bets').insert(valueBets);
@@ -416,8 +384,10 @@ serve(async (req) => {
     return new Response(JSON.stringify({ 
       success: true, 
       betsFound: valueBets.length,
-      matchesWithScores: matchScores.size,
-      message: `Found ${valueBets.length} value bets with real results`
+      wins,
+      losses,
+      winRate: valueBets.length > 0 ? ((wins / valueBets.length) * 100).toFixed(1) : 0,
+      message: `Found ${valueBets.length} bets: ${wins} wins, ${losses} losses`
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
