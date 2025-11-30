@@ -196,24 +196,27 @@ serve(async (req) => {
     const matchExposure = new Map<string, number>();
     const processedMatches = new Set<string>();
     
-    // Generate dates - every 7 days
-    const datesToFetch: string[] = [];
-    for (let d = 7; d <= daysBack; d += 7) {
-      datesToFetch.push(getDateDaysAgo(d));
+    // Strategy: Fetch ODDS from date X, fetch SCORES from date X+3 days
+    // This way games scheduled around date X should be completed by X+3
+    const datePairs: { oddsDate: string; scoresDate: string }[] = [];
+    for (let d = 10; d <= daysBack; d += 7) {
+      datePairs.push({
+        oddsDate: getDateDaysAgo(d),
+        scoresDate: getDateDaysAgo(d - 3) // 3 days AFTER the odds date
+      });
     }
-    console.log(`Will process ${datesToFetch.length} date snapshots`);
+    console.log(`Will process ${datePairs.length} date pairs`);
 
-    // Process each date - fetch BOTH odds and scores for same date
-    for (const targetDate of datesToFetch) {
+    for (const { oddsDate, scoresDate } of datePairs) {
       if (valueBets.length >= 100) {
         console.log(`Reached 100 bets, stopping`);
         break;
       }
       
-      const dateStr = targetDate.split('T')[0];
-      console.log(`\n=== Processing ${dateStr} ===`);
+      const oddsDateStr = oddsDate.split('T')[0];
+      const scoresDateStr = scoresDate.split('T')[0];
+      console.log(`\n=== Odds from ${oddsDateStr}, Scores from ${scoresDateStr} ===`);
       
-      // For each sport, fetch historical scores first, then odds
       for (const sport of sports) {
         if (valueBets.length >= 100) break;
         
@@ -221,8 +224,8 @@ serve(async (req) => {
         const matchScores = new Map<string, { home: number; away: number }>();
         
         try {
-          // Fetch historical SCORES for this date and sport
-          const scoresUrl = `https://api.the-odds-api.com/v4/historical/sports/${sport}/scores/?apiKey=${ODDS_API_KEY}&date=${targetDate}`;
+          // Fetch SCORES from the LATER date (when games should be completed)
+          const scoresUrl = `https://api.the-odds-api.com/v4/historical/sports/${sport}/scores/?apiKey=${ODDS_API_KEY}&date=${scoresDate}`;
           const scoresResponse = await fetch(scoresUrl);
           
           if (scoresResponse.ok) {
@@ -237,23 +240,22 @@ serve(async (req) => {
               matchScores.set(key, { home: homeScore, away: awayScore });
             }
             
-            if (completed.length > 0) {
-              console.log(`${sport}: ${completed.length} completed matches with scores`);
-            }
+            console.log(`${sport}: ${completed.length} completed matches`);
           }
           
           if (matchScores.size === 0) {
-            continue; // No scores for this sport/date, skip odds
+            continue;
           }
           
-          // Fetch historical ODDS for this date and sport
-          const oddsUrl = `https://api.the-odds-api.com/v4/historical/sports/${sport}/odds/?apiKey=${ODDS_API_KEY}&regions=uk,eu&markets=h2h&oddsFormat=decimal&date=${targetDate}`;
+          // Fetch ODDS from the EARLIER date (pre-match odds)
+          const oddsUrl = `https://api.the-odds-api.com/v4/historical/sports/${sport}/odds/?apiKey=${ODDS_API_KEY}&regions=uk,eu&markets=h2h&oddsFormat=decimal&date=${oddsDate}`;
           const oddsResponse = await fetch(oddsUrl);
           
           if (!oddsResponse.ok) continue;
           
           const oddsData: HistoricalApiResponse = await oddsResponse.json();
           const events = oddsData.data || [];
+          console.log(`${sport}: ${events.length} odds events`);
 
           for (const event of events) {
             if (valueBets.length >= 100) break;
@@ -263,7 +265,7 @@ serve(async (req) => {
             if (processedMatches.has(matchKey)) continue;
             
             const result = matchScores.get(matchKey);
-            if (!result) continue; // Only bets with real results
+            if (!result) continue;
             
             processedMatches.add(matchKey);
             
@@ -294,7 +296,6 @@ serve(async (req) => {
               matchId = newMatch.id;
             }
 
-            // Process H2H market
             const h2hOutcomes = extractOutcomeData(event, 'h2h');
             
             if (h2hOutcomes.length >= 2 && h2hOutcomes.every(o => o.odds.length >= 3)) {
@@ -352,12 +353,12 @@ serve(async (req) => {
                   settled_at: new Date().toISOString(),
                 });
                 
-                console.log(`+ ${sel.displayName} @ ${bestOdds.toFixed(2)} (edge: ${edge.toFixed(1)}%) - ${sel.winner ? 'WON' : 'LOST'}`);
+                console.log(`+ ${sel.displayName} @ ${bestOdds.toFixed(2)} edge:${edge.toFixed(1)}% ${sel.winner ? 'WON' : 'LOST'}`);
               }
             }
           }
         } catch (err) {
-          console.error(`Error processing ${sport} for ${dateStr}:`, err);
+          console.error(`Error processing ${sport}:`, err);
         }
       }
     }
@@ -366,11 +367,9 @@ serve(async (req) => {
     
     const wins = valueBets.filter(b => b.result === 'won').length;
     const losses = valueBets.filter(b => b.result === 'lost').length;
-    console.log(`Results: ${wins} wins, ${losses} losses (${((wins / (wins + losses)) * 100).toFixed(1)}% win rate)`);
+    console.log(`Results: ${wins} wins, ${losses} losses (${valueBets.length > 0 ? ((wins / valueBets.length) * 100).toFixed(1) : 0}% win rate)`);
 
-    // Save to database - clear old historical bets first
     if (valueBets.length > 0) {
-      // Delete old historical/settled bets (keep active ones)
       await supabase.from('value_bets').delete().eq('is_active', false).not('result', 'is', null);
       
       const { error: insertError } = await supabase.from('value_bets').insert(valueBets);
