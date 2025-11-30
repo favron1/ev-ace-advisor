@@ -19,6 +19,8 @@ export function BetSlipDrawer() {
     updateResult,
     undoResult,
     clearSlip,
+    clearPlacedBets,
+    clearSettledBets,
     totalStake,
     potentialReturn,
     totalProfit,
@@ -270,19 +272,29 @@ export function BetSlipDrawer() {
                     ${placedBets.reduce((sum, b) => sum + b.stake, 0).toFixed(2)}
                   </span>
                 </div>
-                <Button 
-                  variant="outline" 
-                  className="w-full"
-                  onClick={checkResults}
-                  disabled={isChecking}
-                >
-                  {isChecking ? (
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  ) : (
-                    <RefreshCw className="h-4 w-4 mr-2" />
-                  )}
-                  {isChecking ? 'Checking...' : 'Check Results Automatically'}
-                </Button>
+                <div className="flex gap-2">
+                  <Button 
+                    variant="outline" 
+                    className="flex-1"
+                    onClick={clearPlacedBets}
+                  >
+                    <Trash2 className="h-4 w-4 mr-2" />
+                    Clear All
+                  </Button>
+                  <Button 
+                    variant="outline" 
+                    className="flex-1"
+                    onClick={checkResults}
+                    disabled={isChecking}
+                  >
+                    {isChecking ? (
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                      <RefreshCw className="h-4 w-4 mr-2" />
+                    )}
+                    {isChecking ? 'Checking...' : 'Check Results'}
+                  </Button>
+                </div>
               </div>
             )}
           </TabsContent>
@@ -371,7 +383,7 @@ export function BetSlipDrawer() {
             </div>
 
             {settledBets.length > 0 && (
-              <div className="border-t border-border pt-4 space-y-2">
+              <div className="border-t border-border pt-4 space-y-3">
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-muted-foreground">Win Rate</span>
                   <span className="font-mono font-medium text-foreground">{winRate.toFixed(1)}%</span>
@@ -385,6 +397,14 @@ export function BetSlipDrawer() {
                     {totalProfit >= 0 ? '+' : ''}${totalProfit.toFixed(2)}
                   </span>
                 </div>
+                <Button 
+                  variant="outline" 
+                  className="w-full"
+                  onClick={clearSettledBets}
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Clear All Results
+                </Button>
               </div>
             )}
           </TabsContent>

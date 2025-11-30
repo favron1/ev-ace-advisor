@@ -34,6 +34,8 @@ interface BetSlipContextType {
   updateResult: (id: string, result: 'won' | 'lost') => void;
   undoResult: (id: string) => void;
   clearSlip: () => void;
+  clearPlacedBets: () => Promise<void>;
+  clearSettledBets: () => Promise<void>;
   isInSlip: (id: string) => boolean;
   totalStake: number;
   potentialReturn: number;
@@ -405,6 +407,64 @@ export function BetSlipProvider({ children }: { children: ReactNode }) {
     setSlipBets(prev => prev.filter(b => b.status !== 'draft'));
   };
 
+  const clearPlacedBets = async () => {
+    const placed = slipBets.filter(b => b.status === 'placed');
+    
+    // Delete from database
+    const dbIds = placed.filter(b => b.dbId).map(b => b.dbId!);
+    if (dbIds.length > 0) {
+      const { error } = await supabase
+        .from('bet_history')
+        .delete()
+        .in('id', dbIds);
+      
+      if (error) {
+        console.error('Error clearing placed bets:', error);
+        toast({
+          title: "Error",
+          description: "Failed to clear placed bets from database",
+          variant: "destructive"
+        });
+        return;
+      }
+    }
+    
+    setSlipBets(prev => prev.filter(b => b.status !== 'placed'));
+    toast({
+      title: "Cleared",
+      description: `${placed.length} placed bet(s) removed`
+    });
+  };
+
+  const clearSettledBets = async () => {
+    const settled = slipBets.filter(b => b.status === 'won' || b.status === 'lost');
+    
+    // Delete from database
+    const dbIds = settled.filter(b => b.dbId).map(b => b.dbId!);
+    if (dbIds.length > 0) {
+      const { error } = await supabase
+        .from('bet_history')
+        .delete()
+        .in('id', dbIds);
+      
+      if (error) {
+        console.error('Error clearing settled bets:', error);
+        toast({
+          title: "Error",
+          description: "Failed to clear results from database",
+          variant: "destructive"
+        });
+        return;
+      }
+    }
+    
+    setSlipBets(prev => prev.filter(b => b.status !== 'won' && b.status !== 'lost'));
+    toast({
+      title: "Cleared",
+      description: `${settled.length} result(s) removed`
+    });
+  };
+
   const isInSlip = (id: string) => slipBets.some(b => b.id === id);
 
   const draftBets = slipBets.filter(b => b.status === 'draft');
@@ -429,6 +489,8 @@ export function BetSlipProvider({ children }: { children: ReactNode }) {
       updateResult,
       undoResult,
       clearSlip,
+      clearPlacedBets,
+      clearSettledBets,
       isInSlip,
       totalStake,
       potentialReturn,
