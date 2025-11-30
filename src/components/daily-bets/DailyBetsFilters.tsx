@@ -35,6 +35,7 @@ export function DailyBetsFilters({
             { value: '12', label: '12 Hours' },
             { value: '24', label: '24 Hours' },
             { value: '48', label: '48 Hours' },
+            { value: '168', label: '7 Days' },
           ].map((option) => (
             <Button
               key={option.value}
