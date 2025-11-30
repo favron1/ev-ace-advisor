@@ -50,7 +50,7 @@ const DailyBets = () => {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [confidenceFilter, setConfidenceFilter] = useState<string>("all");
   const [marketFilter, setMarketFilter] = useState<string>("all");
-  const [sortBy, setSortBy] = useState<string>("ev");
+  const [sortBy, setSortBy] = useState<string>("time");
   const [timeFrame, setTimeFrame] = useState<string>("24");
   const { toast } = useToast();
 
