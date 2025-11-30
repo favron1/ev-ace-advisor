@@ -10,6 +10,7 @@ import Index from "./pages/Index";
 import Auth from "./pages/Auth";
 import DailyBets from "./pages/DailyBets";
 import RacingDashboard from "./pages/RacingDashboard";
+import Simulation from "./pages/Simulation";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -23,6 +24,7 @@ function AppRoutes() {
       <Route path="/auth" element={<Auth />} />
       <Route path="/daily-bets" element={sport === 'racing' ? <RacingDashboard /> : <DailyBets />} />
       <Route path="/racing" element={<RacingDashboard />} />
+      <Route path="/simulation" element={<Simulation />} />
       {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
       <Route path="*" element={<NotFound />} />
     </Routes>
