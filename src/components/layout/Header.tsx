@@ -67,7 +67,7 @@ export function Header() {
             <Activity className="h-5 w-5 text-primary-foreground" />
           </div>
           <div>
-            <h1 className="text-lg font-bold text-foreground">EdgeBet Pro</h1>
+            <h1 className="text-lg font-bold text-foreground">FAVYBET PRO</h1>
             <SportToggle />
           </div>
         </Link>
