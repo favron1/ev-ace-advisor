@@ -1,4 +1,4 @@
-import { Play, RotateCcw, Loader2, Database, RefreshCw } from "lucide-react";
+import { Play, RotateCcw, Loader2, Database, RefreshCw, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,8 +13,10 @@ interface SimulationControlsProps {
   onRun: () => void;
   onReset: () => void;
   onCheckResults: () => void;
+  onFetchHistorical: () => void;
   isRunning: boolean;
   isCheckingResults: boolean;
+  isFetchingHistorical: boolean;
   progress: number;
   availableBets: number;
   settledBets: number;
@@ -26,8 +28,10 @@ export function SimulationControls({
   onRun,
   onReset,
   onCheckResults,
+  onFetchHistorical,
   isRunning,
   isCheckingResults,
+  isFetchingHistorical,
   progress,
   availableBets,
   settledBets,
@@ -51,19 +55,38 @@ export function SimulationControls({
         </div>
       </div>
 
+      {/* Fetch Historical Data Button */}
+      <Button
+        onClick={onFetchHistorical}
+        variant="default"
+        className="w-full"
+        disabled={isFetchingHistorical || isRunning || isCheckingResults}
+      >
+        {isFetchingHistorical ? (
+          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+        ) : (
+          <Download className="h-4 w-4 mr-2" />
+        )}
+        {isFetchingHistorical ? 'Fetching...' : 'Fetch Historical Data'}
+      </Button>
+      
+      <p className="text-xs text-muted-foreground">
+        Fetches past matches with odds and real results for backtesting
+      </p>
+
       {/* Check Results Button */}
       <Button
         onClick={onCheckResults}
         variant="outline"
         className="w-full"
-        disabled={isCheckingResults || isRunning}
+        disabled={isCheckingResults || isRunning || isFetchingHistorical}
       >
         {isCheckingResults ? (
           <Loader2 className="h-4 w-4 mr-2 animate-spin" />
         ) : (
           <RefreshCw className="h-4 w-4 mr-2" />
         )}
-        {isCheckingResults ? 'Checking...' : 'Check Match Results'}
+        {isCheckingResults ? 'Checking...' : 'Update Match Results'}
       </Button>
 
       {/* Number of Bets */}

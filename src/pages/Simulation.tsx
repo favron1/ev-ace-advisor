@@ -65,6 +65,7 @@ export default function Simulation() {
   const [config, setConfig] = useState<SimulationConfig>(defaultConfig);
   const [isRunning, setIsRunning] = useState(false);
   const [isCheckingResults, setIsCheckingResults] = useState(false);
+  const [isFetchingHistorical, setIsFetchingHistorical] = useState(false);
   const [simulatedBets, setSimulatedBets] = useState<SimulatedBet[]>([]);
   const [stats, setStats] = useState<SimulationStats | null>(null);
   const [valueBets, setValueBets] = useState<any[]>([]);
@@ -100,6 +101,36 @@ export default function Simulation() {
   useEffect(() => {
     fetchValueBets();
   }, []);
+
+  // Fetch historical odds data with real results
+  const fetchHistorical = async () => {
+    setIsFetchingHistorical(true);
+    try {
+      const response = await supabase.functions.invoke('fetch-historical-odds');
+      
+      if (response.error) {
+        throw response.error;
+      }
+
+      const data = response.data;
+      toast({
+        title: "Historical data loaded",
+        description: `${data.totalBets} bets loaded (${data.settledBets} settled, ${data.winRate} win rate)`,
+      });
+
+      // Refresh value bets
+      await fetchValueBets();
+    } catch (error) {
+      console.error('Error fetching historical:', error);
+      toast({
+        title: "Error fetching historical data",
+        description: error instanceof Error ? error.message : "Failed to fetch historical odds",
+        variant: "destructive",
+      });
+    } finally {
+      setIsFetchingHistorical(false);
+    }
+  };
 
   // Check results from real matches
   const checkResults = async () => {
@@ -355,8 +386,10 @@ export default function Simulation() {
                 onRun={runSimulation}
                 onReset={resetSimulation}
                 onCheckResults={checkResults}
+                onFetchHistorical={fetchHistorical}
                 isRunning={isRunning}
                 isCheckingResults={isCheckingResults}
+                isFetchingHistorical={isFetchingHistorical}
                 progress={progress}
                 availableBets={valueBets.length}
                 settledBets={settledBets}
