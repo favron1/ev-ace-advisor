@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import { ChevronDown, ChevronUp, Info, Trophy, Dog, CloudRain, Timer, Clock } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -81,11 +81,27 @@ function JumpCountdown({ raceTime }: { raceTime: string }) {
   );
 }
 
+// Helper to calculate time until race for sorting
+const getTimeUntilRace = (raceTime: string): number => {
+  const now = new Date();
+  const [hours, minutes] = raceTime.split(':').map(Number);
+  
+  const raceDate = new Date();
+  raceDate.setHours(hours, minutes, 0, 0);
+  
+  // If race time has passed today, assume it's tomorrow
+  if (raceDate < now) {
+    raceDate.setDate(raceDate.getDate() + 1);
+  }
+  
+  return raceDate.getTime() - now.getTime();
+};
+
 export function RacingValueBetsTable({ bets }: RacingValueBetsTableProps) {
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
 
-  // Sort bets by race time (soonest first)
-  const sortedBets = [...bets].sort((a, b) => a.raceTime.localeCompare(b.raceTime));
+  // Sort bets by time until race (soonest first)
+  const sortedBets = [...bets].sort((a, b) => getTimeUntilRace(a.raceTime) - getTimeUntilRace(b.raceTime));
 
   const getConfidenceBadge = (confidence: string) => {
     switch (confidence) {
@@ -153,9 +169,8 @@ export function RacingValueBetsTable({ bets }: RacingValueBetsTableProps) {
         </thead>
         <tbody>
           {sortedBets.map((bet) => (
-            <>
+            <React.Fragment key={bet.raceId + bet.runner}>
               <tr
-                key={bet.raceId + bet.runner}
                 className={cn(
                   "border-b border-border/50 transition-colors hover:bg-muted/30 cursor-pointer",
                   expandedRow === bet.raceId + bet.runner && "bg-muted/30"
@@ -281,7 +296,7 @@ export function RacingValueBetsTable({ bets }: RacingValueBetsTableProps) {
                   </td>
                 </tr>
               )}
-            </>
+            </React.Fragment>
           ))}
         </tbody>
       </table>
