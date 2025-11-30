@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { ChevronDown, ChevronUp, Info, Trophy, Dog, CloudRain, Timer } from "lucide-react";
+import { useState, useEffect } from "react";
+import { ChevronDown, ChevronUp, Info, Trophy, Dog, CloudRain, Timer, Clock } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,8 +14,78 @@ interface RacingValueBetsTableProps {
   bets: RacingBestBet[];
 }
 
+function JumpCountdown({ raceTime }: { raceTime: string }) {
+  const [timeLeft, setTimeLeft] = useState<string>("");
+  const [urgency, setUrgency] = useState<'normal' | 'soon' | 'urgent' | 'now'>('normal');
+
+  useEffect(() => {
+    const calculateTimeLeft = () => {
+      const now = new Date();
+      const [hours, minutes] = raceTime.split(':').map(Number);
+      
+      const raceDate = new Date();
+      raceDate.setHours(hours, minutes, 0, 0);
+      
+      if (raceDate < now) {
+        raceDate.setDate(raceDate.getDate() + 1);
+      }
+      
+      const diff = raceDate.getTime() - now.getTime();
+      
+      if (diff <= 0) {
+        setUrgency('now');
+        return "NOW";
+      }
+      
+      const totalMinutes = Math.floor(diff / (1000 * 60));
+      const h = Math.floor(totalMinutes / 60);
+      const m = totalMinutes % 60;
+      const s = Math.floor((diff % (1000 * 60)) / 1000);
+      
+      if (totalMinutes <= 2) {
+        setUrgency('urgent');
+      } else if (totalMinutes <= 10) {
+        setUrgency('soon');
+      } else {
+        setUrgency('normal');
+      }
+      
+      if (h > 0) {
+        return `${h}h ${m}m`;
+      } else if (m > 0) {
+        return `${m}m ${s}s`;
+      } else {
+        return `${s}s`;
+      }
+    };
+
+    setTimeLeft(calculateTimeLeft());
+    const interval = setInterval(() => {
+      setTimeLeft(calculateTimeLeft());
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [raceTime]);
+
+  return (
+    <div className={cn(
+      "flex items-center gap-1.5 px-2 py-1 rounded-md font-mono text-xs font-bold whitespace-nowrap",
+      urgency === 'now' && "bg-destructive/20 text-destructive animate-pulse",
+      urgency === 'urgent' && "bg-warning/20 text-warning animate-pulse",
+      urgency === 'soon' && "bg-warning/10 text-warning",
+      urgency === 'normal' && "bg-primary/10 text-primary"
+    )}>
+      <Clock className="h-3 w-3" />
+      {timeLeft === "NOW" ? "JUMPING!" : timeLeft}
+    </div>
+  );
+}
+
 export function RacingValueBetsTable({ bets }: RacingValueBetsTableProps) {
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
+
+  // Sort bets by race time (soonest first)
+  const sortedBets = [...bets].sort((a, b) => a.raceTime.localeCompare(b.raceTime));
 
   const getConfidenceBadge = (confidence: string) => {
     switch (confidence) {
@@ -59,6 +129,7 @@ export function RacingValueBetsTable({ bets }: RacingValueBetsTableProps) {
       <table className="w-full">
         <thead>
           <tr className="border-b border-border">
+            <th className="text-left py-3 px-4 text-sm font-medium text-muted-foreground">Jumps In</th>
             <th className="text-left py-3 px-4 text-sm font-medium text-muted-foreground">Race</th>
             <th className="text-left py-3 px-4 text-sm font-medium text-muted-foreground">Runner</th>
             <th className="text-left py-3 px-4 text-sm font-medium text-muted-foreground">Form</th>
@@ -77,12 +148,11 @@ export function RacingValueBetsTable({ bets }: RacingValueBetsTableProps) {
             <th className="text-right py-3 px-4 text-sm font-medium text-muted-foreground">Edge %</th>
             <th className="text-center py-3 px-4 text-sm font-medium text-muted-foreground">Confidence</th>
             <th className="text-right py-3 px-4 text-sm font-medium text-muted-foreground">Stake</th>
-            <th className="text-right py-3 px-4 text-sm font-medium text-muted-foreground">Time</th>
             <th className="w-10"></th>
           </tr>
         </thead>
         <tbody>
-          {bets.map((bet) => (
+          {sortedBets.map((bet) => (
             <>
               <tr
                 key={bet.raceId + bet.runner}
@@ -92,6 +162,9 @@ export function RacingValueBetsTable({ bets }: RacingValueBetsTableProps) {
                 )}
                 onClick={() => setExpandedRow(expandedRow === bet.raceId + bet.runner ? null : bet.raceId + bet.runner)}
               >
+                <td className="py-3 px-4">
+                  <JumpCountdown raceTime={bet.raceTime} />
+                </td>
                 <td className="py-3 px-4">
                   <div className="flex items-center gap-2">
                     {getRaceTypeIcon(bet.sport)}
@@ -143,9 +216,6 @@ export function RacingValueBetsTable({ bets }: RacingValueBetsTableProps) {
                     {bet.suggestedBetPercent}
                   </span>
                 </td>
-                <td className="py-3 px-4 text-right">
-                  <span className="text-sm text-muted-foreground">{bet.raceTime}</span>
-                </td>
                 <td className="py-3 px-4">
                   <Button variant="ghost" size="icon" className="h-8 w-8">
                     {expandedRow === bet.raceId + bet.runner ? (
@@ -172,6 +242,7 @@ export function RacingValueBetsTable({ bets }: RacingValueBetsTableProps) {
                           <p><span className="text-muted-foreground">Track:</span> {bet.trackCondition}</p>
                           <p><span className="text-muted-foreground">Distance:</span> {bet.distanceM}m</p>
                           <p><span className="text-muted-foreground">Class:</span> {bet.raceType}</p>
+                          <p><span className="text-muted-foreground">Jump Time:</span> {bet.raceTime}</p>
                         </div>
                       </div>
                       
