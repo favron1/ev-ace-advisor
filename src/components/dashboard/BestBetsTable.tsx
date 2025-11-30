@@ -166,21 +166,29 @@ export function BestBetsTable() {
     fetchLiveOdds();
   }, []);
 
-  const filteredBets = bets.filter(bet => {
-    // Confidence filter
-    let passesConfidence = true;
-    if (filter === "high") passesConfidence = bet.confidence === "high" && bet.meets_criteria;
-    else if (filter === "value") passesConfidence = bet.expected_value > 0.1 && bet.meets_criteria;
-    else passesConfidence = bet.meets_criteria;
+  const filteredBets = bets
+    .filter(bet => {
+      // Confidence filter
+      let passesConfidence = true;
+      if (filter === "high") passesConfidence = bet.confidence === "high" && bet.meets_criteria;
+      else if (filter === "value") passesConfidence = bet.expected_value > 0.1 && bet.meets_criteria;
+      else passesConfidence = bet.meets_criteria;
 
-    // Status filter
-    let passesStatus = true;
-    if (statusFilter === "live") passesStatus = bet.status === "live";
-    else if (statusFilter === "upcoming") passesStatus = bet.status === "upcoming";
-    else if (statusFilter === "resulted") passesStatus = bet.status === "resulted";
+      // Status filter
+      let passesStatus = true;
+      if (statusFilter === "live") passesStatus = bet.status === "live";
+      else if (statusFilter === "upcoming") passesStatus = bet.status === "upcoming";
+      else if (statusFilter === "resulted") passesStatus = bet.status === "resulted";
 
-    return passesConfidence && passesStatus;
-  });
+      return passesConfidence && passesStatus;
+    })
+    // Sort by commence time (soonest first)
+    .sort((a, b) => {
+      if (!a.commenceTime && !b.commenceTime) return 0;
+      if (!a.commenceTime) return 1;
+      if (!b.commenceTime) return -1;
+      return new Date(a.commenceTime).getTime() - new Date(b.commenceTime).getTime();
+    });
 
   const handleAddToSlip = (bet: DisplayBet) => {
     addToSlip({
