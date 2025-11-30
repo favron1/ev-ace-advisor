@@ -75,7 +75,7 @@ export default function Simulation() {
   // Count settled bets (with real results)
   const settledBets = valueBets.filter(bet => bet.result === 'won' || bet.result === 'lost').length;
 
-  // Fetch historical value bets
+  // Fetch historical value bets - ONLY bets with real match results for simulation
   const fetchValueBets = async () => {
     const { data, error } = await supabase
       .from('value_bets')
@@ -88,6 +88,7 @@ export default function Simulation() {
           match_date
         )
       `)
+      .in('result', ['won', 'lost']) // Only fetch settled bets with real results
       .order('created_at', { ascending: false });
 
     if (error) {
