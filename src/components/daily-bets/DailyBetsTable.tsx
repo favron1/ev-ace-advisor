@@ -2,13 +2,14 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { CheckCircle2, Info, Plus, Check, Clock, AlertCircle } from "lucide-react";
+import { CheckCircle2, Info, Plus, Check, Clock, AlertCircle, Brain, AlertTriangle, XCircle, TrendingUp, Users, BarChart3, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useBetSlip } from "@/contexts/BetSlipContext";
 import type { AnalyzedBet } from "@/pages/DailyBets";
 
 interface DailyBetsTableProps {
   bets: AnalyzedBet[];
+  showAiAnalysis?: boolean;
 }
 
 const getConfidenceBadge = (confidence: string) => {
@@ -19,6 +20,41 @@ const getConfidenceBadge = (confidence: string) => {
       return <Badge className="bg-warning/20 text-warning border-warning/30">Moderate</Badge>;
     case "low":
       return <Badge className="bg-muted text-muted-foreground border-border">Low</Badge>;
+    default:
+      return null;
+  }
+};
+
+const getRecommendationBadge = (recommendation: string) => {
+  switch (recommendation) {
+    case "STRONG_BET":
+      return (
+        <Badge className="bg-profit/20 text-profit border-profit/30 gap-1">
+          <CheckCircle2 className="h-3 w-3" />
+          Strong
+        </Badge>
+      );
+    case "GOOD_BET":
+      return (
+        <Badge className="bg-primary/20 text-primary border-primary/30 gap-1">
+          <Check className="h-3 w-3" />
+          Good
+        </Badge>
+      );
+    case "CAUTION":
+      return (
+        <Badge className="bg-warning/20 text-warning border-warning/30 gap-1">
+          <AlertTriangle className="h-3 w-3" />
+          Caution
+        </Badge>
+      );
+    case "AVOID":
+      return (
+        <Badge className="bg-loss/20 text-loss border-loss/30 gap-1">
+          <XCircle className="h-3 w-3" />
+          Avoid
+        </Badge>
+      );
     default:
       return null;
   }
@@ -47,7 +83,7 @@ const formatTimeUntil = (isoString: string) => {
   return { text: `${diffMins}m`, isLive: false, isSoon: diffMins <= 30 };
 };
 
-export function DailyBetsTable({ bets }: DailyBetsTableProps) {
+export function DailyBetsTable({ bets, showAiAnalysis = false }: DailyBetsTableProps) {
   const { addToSlip, isInSlip } = useBetSlip();
 
   const handleAddToSlip = (bet: AnalyzedBet) => {
@@ -66,6 +102,12 @@ export function DailyBetsTable({ bets }: DailyBetsTableProps) {
   // Get bets that can be added (not started and not already in slip)
   const addableBets = bets.filter(bet => {
     const timeUntil = formatTimeUntil(bet.commenceTime);
+    // If AI analyzed, only add strong/good bets
+    if (showAiAnalysis && bet.aiAnalysis) {
+      if (bet.aiAnalysis.recommendation === 'AVOID' || bet.aiAnalysis.recommendation === 'CAUTION') {
+        return false;
+      }
+    }
     return !timeUntil.isLive && !isInSlip(bet.id);
   });
 
@@ -88,6 +130,7 @@ export function DailyBetsTable({ bets }: DailyBetsTableProps) {
       <div className="flex items-center justify-between px-4 py-3 border-b border-border">
         <p className="text-sm text-muted-foreground">
           {bets.length} bet{bets.length !== 1 ? 's' : ''} found
+          {showAiAnalysis && ` • AI verified`}
         </p>
         <Button
           variant="outline"
@@ -97,13 +140,21 @@ export function DailyBetsTable({ bets }: DailyBetsTableProps) {
           className="gap-2"
         >
           <Plus className="h-4 w-4" />
-          Add All ({addableBets.length})
+          Add All {showAiAnalysis ? 'Good+' : ''} ({addableBets.length})
         </Button>
       </div>
       <div className="overflow-x-auto">
         <Table>
           <TableHeader>
             <TableRow className="border-border hover:bg-transparent">
+              {showAiAnalysis && (
+                <TableHead className="text-muted-foreground w-[100px]">
+                  <div className="flex items-center gap-1">
+                    <Brain className="h-3 w-3" />
+                    AI Rating
+                  </div>
+                </TableHead>
+              )}
               <TableHead className="text-muted-foreground w-[100px]">
                 <div className="flex items-center gap-1">
                   <Clock className="h-3 w-3" />
@@ -126,20 +177,6 @@ export function DailyBetsTable({ bets }: DailyBetsTableProps) {
                   </Tooltip>
                 </div>
               </TableHead>
-              <TableHead className="text-muted-foreground text-center">
-                <div className="flex items-center justify-center gap-1">
-                  Criteria
-                  <Tooltip>
-                    <TooltipTrigger>
-                      <Info className="h-3 w-3" />
-                    </TooltipTrigger>
-                    <TooltipContent className="max-w-xs">
-                      <p>EV &gt; 5%, Odds &gt; 1.50, Actual Prob &gt; Implied Prob</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </div>
-              </TableHead>
-              <TableHead className="text-muted-foreground text-center">Min Odds</TableHead>
               <TableHead className="text-muted-foreground text-center">Offered</TableHead>
               <TableHead className="text-muted-foreground text-center">Confidence</TableHead>
               <TableHead className="text-muted-foreground text-center">
@@ -150,12 +187,14 @@ export function DailyBetsTable({ bets }: DailyBetsTableProps) {
                       <Info className="h-3 w-3" />
                     </TooltipTrigger>
                     <TooltipContent className="max-w-xs">
-                      <p>High: Kelly (max 5%)<br/>Moderate: Flat 2-3%<br/>Low: 1-2%</p>
+                      <p>AI-adjusted stake recommendation</p>
                     </TooltipContent>
                   </Tooltip>
                 </div>
               </TableHead>
-              <TableHead className="text-muted-foreground min-w-[250px]">Reasoning</TableHead>
+              <TableHead className="text-muted-foreground min-w-[300px]">
+                {showAiAnalysis ? 'AI Analysis' : 'Reasoning'}
+              </TableHead>
               <TableHead className="text-muted-foreground text-center">Action</TableHead>
             </TableRow>
           </TableHeader>
@@ -163,9 +202,24 @@ export function DailyBetsTable({ bets }: DailyBetsTableProps) {
             {bets.map((bet) => {
               const timeUntil = formatTimeUntil(bet.commenceTime);
               const inSlip = isInSlip(bet.id);
+              const ai = bet.aiAnalysis;
 
               return (
-                <TableRow key={bet.id} className="border-border hover:bg-muted/30 transition-colors">
+                <TableRow 
+                  key={bet.id} 
+                  className={cn(
+                    "border-border hover:bg-muted/30 transition-colors",
+                    ai?.recommendation === 'STRONG_BET' && "bg-profit/5",
+                    ai?.recommendation === 'AVOID' && "bg-loss/5 opacity-60"
+                  )}
+                >
+                  {showAiAnalysis && (
+                    <TableCell>
+                      {ai ? getRecommendationBadge(ai.recommendation) : (
+                        <Badge variant="outline" className="text-muted-foreground">N/A</Badge>
+                      )}
+                    </TableCell>
+                  )}
                   <TableCell>
                     <div className={cn(
                       "inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium",
@@ -205,12 +259,6 @@ export function DailyBetsTable({ bets }: DailyBetsTableProps) {
                     </div>
                   </TableCell>
                   <TableCell className="text-center">
-                    <CheckCircle2 className="h-5 w-5 text-profit mx-auto" />
-                  </TableCell>
-                  <TableCell className="text-center font-mono text-muted-foreground">
-                    {bet.minOdds.toFixed(2)}
-                  </TableCell>
-                  <TableCell className="text-center">
                     <div className="flex flex-col items-center">
                       <span className="font-mono font-bold text-profit">{bet.offeredOdds.toFixed(2)}</span>
                       <span className="text-[10px] text-muted-foreground">
@@ -223,49 +271,117 @@ export function DailyBetsTable({ bets }: DailyBetsTableProps) {
                     <div className="flex flex-col items-center">
                       <span className={cn(
                         "font-mono font-medium",
-                        bet.suggestedStakePercent >= 3 ? "text-profit" : "text-foreground"
+                        bet.suggestedStakePercent >= 1.5 ? "text-profit" : "text-foreground"
                       )}>
                         {bet.suggestedStakePercent.toFixed(1)}%
                       </span>
                       <span className="text-[10px] text-muted-foreground">
-                        Kelly: {bet.kellyStake.toFixed(1)}%
+                        ${(bet.suggestedStakePercent * 10).toFixed(0)}
                       </span>
                     </div>
                   </TableCell>
                   <TableCell>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <p className="text-xs text-muted-foreground line-clamp-2 cursor-help max-w-[250px]">
-                          {bet.reasoning}
-                        </p>
-                      </TooltipTrigger>
-                      <TooltipContent className="max-w-sm">
-                        <div className="space-y-1">
-                          <p className="font-medium">{bet.event}</p>
-                          <p>{bet.reasoning}</p>
-                          <div className="text-xs text-muted-foreground pt-1 border-t border-border mt-1">
-                            <p>Implied: {(bet.impliedProbability * 100).toFixed(1)}% → Actual: {(bet.actualProbability * 100).toFixed(1)}%</p>
-                            <p>Best price at {bet.bookmaker}</p>
+                    {showAiAnalysis && ai ? (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <div className="text-xs space-y-1 cursor-help max-w-[300px]">
+                            <p className="text-foreground line-clamp-2">{ai.enhancedReasoning}</p>
+                            {ai.riskFactors.length > 0 && (
+                              <p className="text-loss text-[10px]">
+                                ⚠️ {ai.riskFactors[0]}
+                              </p>
+                            )}
                           </div>
-                        </div>
-                      </TooltipContent>
-                    </Tooltip>
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-md p-4">
+                          <div className="space-y-3">
+                            <p className="font-bold text-foreground">{bet.event}</p>
+                            
+                            <div className="grid grid-cols-2 gap-2 text-xs">
+                              <div className="flex items-start gap-1.5">
+                                <BarChart3 className="h-3 w-3 text-primary mt-0.5" />
+                                <div>
+                                  <p className="font-medium text-foreground">Historical</p>
+                                  <p className="text-muted-foreground">{ai.historicalTrend}</p>
+                                </div>
+                              </div>
+                              <div className="flex items-start gap-1.5">
+                                <TrendingUp className="h-3 w-3 text-primary mt-0.5" />
+                                <div>
+                                  <p className="font-medium text-foreground">Market Sentiment</p>
+                                  <p className="text-muted-foreground">{ai.marketSentiment}</p>
+                                </div>
+                              </div>
+                              <div className="flex items-start gap-1.5">
+                                <ShieldCheck className="h-3 w-3 text-primary mt-0.5" />
+                                <div>
+                                  <p className="font-medium text-foreground">Team Form</p>
+                                  <p className="text-muted-foreground">{ai.teamFormAnalysis}</p>
+                                </div>
+                              </div>
+                              <div className="flex items-start gap-1.5">
+                                <Users className="h-3 w-3 text-primary mt-0.5" />
+                                <div>
+                                  <p className="font-medium text-foreground">Pro Tipster View</p>
+                                  <p className="text-muted-foreground">{ai.proTipsterView}</p>
+                                </div>
+                              </div>
+                            </div>
+                            
+                            {ai.riskFactors.length > 0 && (
+                              <div className="pt-2 border-t border-border">
+                                <p className="font-medium text-loss text-xs mb-1">Risk Factors:</p>
+                                <ul className="text-xs text-muted-foreground space-y-1">
+                                  {ai.riskFactors.map((risk, i) => (
+                                    <li key={i}>• {risk}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                          </div>
+                        </TooltipContent>
+                      </Tooltip>
+                    ) : (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <p className="text-xs text-muted-foreground line-clamp-2 cursor-help max-w-[250px]">
+                            {bet.reasoning}
+                          </p>
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-sm">
+                          <div className="space-y-1">
+                            <p className="font-medium">{bet.event}</p>
+                            <p>{bet.reasoning}</p>
+                            <div className="text-xs text-muted-foreground pt-1 border-t border-border mt-1">
+                              <p>Implied: {(bet.impliedProbability * 100).toFixed(1)}% → Actual: {(bet.actualProbability * 100).toFixed(1)}%</p>
+                              <p>Best price at {bet.bookmaker}</p>
+                            </div>
+                          </div>
+                        </TooltipContent>
+                      </Tooltip>
+                    )}
                   </TableCell>
                   <TableCell className="text-center">
                     <Button
-                      variant={inSlip ? "secondary" : "outline"}
+                      variant={inSlip ? "secondary" : ai?.recommendation === 'STRONG_BET' ? "default" : "outline"}
                       size="sm"
                       onClick={() => handleAddToSlip(bet)}
-                      disabled={inSlip || timeUntil.isLive}
+                      disabled={inSlip || timeUntil.isLive || ai?.recommendation === 'AVOID'}
                       className={cn(
                         "gap-1",
-                        inSlip && "bg-profit/20 text-profit border-profit/30"
+                        inSlip && "bg-profit/20 text-profit border-profit/30",
+                        ai?.recommendation === 'STRONG_BET' && !inSlip && "bg-profit hover:bg-profit/90 text-background"
                       )}
                     >
                       {inSlip ? (
                         <>
                           <Check className="h-3 w-3" />
                           Added
+                        </>
+                      ) : ai?.recommendation === 'AVOID' ? (
+                        <>
+                          <XCircle className="h-3 w-3" />
+                          Skip
                         </>
                       ) : (
                         <>

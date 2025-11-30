@@ -5,8 +5,22 @@ import { DailyBetsSummary } from "@/components/daily-bets/DailyBetsSummary";
 import { DailyBetsFilters } from "@/components/daily-bets/DailyBetsFilters";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, TrendingUp, Download, RefreshCw } from "lucide-react";
+import { Loader2, TrendingUp, Download, RefreshCw, Brain, CheckCircle2, AlertTriangle, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+
+export interface AIAnalysis {
+  isValid: boolean;
+  confidence: "high" | "moderate" | "low";
+  historicalTrend: string;
+  marketSentiment: string;
+  teamFormAnalysis: string;
+  proTipsterView: string;
+  riskFactors: string[];
+  recommendation: "STRONG_BET" | "GOOD_BET" | "CAUTION" | "AVOID";
+  adjustedStakePercent: number;
+  enhancedReasoning: string;
+}
 
 export interface AnalyzedBet {
   id: string;
@@ -30,6 +44,7 @@ export interface AnalyzedBet {
   sport: string;
   commenceTime: string;
   bookmaker: string;
+  aiAnalysis?: AIAnalysis;
 }
 
 export interface BetsSummary {
@@ -41,12 +56,19 @@ export interface BetsSummary {
   avgEV: number;
   totalSuggestedStake: number;
   timestamp: string;
+  // AI summary fields
+  strongBets?: number;
+  goodBets?: number;
+  cautionBets?: number;
+  avoidBets?: number;
 }
 
 const DailyBets = () => {
   const [bets, setBets] = useState<AnalyzedBet[]>([]);
   const [summary, setSummary] = useState<BetsSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [aiAnalyzing, setAiAnalyzing] = useState(false);
+  const [aiAnalyzed, setAiAnalyzed] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [confidenceFilter, setConfidenceFilter] = useState<string>("all");
   const [marketFilter, setMarketFilter] = useState<string>("all");
@@ -56,6 +78,7 @@ const DailyBets = () => {
 
   const fetchAnalyzedBets = async () => {
     setLoading(true);
+    setAiAnalyzed(false);
     try {
       const { data, error } = await supabase.functions.invoke('analyze-value-bets');
 
@@ -87,6 +110,64 @@ const DailyBets = () => {
       });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const runAIAnalysis = async () => {
+    if (bets.length === 0) {
+      toast({
+        title: "No bets to analyze",
+        description: "Refresh to get value bets first",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setAiAnalyzing(true);
+    try {
+      toast({
+        title: "AI Analysis Started",
+        description: "Cross-checking bets with historical data, market sentiment, team form & pro tipster knowledge...",
+      });
+
+      const { data, error } = await supabase.functions.invoke('ai-analyze-bets', {
+        body: { bets }
+      });
+
+      if (error) {
+        console.error('AI analysis error:', error);
+        toast({
+          title: "AI Analysis Failed",
+          description: error.message || "Failed to run AI analysis",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      if (data?.bets) {
+        setBets(data.bets);
+        setSummary(prev => ({
+          ...prev!,
+          ...data.summary,
+          totalBets: data.bets.length,
+        }));
+        setAiAnalyzed(true);
+        
+        const { strongBets, goodBets, cautionBets, avoidBets } = data.summary;
+        toast({
+          title: "AI Analysis Complete",
+          description: `${strongBets} strong, ${goodBets} good, ${cautionBets} caution, ${avoidBets} avoid`,
+        });
+      }
+    } catch (err) {
+      console.error('Error:', err);
+      toast({
+        title: "Error",
+        description: "Failed to connect to AI service",
+        variant: "destructive",
+      });
+    } finally {
+      setAiAnalyzing(false);
     }
   };
 
@@ -124,6 +205,10 @@ const DailyBets = () => {
           return b.suggestedStakePercent - a.suggestedStakePercent;
         case "time":
           return new Date(a.commenceTime).getTime() - new Date(b.commenceTime).getTime();
+        case "ai":
+          if (!a.aiAnalysis || !b.aiAnalysis) return 0;
+          const order = { 'STRONG_BET': 0, 'GOOD_BET': 1, 'CAUTION': 2, 'AVOID': 3 };
+          return order[a.aiAnalysis.recommendation] - order[b.aiAnalysis.recommendation];
         default:
           return 0;
       }
@@ -146,6 +231,7 @@ const DailyBets = () => {
       "Kelly Stake %",
       "Bookmaker",
       "Kick-off",
+      "AI Recommendation",
       "Reasoning"
     ];
 
@@ -164,6 +250,7 @@ const DailyBets = () => {
       bet.kellyStake.toFixed(2),
       bet.bookmaker,
       new Date(bet.commenceTime).toLocaleString(),
+      bet.aiAnalysis?.recommendation || 'N/A',
       `"${bet.reasoning}"`
     ]);
 
@@ -203,9 +290,11 @@ const DailyBets = () => {
               <div>
                 <h1 className="text-2xl md:text-3xl font-bold text-foreground">Daily Best Bets</h1>
                 <p className="text-sm text-muted-foreground">
-                  {lastUpdated 
-                    ? `Auto-analyzed • Last updated ${lastUpdated.toLocaleTimeString()}`
-                    : 'AI-powered value bet analysis with expert strategies'
+                  {aiAnalyzed 
+                    ? 'AI-verified with historical, sentiment & pro tipster analysis'
+                    : lastUpdated 
+                      ? `Auto-analyzed • Last updated ${lastUpdated.toLocaleTimeString()}`
+                      : 'AI-powered value bet analysis with expert strategies'
                   }
                 </p>
               </div>
@@ -224,7 +313,7 @@ const DailyBets = () => {
               Export CSV
             </Button>
             <Button
-              variant="default"
+              variant="outline"
               size="sm"
               onClick={fetchAnalyzedBets}
               disabled={loading}
@@ -235,10 +324,58 @@ const DailyBets = () => {
               ) : (
                 <RefreshCw className="h-4 w-4" />
               )}
-              {loading ? 'Analyzing...' : 'Refresh'}
+              Refresh
+            </Button>
+            <Button
+              variant="default"
+              size="sm"
+              onClick={runAIAnalysis}
+              disabled={loading || aiAnalyzing || bets.length === 0}
+              className="gap-2 bg-gradient-to-r from-primary to-purple-600 hover:from-primary/90 hover:to-purple-600/90"
+            >
+              {aiAnalyzing ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Brain className="h-4 w-4" />
+              )}
+              {aiAnalyzing ? 'AI Analyzing...' : aiAnalyzed ? 'Re-analyze' : 'AI Cross-Check'}
             </Button>
           </div>
         </div>
+
+        {/* AI Analysis Summary */}
+        {aiAnalyzed && summary && (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="stat-card p-4 border-profit/30 bg-profit/5">
+              <div className="flex items-center gap-2 mb-2">
+                <CheckCircle2 className="h-5 w-5 text-profit" />
+                <span className="text-sm font-medium text-profit">Strong Bets</span>
+              </div>
+              <p className="text-2xl font-bold text-profit">{summary.strongBets || 0}</p>
+            </div>
+            <div className="stat-card p-4 border-primary/30 bg-primary/5">
+              <div className="flex items-center gap-2 mb-2">
+                <CheckCircle2 className="h-5 w-5 text-primary" />
+                <span className="text-sm font-medium text-primary">Good Bets</span>
+              </div>
+              <p className="text-2xl font-bold text-primary">{summary.goodBets || 0}</p>
+            </div>
+            <div className="stat-card p-4 border-warning/30 bg-warning/5">
+              <div className="flex items-center gap-2 mb-2">
+                <AlertTriangle className="h-5 w-5 text-warning" />
+                <span className="text-sm font-medium text-warning">Caution</span>
+              </div>
+              <p className="text-2xl font-bold text-warning">{summary.cautionBets || 0}</p>
+            </div>
+            <div className="stat-card p-4 border-loss/30 bg-loss/5">
+              <div className="flex items-center gap-2 mb-2">
+                <XCircle className="h-5 w-5 text-loss" />
+                <span className="text-sm font-medium text-loss">Avoid</span>
+              </div>
+              <p className="text-2xl font-bold text-loss">{summary.avoidBets || 0}</p>
+            </div>
+          </div>
+        )}
 
         {/* Summary Cards */}
         {summary && <DailyBetsSummary summary={summary} />}
@@ -253,6 +390,7 @@ const DailyBets = () => {
           setSortBy={setSortBy}
           timeFrame={timeFrame}
           setTimeFrame={setTimeFrame}
+          showAiSort={aiAnalyzed}
         />
 
         {/* Main Table */}
@@ -262,8 +400,14 @@ const DailyBets = () => {
             <p className="font-medium text-lg">Analyzing Markets...</p>
             <p className="text-sm">Scanning odds from multiple bookmakers and calculating value</p>
           </div>
+        ) : aiAnalyzing ? (
+          <div className="stat-card flex flex-col items-center justify-center py-16 text-muted-foreground">
+            <Brain className="h-12 w-12 animate-pulse mb-4 text-primary" />
+            <p className="font-medium text-lg">AI Cross-Checking Bets...</p>
+            <p className="text-sm">Analyzing historical data, market sentiment, team form & pro tipster views</p>
+          </div>
         ) : (
-          <DailyBetsTable bets={filteredBets} />
+          <DailyBetsTable bets={filteredBets} showAiAnalysis={aiAnalyzed} />
         )}
       </main>
     </div>

@@ -1,5 +1,5 @@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Filter, ArrowUpDown, Layers, Clock } from "lucide-react";
+import { Filter, ArrowUpDown, Layers, Clock, Brain } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -12,6 +12,7 @@ interface DailyBetsFiltersProps {
   setSortBy: (value: string) => void;
   timeFrame: string;
   setTimeFrame: (value: string) => void;
+  showAiSort?: boolean;
 }
 
 export function DailyBetsFilters({
@@ -23,6 +24,7 @@ export function DailyBetsFilters({
   setSortBy,
   timeFrame,
   setTimeFrame,
+  showAiSort = false,
 }: DailyBetsFiltersProps) {
   return (
     <div className="stat-card space-y-4">
@@ -92,10 +94,18 @@ export function DailyBetsFilters({
         </div>
 
         <Select value={sortBy} onValueChange={setSortBy}>
-          <SelectTrigger className="w-[160px] bg-muted border-border">
+          <SelectTrigger className="w-[180px] bg-muted border-border">
             <SelectValue placeholder="Sort by" />
           </SelectTrigger>
           <SelectContent>
+            {showAiSort && (
+              <SelectItem value="ai">
+                <div className="flex items-center gap-2">
+                  <Brain className="h-3 w-3" />
+                  AI Recommendation
+                </div>
+              </SelectItem>
+            )}
             <SelectItem value="ev">Expected Value</SelectItem>
             <SelectItem value="edge">Edge %</SelectItem>
             <SelectItem value="odds">Offered Odds</SelectItem>
