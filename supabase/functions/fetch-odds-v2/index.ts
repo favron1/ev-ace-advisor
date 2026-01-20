@@ -122,10 +122,9 @@ serve(async (req) => {
 
       for (const event of events) {
         const startTimeUTC = new Date(event.commence_time);
-        const startTimeAEDT = toAEDT(event.commence_time);
         
-        // Skip events that have already started
-        if (startTimeAEDT <= nowAEDT) {
+        // Skip events that have already started (compare actual instants)
+        if (startTimeUTC <= new Date()) {
           console.log(`Skipping past event: ${event.home_team} vs ${event.away_team}`);
           continue;
         }
@@ -144,7 +143,8 @@ serve(async (req) => {
             home_team: event.home_team,
             away_team: event.away_team,
             start_time_utc: startTimeUTC.toISOString(),
-            start_time_aedt: startTimeAEDT.toISOString(),
+            // Store the same instant; frontend renders it in Australia/Sydney
+            start_time_aedt: startTimeUTC.toISOString(),
             status: 'upcoming',
             raw_payload: event,
             updated_at: new Date().toISOString()

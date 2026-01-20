@@ -32,7 +32,7 @@ export default function FindBets() {
   const [loading, setLoading] = useState(false);
   const [refreshingOdds, setRefreshingOdds] = useState(false);
   const [selectedSports, setSelectedSports] = useState<string[]>(['soccer']);
-  const [windowHours, setWindowHours] = useState(12);
+  const [windowHours, setWindowHours] = useState(72);
   const [bankrollUnits, setBankrollUnits] = useState(100);
   const [maxBets, setMaxBets] = useState(10);
   const [maxDailyExposure, setMaxDailyExposure] = useState(10);
@@ -212,9 +212,9 @@ export default function FindBets() {
                   id="window"
                   type="number"
                   value={windowHours}
-                  onChange={(e) => setWindowHours(parseInt(e.target.value) || 12)}
+                  onChange={(e) => setWindowHours(parseInt(e.target.value) || 72)}
                   min={1}
-                  max={72}
+                  max={168}
                 />
               </div>
 

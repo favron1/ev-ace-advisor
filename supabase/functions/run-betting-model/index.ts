@@ -53,10 +53,11 @@ async function scrapeMatchData(
     
     try {
       // Search for recent news and form data
-      const searchQuery = `${match.home} vs ${match.away} ${match.league} team news injuries form preview 2026`;
-      
+      // (Avoid hardcoding a year; let search find the most recent previews/injury reports)
+      const searchQuery = `${match.home} vs ${match.away} ${match.league} preview injuries team news predicted lineup form`;
+
       console.log(`Searching for: ${searchQuery}`);
-      
+
       const response = await fetch('https://api.firecrawl.dev/v1/search', {
         method: 'POST',
         headers: {
@@ -65,7 +66,7 @@ async function scrapeMatchData(
         },
         body: JSON.stringify({
           query: searchQuery,
-          limit: 3,
+          limit: 5,
           tbs: 'qdr:w', // Last week
           scrapeOptions: {
             formats: ['markdown']
@@ -148,8 +149,8 @@ METHODOLOGY:
 1. Analyze the SCRAPED DATA provided for each match - this contains real team news, injuries, form, and previews
 2. Use this data to estimate TRUE PROBABILITY for each outcome
 3. Compare to implied probability from bookmaker odds (1/odds)
-4. Calculate edge = model_probability - implied_probability
-5. Only recommend where edge >= 3% AND bet_score >= 70
+4. Calculate implied_probability = 1 / odds_decimal
+5. Calculate edge = model_probability - implied_probability
 
 BET SCORE CALCULATION (0-100):
 - Base on edge strength
@@ -161,8 +162,7 @@ BET SCORE CALCULATION (0-100):
 - Score < 70: Do not recommend
 
 STAKE SIZING (Kelly Criterion):
-stake_units = (edge / (odds - 1)) * bankroll * fraction
-- Use quarter Kelly (fraction = 0.25) for safety
+- Use quarter Kelly for safety
 - Cap at max_per_event_exposure`;
 
   const userPrompt = `CONTEXT:
@@ -223,7 +223,7 @@ If no bets meet criteria:
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'sonar',
+      model: 'sonar-pro',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
@@ -249,15 +249,17 @@ If no bets meet criteria:
     throw new Error('No content in Perplexity response');
   }
 
+  console.log('Perplexity raw content preview:', content.substring(0, 600));
+
   // Parse JSON from response
   let jsonContent = content.trim();
-  
+
   // Remove markdown code blocks if present
   const jsonMatch = jsonContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
   if (jsonMatch) {
     jsonContent = jsonMatch[1];
   }
-  
+
   // Find JSON object
   const jsonStart = jsonContent.indexOf('{');
   const jsonEnd = jsonContent.lastIndexOf('}');
@@ -265,7 +267,11 @@ If no bets meet criteria:
     jsonContent = jsonContent.substring(jsonStart, jsonEnd + 1);
   }
 
-  return JSON.parse(jsonContent.trim());
+  const parsed = JSON.parse(jsonContent.trim());
+  console.log('Perplexity parsed keys:', Object.keys(parsed || {}));
+  console.log('Perplexity recommended_bets count:', Array.isArray(parsed?.recommended_bets) ? parsed.recommended_bets.length : 'n/a');
+
+  return parsed;
 }
 
 serve(async (req) => {
