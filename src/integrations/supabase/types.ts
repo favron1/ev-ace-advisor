@@ -381,6 +381,45 @@ export type Database = {
         }
         Relationships: []
       }
+      scrape_history: {
+        Row: {
+          created_by: string | null
+          formatted_data: string | null
+          id: string
+          leagues: string[] | null
+          matches_count: number
+          raw_data: Json | null
+          scraped_at: string
+          sports: string[]
+          summary: string | null
+          window_hours: number
+        }
+        Insert: {
+          created_by?: string | null
+          formatted_data?: string | null
+          id?: string
+          leagues?: string[] | null
+          matches_count?: number
+          raw_data?: Json | null
+          scraped_at?: string
+          sports: string[]
+          summary?: string | null
+          window_hours?: number
+        }
+        Update: {
+          created_by?: string | null
+          formatted_data?: string | null
+          id?: string
+          leagues?: string[] | null
+          matches_count?: number
+          raw_data?: Json | null
+          scraped_at?: string
+          sports?: string[]
+          summary?: string | null
+          window_hours?: number
+        }
+        Relationships: []
+      }
       value_bets: {
         Row: {
           actual_probability: number
