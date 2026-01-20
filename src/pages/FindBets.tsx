@@ -206,6 +206,7 @@ export default function FindBets() {
     }
   };
 
+  const formatTime = (isoString: string) => {
     return new Date(isoString).toLocaleString('en-AU', {
       timeZone: 'Australia/Sydney',
       day: '2-digit',
