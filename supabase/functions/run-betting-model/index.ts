@@ -10,7 +10,7 @@ const corsHeaders = {
 // Logistic regression coefficients derived from historical match outcome analysis
 // These dampen the overconfident probability mapping from raw ratings/xG
 
-const CALIBRATION_CONFIG = {
+const SOCCER_CALIBRATION = {
   // Logistic regression intercept (base home win probability)
   INTERCEPT: 0.0, // Start neutral, let factors determine
   
@@ -38,6 +38,41 @@ const CALIBRATION_CONFIG = {
   INJURY_MAX: 0.05,
   FORM_MAX: 0.04,
 };
+
+// ============= BASKETBALL CALIBRATION CONSTANTS =============
+// Basketball-specific model: no draws, higher scoring, rest impact more significant
+const BASKETBALL_CALIBRATION = {
+  INTERCEPT: 0.0,
+  
+  // Rating differential coefficient (per 100 points = ~5% shift in basketball)
+  RATING_COEF: 0.05,
+  
+  // Net rating coefficient (per 5 points of net rating = ~4% shift)
+  NET_RATING_COEF: 0.008,
+  
+  // Home court advantage (empirical: ~2-4% in NBA, varies by league)
+  HOME_ADVANTAGE: 0.03,
+  
+  // Maximum probability cap (basketball can have higher favorites)
+  MAX_PROB: 0.78,
+  MIN_PROB: 0.22,
+  
+  // Sharp book weight
+  SHARP_WEIGHT: 0.45,
+  
+  // REST IMPACT (critical in basketball)
+  REST_0_DAYS_PENALTY: 0.06, // Back-to-back = significant disadvantage
+  REST_1_DAY_PENALTY: 0.02,
+  REST_3_PLUS_BONUS: 0.02,
+  
+  // Fatigue from travel/schedule
+  FATIGUE_MAX: 0.04,
+  
+  // Star player injury impact (much bigger in basketball)
+  STAR_MISSING_PENALTY: 0.08, // Per star player missing
+};
+
+const CALIBRATION_CONFIG = SOCCER_CALIBRATION; // Default for backward compatibility
 
 interface ModelInput {
   sports: string[];
@@ -308,6 +343,119 @@ function calibrateProbabilities(
     `sharp_implied=${sharpImpliedHome?.toFixed(3) || 'N/A'}, model_home=${homeWin.toFixed(3)}`;
   
   return { homeWin, draw, awayWin, over25, under25, bttsYes, bttsNo, rationale };
+}
+
+// ============= BASKETBALL CALIBRATED PROBABILITY MODEL =============
+// No draws, different factors, higher scoring
+
+interface BasketballCalibratedProbabilities {
+  homeWin: number;
+  awayWin: number;
+  overTotal: number;
+  underTotal: number;
+  homeSpread: number;
+  awaySpread: number;
+  rationale: string;
+}
+
+function calibrateBasketballProbabilities(
+  homeStats: any,
+  awayStats: any,
+  markets: any[]
+): BasketballCalibratedProbabilities {
+  const cfg = BASKETBALL_CALIBRATION;
+  
+  // Extract key metrics
+  const ratingDiff = (homeStats?.team_rating || 1500) - (awayStats?.team_rating || 1500);
+  const homeNetRating = homeStats?.net_rating || 0;
+  const awayNetRating = awayStats?.net_rating || 0;
+  const netRatingDiff = homeNetRating - awayNetRating;
+  
+  // Get sharp book implied probabilities if available
+  const sharpH2H = markets.find((m: any) => 
+    m.type === 'moneyline' && m.selection?.toLowerCase().includes('home')
+  );
+  const sharpImpliedHome = sharpH2H ? 1 / sharpH2H.odds_decimal : null;
+  
+  // Base calculation using logistic-style model
+  let logit = cfg.INTERCEPT + 
+              (ratingDiff / 100) * cfg.RATING_COEF + 
+              netRatingDiff * cfg.NET_RATING_COEF + 
+              cfg.HOME_ADVANTAGE;
+  
+  // REST IMPACT (critical in basketball)
+  const homeDaysRest = homeStats?.days_rest ?? 2;
+  const awayDaysRest = awayStats?.days_rest ?? 2;
+  
+  // Home team rest adjustments
+  if (homeDaysRest === 0) logit -= cfg.REST_0_DAYS_PENALTY;
+  else if (homeDaysRest === 1) logit -= cfg.REST_1_DAY_PENALTY;
+  else if (homeDaysRest >= 3) logit += cfg.REST_3_PLUS_BONUS;
+  
+  // Away team rest adjustments (inverse effect)
+  if (awayDaysRest === 0) logit += cfg.REST_0_DAYS_PENALTY;
+  else if (awayDaysRest === 1) logit += cfg.REST_1_DAY_PENALTY;
+  else if (awayDaysRest >= 3) logit -= cfg.REST_3_PLUS_BONUS;
+  
+  // Win percentage factor
+  const homeWinPct = homeStats?.win_percentage ?? 0.5;
+  const awayWinPct = awayStats?.win_percentage ?? 0.5;
+  logit += (homeWinPct - awayWinPct) * 0.15;
+  
+  // Sigmoid function for probability
+  let rawHomeProb = 1 / (1 + Math.exp(-logit * 3));
+  
+  // Blend with sharp book implied probability
+  let calibratedHomeProb = rawHomeProb;
+  if (sharpImpliedHome) {
+    calibratedHomeProb = (1 - cfg.SHARP_WEIGHT) * rawHomeProb + cfg.SHARP_WEIGHT * sharpImpliedHome;
+  }
+  
+  // Clamp to realistic bounds
+  calibratedHomeProb = Math.max(cfg.MIN_PROB, Math.min(cfg.MAX_PROB, calibratedHomeProb));
+  const awayWin = 1 - calibratedHomeProb;
+  
+  // Over/Under based on combined PPG and pace
+  const homePPG = homeStats?.points_per_game || 110;
+  const awayPPG = awayStats?.points_per_game || 108;
+  const homePAG = homeStats?.points_allowed_per_game || 108;
+  const awayPAG = awayStats?.points_allowed_per_game || 110;
+  
+  const expectedHomePoints = (homePPG + awayPAG) / 2;
+  const expectedAwayPoints = (awayPPG + homePAG) / 2;
+  const expectedTotal = expectedHomePoints + expectedAwayPoints;
+  
+  // Find the total line from markets
+  const totalMarket = markets.find((m: any) => m.type === 'totals' || m.selection?.includes('Over'));
+  const totalLine = totalMarket?.line || 220;
+  
+  // Simple probability based on expected total vs line
+  const totalDiff = expectedTotal - totalLine;
+  let overProb = 0.5 + (totalDiff / 20) * 0.15; // 5 point diff = ~3.75% edge
+  overProb = Math.max(0.35, Math.min(0.65, overProb));
+  
+  // Spread calculation
+  const expectedMargin = expectedHomePoints - expectedAwayPoints;
+  const spreadMarket = markets.find((m: any) => m.type === 'spreads');
+  const spreadLine = spreadMarket?.line || 0;
+  
+  const spreadDiff = expectedMargin - spreadLine;
+  let homeSpreadProb = 0.5 + (spreadDiff / 10) * 0.10; // 5 point diff = ~5% edge
+  homeSpreadProb = Math.max(0.40, Math.min(0.60, homeSpreadProb));
+  
+  const rationale = `Basketball: rating_diff=${ratingDiff.toFixed(0)}, net_rating_diff=${netRatingDiff.toFixed(1)}, ` +
+    `rest=${homeDaysRest}v${awayDaysRest}, sharp_implied=${sharpImpliedHome?.toFixed(3) || 'N/A'}, ` +
+    `model_home=${calibratedHomeProb.toFixed(3)}, expected_total=${expectedTotal.toFixed(1)}`;
+  
+  return {
+    homeWin: calibratedHomeProb,
+    awayWin,
+    overTotal: overProb,
+    underTotal: 1 - overProb,
+    homeSpread: homeSpreadProb,
+    awaySpread: 1 - homeSpreadProb,
+    rationale,
+  };
 }
 
 // Calculate correlation penalty for portfolio concentration
