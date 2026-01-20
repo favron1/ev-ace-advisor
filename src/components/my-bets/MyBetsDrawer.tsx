@@ -51,6 +51,8 @@ export function MyBetsDrawer({
           event_id: bet.event_id,
           selection: bet.selection,
           market_id: bet.market_id,
+          event_name: bet.event_name,
+          league: bet.league,
         },
         headers: session ? {
           Authorization: `Bearer ${session.access_token}`
@@ -59,6 +61,21 @@ export function MyBetsDrawer({
 
       if (error) throw error;
 
+      // Check if we got a result (match finished)
+      if (data.result) {
+        const { status, actual_score } = data.result;
+        if (status === 'won' || status === 'lost' || status === 'void') {
+          onSetStatus(bet.id, status);
+          toast({
+            title: status === 'won' ? '✅ Bet Won!' : status === 'lost' ? '❌ Bet Lost' : 'Bet Void',
+            description: actual_score ? `Final score: ${actual_score}` : data.message,
+            variant: status === 'won' ? 'default' : 'destructive',
+          });
+          return;
+        }
+      }
+
+      // Otherwise check for updated odds
       if (data.updated_bet) {
         onUpdateFromRecheck(bet.id, data.updated_bet);
         toast({
