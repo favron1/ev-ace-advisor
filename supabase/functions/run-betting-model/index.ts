@@ -84,6 +84,120 @@ interface ModelInput {
   max_bets: number;
 }
 
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function kellyStakeUnits(
+  bankrollUnits: number,
+  p: number,
+  oddsDecimal: number,
+  maxPerBetUnits: number,
+  kellyFraction: number = 0.25,
+) {
+  // Kelly for decimal odds: f* = (bp - q)/b, b = odds-1
+  const b = oddsDecimal - 1;
+  if (b <= 0) return 0;
+  const q = 1 - p;
+  const fStar = (b * p - q) / b;
+  const f = clamp(fStar, 0, 1) * kellyFraction;
+  const stake = bankrollUnits * f;
+  return clamp(stake, 0, maxPerBetUnits);
+}
+
+function buildTennisBetsFromOdds(
+  eventsWithOdds: any[],
+  bankrollUnits: number,
+  maxDailyUnits: number,
+  maxBets: number,
+) {
+  const tennisEvents = eventsWithOdds.filter((e) => e.sport === 'tennis');
+  const candidates: RecommendedBet[] = [];
+
+  for (const event of tennisEvents) {
+    // Use all h2h markets (not just "best odds") to estimate a consensus fair price
+    const h2h = (event._raw_markets || []).filter((m: any) => m.market_type === 'h2h');
+    if (h2h.length < 2) continue;
+
+    const selections = Array.from(new Set(h2h.map((m: any) => m.selection)));
+    if (selections.length !== 2) continue;
+    const [p1, p2] = selections;
+
+    const oddsFor = (name: string) => h2h
+      .filter((m: any) => m.selection === name)
+      .map((m: any) => Number(m.odds_decimal))
+      .filter((o: number) => Number.isFinite(o) && o > 1.001);
+
+    const o1 = oddsFor(p1);
+    const o2 = oddsFor(p2);
+    if (o1.length === 0 || o2.length === 0) continue;
+
+    const avgImplied1 = o1.reduce((s, o) => s + 1 / o, 0) / o1.length;
+    const avgImplied2 = o2.reduce((s, o) => s + 1 / o, 0) / o2.length;
+    const sum = avgImplied1 + avgImplied2;
+    if (sum <= 0) continue;
+
+    // Remove overround by normalizing
+    const fairP1 = avgImplied1 / sum;
+    const fairP2 = avgImplied2 / sum;
+
+    // Best available price (already computed in event.markets)
+    const bestMoneylines = (event.markets || []).filter((m: any) => m.type === 'moneyline');
+    const bestFor = (name: string) => bestMoneylines.find((m: any) => m.selection === name);
+    const best1 = bestFor(p1);
+    const best2 = bestFor(p2);
+    if (!best1 || !best2) continue;
+
+    const consider = [
+      { sel: p1, fairP: fairP1, best: best1 },
+      { sel: p2, fairP: fairP2, best: best2 },
+    ];
+
+    for (const c of consider) {
+      const offered = Number(c.best.odds_decimal);
+      const implied = 1 / offered;
+      const edge = c.fairP - implied;
+      if (edge < 0.02) continue; // require >=2% edge
+
+      const betScore = Math.round(clamp(70 + edge * 800, 70, 90));
+      const confidence: 'high' | 'medium' | 'low' = edge >= 0.05 ? 'high' : edge >= 0.03 ? 'medium' : 'low';
+      const stake = kellyStakeUnits(bankrollUnits, c.fairP, offered, bankrollUnits * 0.015);
+
+      candidates.push({
+        event_id: event.event_id,
+        market_id: c.best.market_id,
+        sport: 'tennis',
+        league: event.league,
+        event_name: `${event.home_team} vs ${event.away_team}`,
+        start_time: event.start_time_aedt,
+        selection: c.sel,
+        selection_label: c.sel,
+        odds_decimal: offered,
+        bookmaker: c.best.bookmaker,
+        model_probability: c.fairP,
+        implied_probability: implied,
+        edge,
+        bet_score: betScore,
+        confidence,
+        recommended_stake_units: stake,
+        rationale: `Tennis (odds-only): consensus fair_p=${c.fairP.toFixed(3)} vs implied=${implied.toFixed(3)} from best price.`,
+      });
+    }
+  }
+
+  // Rank by edge and take up to maxBets / within daily cap
+  candidates.sort((a, b) => b.edge - a.edge);
+  const selected: RecommendedBet[] = [];
+  let total = 0;
+  for (const b of candidates) {
+    if (selected.length >= maxBets) break;
+    if (total + b.recommended_stake_units > maxDailyUnits) continue;
+    selected.push(b);
+    total += b.recommended_stake_units;
+  }
+  return { bets: selected, eventsAnalyzed: tennisEvents.length };
+}
+
 interface RecommendedBet {
   event_id: string;
   market_id: string;
@@ -860,6 +974,8 @@ serve(async (req) => {
         home_team: event.home_team,
         away_team: event.away_team,
         start_time_aedt: event.start_time_aedt,
+        // keep raw markets for odds-only models (e.g., tennis)
+        _raw_markets: event.markets || [],
         // Enhanced team stats
         home_team_stats: enhanced?.home_team_stats || null,
         away_team_stats: enhanced?.away_team_stats || null,
@@ -888,7 +1004,24 @@ serve(async (req) => {
 
     console.log(`STEP 4: ${eventsWithCompleteStats.length}/${eventsWithOdds.length} events have complete stats`);
 
-    // STRICT ENFORCEMENT: Do NOT fall back to incomplete data
+    const maxDailyUnits = bankroll_units * max_daily_exposure_pct;
+
+    // Tennis is supported via an odds-only model (no team stats required)
+    if (sports.length === 1 && sports[0] === 'tennis') {
+      const { bets } = buildTennisBetsFromOdds(eventsWithOdds, bankroll_units, maxDailyUnits, max_bets);
+      return new Response(
+        JSON.stringify({
+          recommended_bets: bets,
+          reason: bets.length ? undefined : 'No tennis value edges found from current markets. Try increasing the time window or refresh odds.',
+          events_analyzed: bets.length ? bets.length : 0,
+          events_fetched: eventsWithOdds.filter((e) => e.sport === 'tennis').length,
+          model: 'tennis_odds_only_v1',
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
+    }
+
+    // STRICT ENFORCEMENT for team sports: Do NOT fall back to incomplete data
     // This ensures Find Bets only analyzes the same events that Scrape Data Only returns
     if (eventsWithCompleteStats.length === 0) {
       console.log('NO events with complete stats - cannot proceed with betting analysis');
@@ -930,7 +1063,6 @@ serve(async (req) => {
     // STEP 6: Validate, apply correlation penalties, enforce limits
     const MIN_BET_SCORE = 70;
     const MAX_PER_LEAGUE = 2;
-    const maxDailyUnits = bankroll_units * max_daily_exposure_pct;
     const maxPerEventUnits = bankroll_units * max_per_event_exposure_pct;
     
     let totalStake = 0;
