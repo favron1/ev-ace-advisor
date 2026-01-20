@@ -186,11 +186,12 @@ async function fillMissingStatsWithFirecrawl(
     .replace(/\bFC\b/gi, '')
     .replace(/\bCF\b/gi, '')
     .replace(/\bSC\b/gi, '')
+    .replace(/\bBA\b/gi, '')
     .trim();
   
   try {
-    // Search Flashscore for team stats
-    const searchQuery = `${searchTeam} ${leagueName} standings form 2024 2025 site:flashscore.com OR site:soccerway.com OR site:sofascore.com`;
+    // Use Firecrawl's structured JSON extraction for reliable data
+    const searchQuery = `${searchTeam} ${leagueName} 2024-25 season standings stats`;
     
     console.log(`[Firecrawl] Searching: ${searchQuery}`);
     
@@ -202,14 +203,31 @@ async function fillMissingStatsWithFirecrawl(
       },
       body: JSON.stringify({
         query: searchQuery,
-        limit: 3,
-        scrapeOptions: { formats: ['markdown'] }
+        limit: 5,
+        scrapeOptions: { 
+          formats: [
+            'markdown',
+            {
+              type: 'json',
+              prompt: `Extract football/soccer team statistics for "${searchTeam}". Find: 
+                1. Current league position (1-20)
+                2. Points per game (decimal like 1.5)
+                3. Recent form as W/D/L sequence (like WWDLW)
+                4. Goals scored in last 5 matches (total number)
+                5. Goals conceded in last 5 matches (total number)
+                6. Home record as W-D-L (like 5-2-1)
+                7. Away record as W-D-L (like 3-3-2)
+                Return null for any field not found.`
+            }
+          ]
+        }
       }),
     });
     
     if (!searchResponse.ok) {
       console.log(`[Firecrawl] Search failed: ${searchResponse.status}`);
-      return scrapedStats;
+      // Fallback to simpler search
+      return await fallbackFirecrawlSearch(teamName, leagueName, missingFields, firecrawlApiKey);
     }
     
     const searchData = await searchResponse.json();
@@ -220,147 +238,55 @@ async function fillMissingStatsWithFirecrawl(
       return scrapedStats;
     }
     
-    // Combine all markdown content
-    const combinedContent = results.map((r: any) => r.markdown || '').join('\n\n');
-    
-    // Parse league position
-    if (missingFields.includes('league_position')) {
-      // Look for patterns like "1st", "2.", "Position: 5", "#3", "Rank 4"
-      const positionPatterns = [
-        new RegExp(`${searchTeam}[^\\n]*?\\b(\\d{1,2})(?:st|nd|rd|th)?\\b`, 'i'),
-        /Position[:\s]+(\d{1,2})/i,
-        /Rank[:\s]+(\d{1,2})/i,
-        /\|\s*(\d{1,2})\s*\|/,
-        /^(\d{1,2})\.\s+/m
-      ];
-      
-      for (const pattern of positionPatterns) {
-        const match = combinedContent.match(pattern);
-        if (match && match[1]) {
-          const pos = parseInt(match[1]);
-          if (pos >= 1 && pos <= 25) {
-            scrapedStats.league_position = pos;
-            console.log(`[Firecrawl] Found position for ${teamName}: ${pos}`);
-            break;
-          }
+    // Try to get structured JSON first
+    for (const result of results) {
+      const jsonData = result.json;
+      if (jsonData) {
+        console.log(`[Firecrawl] Got structured JSON for ${teamName}:`, JSON.stringify(jsonData).substring(0, 200));
+        
+        if (jsonData.league_position && missingFields.includes('league_position')) {
+          const pos = parseInt(jsonData.league_position);
+          if (pos >= 1 && pos <= 25) scrapedStats.league_position = pos;
         }
-      }
-    }
-    
-    // Parse recent form
-    if (missingFields.includes('recent_form')) {
-      // Look for form patterns like "WWDLW", "W D L W W"
-      const formPatterns = [
-        /Form[:\s]*([WDLWDL\s]{5,})/i,
-        /Last 5[:\s]*([WDLWDL\s]{5,})/i,
-        /\b([WDL]{5})\b/
-      ];
-      
-      for (const pattern of formPatterns) {
-        const match = combinedContent.match(pattern);
-        if (match && match[1]) {
-          const form = match[1].replace(/\s+/g, '').toUpperCase().slice(0, 5);
-          if (/^[WDL]{3,5}$/.test(form)) {
-            scrapedStats.recent_form = form;
-            console.log(`[Firecrawl] Found form for ${teamName}: ${form}`);
-            break;
-          }
+        if (jsonData.points_per_game && missingFields.includes('points_per_game')) {
+          const ppg = parseFloat(jsonData.points_per_game);
+          if (ppg >= 0 && ppg <= 3) scrapedStats.points_per_game = ppg;
         }
-      }
-    }
-    
-    // Parse goals scored/conceded last 5
-    if (missingFields.includes('goals_scored_last_5') || missingFields.includes('goals_conceded_last_5')) {
-      // Look for score patterns in recent matches
-      const scorePatterns = [
-        /(\d)-(\d)/g,
-        /Goals[:\s]+(\d+)\s*-\s*(\d+)/i
-      ];
-      
-      const scores: { for: number; against: number }[] = [];
-      for (const pattern of scorePatterns) {
-        let match;
-        while ((match = pattern.exec(combinedContent)) !== null && scores.length < 5) {
-          const g1 = parseInt(match[1]);
-          const g2 = parseInt(match[2]);
-          if (g1 >= 0 && g1 <= 10 && g2 >= 0 && g2 <= 10) {
-            // Assume first number is for the team being searched
-            scores.push({ for: g1, against: g2 });
-          }
+        if (jsonData.recent_form && missingFields.includes('recent_form')) {
+          const form = String(jsonData.recent_form).replace(/\s+/g, '').toUpperCase().slice(0, 5);
+          if (/^[WDL]{3,5}$/.test(form)) scrapedStats.recent_form = form;
         }
-      }
-      
-      if (scores.length >= 3) {
-        scrapedStats.goals_scored_last_5 = scores.slice(0, 5).reduce((a, b) => a + b.for, 0);
-        scrapedStats.goals_conceded_last_5 = scores.slice(0, 5).reduce((a, b) => a + b.against, 0);
-        console.log(`[Firecrawl] Found goals for ${teamName}: ${scrapedStats.goals_scored_last_5} for, ${scrapedStats.goals_conceded_last_5} against`);
-      }
-    }
-    
-    // Parse home/away records
-    if (missingFields.includes('home_record')) {
-      const homePattern = /Home[:\s]+(\d+)[^\d]+(\d+)[^\d]+(\d+)/i;
-      const match = combinedContent.match(homePattern);
-      if (match) {
-        scrapedStats.home_record = `${match[1]}-${match[2]}-${match[3]}`;
-        console.log(`[Firecrawl] Found home record for ${teamName}: ${scrapedStats.home_record}`);
-      }
-    }
-    
-    if (missingFields.includes('away_record')) {
-      const awayPattern = /Away[:\s]+(\d+)[^\d]+(\d+)[^\d]+(\d+)/i;
-      const match = combinedContent.match(awayPattern);
-      if (match) {
-        scrapedStats.away_record = `${match[1]}-${match[2]}-${match[3]}`;
-        console.log(`[Firecrawl] Found away record for ${teamName}: ${scrapedStats.away_record}`);
-      }
-    }
-    
-    // Parse points per game
-    if (missingFields.includes('points_per_game')) {
-      const ppgPatterns = [
-        /PPG[:\s]*([\d.]+)/i,
-        /Points per game[:\s]*([\d.]+)/i,
-        /(\d+)\s*pts.*?(\d+)\s*(?:games|played)/i
-      ];
-      
-      for (const pattern of ppgPatterns) {
-        const match = combinedContent.match(pattern);
-        if (match) {
-          if (match[2]) {
-            // Points and games format
-            const pts = parseInt(match[1]);
-            const games = parseInt(match[2]);
-            if (games > 0) {
-              scrapedStats.points_per_game = Number((pts / games).toFixed(2));
-            }
-          } else {
-            scrapedStats.points_per_game = parseFloat(match[1]);
-          }
-          if (scrapedStats.points_per_game) {
-            console.log(`[Firecrawl] Found PPG for ${teamName}: ${scrapedStats.points_per_game}`);
-            break;
-          }
+        if (jsonData.goals_scored && missingFields.includes('goals_scored_last_5')) {
+          const goals = parseInt(jsonData.goals_scored);
+          if (goals >= 0 && goals <= 25) scrapedStats.goals_scored_last_5 = goals;
         }
+        if (jsonData.goals_conceded && missingFields.includes('goals_conceded_last_5')) {
+          const goals = parseInt(jsonData.goals_conceded);
+          if (goals >= 0 && goals <= 25) scrapedStats.goals_conceded_last_5 = goals;
+        }
+        if (jsonData.home_record && missingFields.includes('home_record')) {
+          const record = String(jsonData.home_record);
+          if (/^\d+-\d+-\d+$/.test(record)) scrapedStats.home_record = record;
+        }
+        if (jsonData.away_record && missingFields.includes('away_record')) {
+          const record = String(jsonData.away_record);
+          if (/^\d+-\d+-\d+$/.test(record)) scrapedStats.away_record = record;
+        }
+        
+        // If we got good data, stop searching
+        if (Object.keys(scrapedStats).length >= 3) break;
       }
     }
     
-    // Estimate days rest from last match date
-    if (missingFields.includes('days_rest')) {
-      const datePatterns = [
-        /(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/,
-        /(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i
-      ];
-      
-      for (const pattern of datePatterns) {
-        const match = combinedContent.match(pattern);
-        if (match) {
-          // Rough estimate - assume recent match was within last week
-          scrapedStats.days_rest = 4; // Default reasonable rest
-          console.log(`[Firecrawl] Estimated days rest for ${teamName}: ${scrapedStats.days_rest}`);
-          break;
-        }
-      }
+    // Fallback to markdown parsing if JSON extraction didn't work well
+    if (Object.keys(scrapedStats).length < 2) {
+      const combinedContent = results.map((r: any) => r.markdown || '').join('\n\n');
+      parseMarkdownForStats(combinedContent, searchTeam, missingFields, scrapedStats);
+    }
+    
+    // Estimate days rest if still missing
+    if (missingFields.includes('days_rest') && !scrapedStats.days_rest) {
+      scrapedStats.days_rest = 4; // Reasonable default
     }
     
     console.log(`[Firecrawl] Filled ${Object.keys(scrapedStats).length} fields for ${teamName}`);
@@ -369,6 +295,148 @@ async function fillMissingStatsWithFirecrawl(
   } catch (error) {
     console.error(`[Firecrawl] Error scraping stats for ${teamName}:`, error);
     return scrapedStats;
+  }
+}
+
+// Fallback search without JSON extraction
+async function fallbackFirecrawlSearch(
+  teamName: string,
+  leagueName: string,
+  missingFields: string[],
+  firecrawlApiKey: string
+): Promise<FirecrawlScrapedStats> {
+  const scrapedStats: FirecrawlScrapedStats = {};
+  const searchTeam = teamName.replace(/\bFC\b/gi, '').replace(/\bCF\b/gi, '').trim();
+  
+  try {
+    const response = await fetch('https://api.firecrawl.dev/v1/search', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${firecrawlApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        query: `${searchTeam} football standings table 2024`,
+        limit: 3,
+        scrapeOptions: { formats: ['markdown'] }
+      }),
+    });
+    
+    if (!response.ok) return scrapedStats;
+    
+    const data = await response.json();
+    const results = data.data || [];
+    const content = results.map((r: any) => r.markdown || '').join('\n\n');
+    
+    parseMarkdownForStats(content, searchTeam, missingFields, scrapedStats);
+    
+    if (missingFields.includes('days_rest') && !scrapedStats.days_rest) {
+      scrapedStats.days_rest = 4;
+    }
+    
+    return scrapedStats;
+  } catch (error) {
+    console.error(`[Firecrawl Fallback] Error:`, error);
+    return scrapedStats;
+  }
+}
+
+// Parse markdown content for stats using multiple patterns
+function parseMarkdownForStats(
+  content: string,
+  teamName: string,
+  missingFields: string[],
+  stats: FirecrawlScrapedStats
+): void {
+  const teamLower = teamName.toLowerCase();
+  
+  // Look for table rows containing the team name
+  const tableRowPattern = new RegExp(`\\|[^|]*${teamLower}[^|]*\\|([^\\n]+)`, 'gi');
+  const tableMatches = content.match(tableRowPattern) || [];
+  
+  for (const row of tableMatches) {
+    // Extract numbers from table cells
+    const cells = row.split('|').map(c => c.trim());
+    
+    // Try to find position (usually first number after team name)
+    if (missingFields.includes('league_position') && !stats.league_position) {
+      for (const cell of cells) {
+        const posMatch = cell.match(/^(\d{1,2})$/);
+        if (posMatch) {
+          const pos = parseInt(posMatch[1]);
+          if (pos >= 1 && pos <= 25) {
+            stats.league_position = pos;
+            console.log(`[Firecrawl Parse] Found position: ${pos}`);
+            break;
+          }
+        }
+      }
+    }
+    
+    // Look for W-D-L patterns
+    for (const cell of cells) {
+      const wdlMatch = cell.match(/(\d+)\s*[-–]\s*(\d+)\s*[-–]\s*(\d+)/);
+      if (wdlMatch) {
+        const record = `${wdlMatch[1]}-${wdlMatch[2]}-${wdlMatch[3]}`;
+        if (missingFields.includes('home_record') && !stats.home_record) {
+          stats.home_record = record;
+          console.log(`[Firecrawl Parse] Found home record: ${record}`);
+        } else if (missingFields.includes('away_record') && !stats.away_record) {
+          stats.away_record = record;
+          console.log(`[Firecrawl Parse] Found away record: ${record}`);
+        }
+      }
+    }
+  }
+  
+  // Look for form patterns anywhere in content
+  if (missingFields.includes('recent_form') && !stats.recent_form) {
+    const formPatterns = [
+      /(?:form|recent|last\s*5)[:\s]*([WDLWDL\s]{4,10})/gi,
+      /\b([WDLWDL]{5})\b/g
+    ];
+    
+    for (const pattern of formPatterns) {
+      const match = pattern.exec(content);
+      if (match && match[1]) {
+        const form = match[1].replace(/\s+/g, '').toUpperCase().slice(0, 5);
+        if (/^[WDL]{3,5}$/.test(form)) {
+          stats.recent_form = form;
+          console.log(`[Firecrawl Parse] Found form: ${form}`);
+          break;
+        }
+      }
+    }
+  }
+  
+  // Look for PPG patterns
+  if (missingFields.includes('points_per_game') && !stats.points_per_game) {
+    const ppgPatterns = [
+      /(\d+)\s*(?:pts?|points?).*?(\d+)\s*(?:games?|played|matches)/gi,
+      /ppg[:\s]*([\d.]+)/gi
+    ];
+    
+    for (const pattern of ppgPatterns) {
+      const match = pattern.exec(content);
+      if (match) {
+        if (match[2]) {
+          const pts = parseInt(match[1]);
+          const games = parseInt(match[2]);
+          if (games > 0) {
+            stats.points_per_game = Number((pts / games).toFixed(2));
+            console.log(`[Firecrawl Parse] Calculated PPG: ${stats.points_per_game}`);
+            break;
+          }
+        } else if (match[1]) {
+          const ppg = parseFloat(match[1]);
+          if (ppg >= 0 && ppg <= 3) {
+            stats.points_per_game = ppg;
+            console.log(`[Firecrawl Parse] Found PPG: ${ppg}`);
+            break;
+          }
+        }
+      }
+    }
   }
 }
 
