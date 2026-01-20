@@ -105,25 +105,59 @@ const LEAGUE_IDS: Record<string, number> = {
   'Primeira Liga': 94,
 };
 
-// Get current season year based on league hemisphere
+// Get current season year based on competition format
 function getSeasonForLeague(leagueId: number): number {
   const now = new Date();
-  const month = now.getMonth();
+  const month = now.getMonth(); // 0-11
   const year = now.getFullYear();
-  
-  // Southern hemisphere leagues (A-League, Argentina, Brazil, Chile)
-  // Their season typically spans across calendar years (e.g., 2024-2025)
-  const southernHemisphereLeagues = [188, 128, 71, 265];
-  
-  if (southernHemisphereLeagues.includes(leagueId)) {
-    // For A-League: season 2024-2025 starts in Aug 2024
-    // If we're in Jan-July, use previous year as season start
-    return month < 7 ? year - 1 : year;
-  }
-  
-  // European leagues (Aug-May)
-  // If before August, use previous year as season start
+
+  // Calendar-year leagues (run within a single year)
+  // Argentina Primera (128), Brazil Serie A (71), Chile Primera (265)
+  const calendarYearLeagues = new Set([128, 71, 265]);
+  if (calendarYearLeagues.has(leagueId)) return year;
+
+  // Split-year leagues (Aug/Jul style)
+  // Europe + A-League (188)
   return month < 7 ? year - 1 : year;
+}
+
+function normalizeTeamName(name: string): string {
+  return name
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\b(fc|cf|sc|afc|club)\b/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function fetchLeagueTeams(
+  leagueId: number,
+  season: number,
+  apiKey: string
+): Promise<Map<string, number>> {
+  const res = await fetch(
+    `https://v3.football.api-sports.io/teams?league=${leagueId}&season=${season}`,
+    { headers: { 'x-apisports-key': apiKey } }
+  );
+
+  if (!res.ok) {
+    console.error(`teams endpoint failed league=${leagueId} season=${season} status=${res.status}`);
+    return new Map();
+  }
+
+  const data = await res.json();
+  const map = new Map<string, number>();
+
+  for (const item of data.response || []) {
+    const team = item.team;
+    if (team?.id && team?.name) {
+      map.set(normalizeTeamName(team.name), team.id);
+    }
+  }
+
+  return map;
 }
 
 // Validate team stats have minimum required fields
@@ -147,17 +181,18 @@ function validateTeamStats(stats: TeamStats): { valid: boolean; missing: string[
 async function fetchTeamStats(
   teamName: string,
   leagueName: string,
-  apiKey: string
+  apiKey: string,
+  leagueTeamsCache: Map<string, Promise<Map<string, number>>>
 ): Promise<TeamStats> {
   const leagueId = LEAGUE_IDS[leagueName] || null;
   const season = leagueId ? getSeasonForLeague(leagueId) : new Date().getFullYear();
   
-  const stats: TeamStats = { 
+  const stats: TeamStats = {
     team: teamName,
     league_id: leagueId || undefined,
     season,
     stats_complete: false,
-    missing_fields: []
+    missing_fields: [],
   };
 
   if (!leagueId) {
@@ -167,25 +202,46 @@ async function fetchTeamStats(
   }
 
   try {
-    // Search for team ID with league filter for accuracy
-    const searchRes = await fetch(
-      `https://v3.football.api-sports.io/teams?search=${encodeURIComponent(teamName)}`,
-      { headers: { 'x-apisports-key': apiKey } }
-    );
-    const searchData = await searchRes.json();
-    
-    // Try to find the team that plays in the correct league
-    let team = searchData.response?.[0]?.team;
-    const teamId = team?.id;
-    
+    // Prefer league+season team list for accurate IDs (avoids name variants)
+    const cacheKey = `${leagueId}:${season}`;
+    if (!leagueTeamsCache.has(cacheKey)) {
+      leagueTeamsCache.set(cacheKey, fetchLeagueTeams(leagueId, season, apiKey));
+    }
+
+    const leagueTeams = await leagueTeamsCache.get(cacheKey)!;
+    const normalized = normalizeTeamName(teamName);
+    let teamId = leagueTeams.get(normalized);
+
+    // Fallback: try loose contains match against league teams
     if (!teamId) {
-      console.log(`Team not found: ${teamName} in ${leagueName}`);
+      for (const [k, v] of leagueTeams.entries()) {
+        if (k.includes(normalized) || normalized.includes(k)) {
+          teamId = v;
+          break;
+        }
+      }
+    }
+
+    // Final fallback: global search
+    if (!teamId) {
+      const searchRes = await fetch(
+        `https://v3.football.api-sports.io/teams?search=${encodeURIComponent(teamName)}`,
+        { headers: { 'x-apisports-key': apiKey } }
+      );
+      const searchData = await searchRes.json();
+      const candidates = (searchData.response || []).map((r: any) => r.team).filter(Boolean);
+      const best = candidates.find((t: any) => normalizeTeamName(t.name) === normalized) || candidates[0];
+      teamId = best?.id;
+    }
+
+    if (!teamId) {
+      console.log(`Team not found: ${teamName} in ${leagueName} season ${season}`);
       stats.missing_fields = ['team_not_found'];
       return stats;
     }
 
     stats.team_id = teamId;
-    console.log(`Found team: ${teamName} (ID: ${teamId}) for league ${leagueName} (ID: ${leagueId})`);
+    console.log(`Resolved team: ${teamName} -> ID ${teamId} | league ${leagueName} (${leagueId}) season ${season}`);
 
     // Fetch standings for this specific league and season
     const standingsRes = await fetch(
@@ -337,11 +393,13 @@ serve(async (req) => {
 
     console.log(`Fetching API-Football stats for ${events.length} events`);
 
+    const leagueTeamsCache = new Map<string, Promise<Map<string, number>>>();
+
     // Fetch stats for all teams in parallel
     const matchDataPromises = events.map(async (event) => {
       const [homeStats, awayStats] = await Promise.all([
-        fetchTeamStats(event.home_team, event.league, apiFootballKey),
-        fetchTeamStats(event.away_team, event.league, apiFootballKey),
+        fetchTeamStats(event.home_team, event.league, apiFootballKey, leagueTeamsCache),
+        fetchTeamStats(event.away_team, event.league, apiFootballKey, leagueTeamsCache),
       ]);
 
       // Build odds array
