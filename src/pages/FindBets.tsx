@@ -48,6 +48,7 @@ export default function FindBets() {
   const [maxBets, setMaxBets] = useState(10);
   const [maxDailyExposure, setMaxDailyExposure] = useState(10);
   const [maxEventExposure, setMaxEventExposure] = useState(3);
+  const [maxMatches, setMaxMatches] = useState(15);
   const [results, setResults] = useState<BettingModelResponse | null>(null);
   const [selectedBets, setSelectedBets] = useState<Set<number>>(new Set());
   
@@ -151,9 +152,9 @@ export default function FindBets() {
     try {
       const { data, error } = await supabase.functions.invoke('scrape-match-data', {
         body: {
-          sports: ['soccer'],
-          window_hours: 72,
-          max_events: 3,
+          sports: selectedSports,
+          window_hours: windowHours,
+          max_events: maxMatches,
         },
       });
 
@@ -430,6 +431,20 @@ export default function FindBets() {
                   min={1}
                   max={20}
                 />
+              </div>
+
+              {/* Max Matches for Scraping */}
+              <div className="space-y-2">
+                <Label htmlFor="maxMatches">Max Matches to Analyze</Label>
+                <Input
+                  id="maxMatches"
+                  type="number"
+                  value={maxMatches}
+                  onChange={(e) => setMaxMatches(parseInt(e.target.value) || 15)}
+                  min={1}
+                  max={30}
+                />
+                <p className="text-xs text-muted-foreground">~8 API calls per match</p>
               </div>
 
               <Button 
