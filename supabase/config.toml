@@ -23,3 +23,9 @@ verify_jwt = false
 
 [functions.ai-analyze-bets]
 verify_jwt = false
+
+[functions.fetch-odds-v2]
+verify_jwt = false
+
+[functions.run-betting-model]
+verify_jwt = false

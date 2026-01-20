@@ -67,6 +67,92 @@ export type Database = {
           },
         ]
       }
+      events: {
+        Row: {
+          away_team: string | null
+          created_at: string
+          home_team: string | null
+          id: string
+          league: string
+          raw_payload: Json | null
+          sport: string
+          start_time_aedt: string
+          start_time_utc: string
+          status: Database["public"]["Enums"]["event_status"]
+          updated_at: string
+        }
+        Insert: {
+          away_team?: string | null
+          created_at?: string
+          home_team?: string | null
+          id: string
+          league: string
+          raw_payload?: Json | null
+          sport: string
+          start_time_aedt: string
+          start_time_utc: string
+          status?: Database["public"]["Enums"]["event_status"]
+          updated_at?: string
+        }
+        Update: {
+          away_team?: string | null
+          created_at?: string
+          home_team?: string | null
+          id?: string
+          league?: string
+          raw_payload?: Json | null
+          sport?: string
+          start_time_aedt?: string
+          start_time_utc?: string
+          status?: Database["public"]["Enums"]["event_status"]
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      markets: {
+        Row: {
+          bookmaker: string
+          created_at: string
+          event_id: string
+          id: string
+          last_updated: string
+          line: number | null
+          market_type: string
+          odds_decimal: number
+          selection: string
+        }
+        Insert: {
+          bookmaker: string
+          created_at?: string
+          event_id: string
+          id: string
+          last_updated?: string
+          line?: number | null
+          market_type: string
+          odds_decimal: number
+          selection: string
+        }
+        Update: {
+          bookmaker?: string
+          created_at?: string
+          event_id?: string
+          id?: string
+          last_updated?: string
+          line?: number | null
+          market_type?: string
+          odds_decimal?: number
+          selection?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "markets_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       matches: {
         Row: {
           away_form: string | null
@@ -123,6 +209,141 @@ export type Database = {
           updated_at?: string | null
         }
         Relationships: []
+      }
+      model_bets: {
+        Row: {
+          bet_score: number
+          bookmaker: string
+          closing_odds: number | null
+          clv: number | null
+          created_at: string
+          edge: number
+          engine: string
+          event_id: string
+          event_name: string
+          id: string
+          implied_probability: number
+          league: string
+          market_id: string | null
+          model_probability: number
+          odds_taken: number
+          profit_loss_units: number | null
+          rationale: string | null
+          recommended_stake_units: number
+          result: Database["public"]["Enums"]["bet_result"]
+          selection_label: string
+          settled_at: string | null
+          sport: string
+          user_id: string | null
+        }
+        Insert: {
+          bet_score: number
+          bookmaker: string
+          closing_odds?: number | null
+          clv?: number | null
+          created_at?: string
+          edge: number
+          engine?: string
+          event_id: string
+          event_name: string
+          id?: string
+          implied_probability: number
+          league: string
+          market_id?: string | null
+          model_probability: number
+          odds_taken: number
+          profit_loss_units?: number | null
+          rationale?: string | null
+          recommended_stake_units: number
+          result?: Database["public"]["Enums"]["bet_result"]
+          selection_label: string
+          settled_at?: string | null
+          sport: string
+          user_id?: string | null
+        }
+        Update: {
+          bet_score?: number
+          bookmaker?: string
+          closing_odds?: number | null
+          clv?: number | null
+          created_at?: string
+          edge?: number
+          engine?: string
+          event_id?: string
+          event_name?: string
+          id?: string
+          implied_probability?: number
+          league?: string
+          market_id?: string | null
+          model_probability?: number
+          odds_taken?: number
+          profit_loss_units?: number | null
+          rationale?: string | null
+          recommended_stake_units?: number
+          result?: Database["public"]["Enums"]["bet_result"]
+          selection_label?: string
+          settled_at?: string | null
+          sport?: string
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "model_bets_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "model_bets_market_id_fkey"
+            columns: ["market_id"]
+            isOneToOne: false
+            referencedRelation: "markets"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      odds_snapshots: {
+        Row: {
+          bookmaker: string
+          captured_at: string
+          event_id: string
+          id: string
+          market_id: string
+          odds_decimal: number
+        }
+        Insert: {
+          bookmaker: string
+          captured_at?: string
+          event_id: string
+          id?: string
+          market_id: string
+          odds_decimal: number
+        }
+        Update: {
+          bookmaker?: string
+          captured_at?: string
+          event_id?: string
+          id?: string
+          market_id?: string
+          odds_decimal?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "odds_snapshots_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "odds_snapshots_market_id_fkey"
+            columns: ["market_id"]
+            isOneToOne: false
+            referencedRelation: "markets"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       profiles: {
         Row: {
@@ -245,8 +466,10 @@ export type Database = {
       [_ in never]: never
     }
     Enums: {
+      bet_result: "pending" | "win" | "loss" | "void"
       bet_status: "pending" | "won" | "lost" | "void"
       confidence_level: "low" | "moderate" | "high"
+      event_status: "upcoming" | "live" | "completed"
       market_type:
         | "1x2"
         | "over_under"
@@ -381,8 +604,10 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
+      bet_result: ["pending", "win", "loss", "void"],
       bet_status: ["pending", "won", "lost", "void"],
       confidence_level: ["low", "moderate", "high"],
+      event_status: ["upcoming", "live", "completed"],
       market_type: [
         "1x2",
         "over_under",
