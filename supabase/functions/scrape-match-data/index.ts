@@ -92,25 +92,6 @@ async function firecrawlSearch(
   }
 }
 
-// Scrape team-specific stats (single query per team for speed)
-async function scrapeTeamStats(
-  firecrawlApiKey: string,
-  team: string,
-  league: string
-): Promise<ScrapedLayer> {
-  const query = `"${team}" ${league} stats xG goals for against last 5 form table position`;
-  const sources = await firecrawlSearch(firecrawlApiKey, query, { limit: 1, tbs: 'qdr:m', maxChars: 900, timeoutMs: 8000 });
-  return { layer: `${team} TEAM STATS`, sources };
-}
-
-// Calculate days since last match
-function calculateDaysRest(lastMatchDate: string | null): number | null {
-  if (!lastMatchDate) return null;
-  const last = new Date(lastMatchDate);
-  const now = new Date();
-  return Math.floor((now.getTime() - last.getTime()) / (1000 * 60 * 60 * 24));
-}
-
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -127,7 +108,7 @@ serve(async (req) => {
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
     
-    const { sports = ['soccer'], window_hours = 72, max_events = 2 } = await req.json();
+    const { sports = ['soccer'], window_hours = 72, max_events = 3 } = await req.json();
 
     // Query upcoming events
     const now = new Date();
@@ -153,63 +134,66 @@ serve(async (req) => {
 
     console.log(`Found ${events.length} events to scrape (max_events=${max_events})`);
 
-    const scrapedResults = await Promise.all(
-      events.map(async (event) => {
-        const matchKey = `${event.home_team} vs ${event.away_team}`;
-        console.log(`Scraping fast export: ${matchKey}`);
+    // Build all search queries upfront, then execute in parallel batches
+    const matchQueries = events.map(event => ({
+      event,
+      matchKey: `${event.home_team} vs ${event.away_team}`,
+      query: `"${event.home_team}" "${event.away_team}" ${event.league} stats form xG goals injuries lineup`
+    }));
 
-        // Best odds (dedup by market_type+selection)
-        const oddsArray: MatchData['odds'] = [];
-        const processedSelections = new Set<string>();
-
-        for (const market of event.markets || []) {
-          const selectionKey = `${market.market_type}_${market.selection}`;
-          const odds = parseFloat(market.odds_decimal);
-          if (!processedSelections.has(selectionKey)) {
-            processedSelections.add(selectionKey);
-            oddsArray.push({
-              market: market.market_type,
-              selection: market.selection,
-              odds,
-              implied_probability: (1 / odds * 100).toFixed(1) + '%',
-              bookmaker: market.bookmaker
-            });
-          }
-        }
-
-        // Keep scraping minimal: 1 query per team + 1 injuries/news query
-        const [homeTeamLayer, awayTeamLayer, injuriesNews] = await Promise.all([
-          scrapeTeamStats(firecrawlApiKey, event.home_team, event.league),
-          scrapeTeamStats(firecrawlApiKey, event.away_team, event.league),
-          firecrawlSearch(
-            firecrawlApiKey,
-            `"${event.home_team}" OR "${event.away_team}" injuries suspensions lineup confirmed transfer`,
-            { limit: 1, tbs: 'qdr:w', maxChars: 900, timeoutMs: 8000 }
-          )
-        ]);
-
-        const dataLayers: ScrapedLayer[] = [
-          homeTeamLayer,
-          awayTeamLayer,
-          { layer: 'INJURIES / LINEUP / TRANSFERS', sources: injuriesNews }
-        ];
-
-        const homeTeamStats: TeamStats = { team: event.home_team };
-        const awayTeamStats: TeamStats = { team: event.away_team };
-
-        return {
-          match: matchKey,
-          sport: event.sport,
-          league: event.league,
-          start_time: event.start_time_aedt,
-          home_team_stats: homeTeamStats,
-          away_team_stats: awayTeamStats,
-          odds: oddsArray,
-          data_layers: dataLayers
-        } as MatchData;
+    // Execute ONE combined search per match (instead of 3)
+    const searchResults = await Promise.all(
+      matchQueries.map(async ({ event, matchKey, query }) => {
+        console.log(`Fast scrape: ${matchKey}`);
+        const sources = await firecrawlSearch(firecrawlApiKey, query, { 
+          limit: 3, 
+          tbs: 'qdr:w', 
+          maxChars: 800, 
+          timeoutMs: 10000 
+        });
+        return { event, matchKey, sources };
       })
     );
 
+    // Build results from search data
+    const scrapedResults: MatchData[] = searchResults.map(({ event, matchKey, sources }) => {
+      // Best odds (dedup by market_type+selection)
+      const oddsArray: MatchData['odds'] = [];
+      const processedSelections = new Set<string>();
+
+      for (const market of event.markets || []) {
+        const selectionKey = `${market.market_type}_${market.selection}`;
+        const odds = parseFloat(market.odds_decimal);
+        if (!processedSelections.has(selectionKey)) {
+          processedSelections.add(selectionKey);
+          oddsArray.push({
+            market: market.market_type,
+            selection: market.selection,
+            odds,
+            implied_probability: (1 / odds * 100).toFixed(1) + '%',
+            bookmaker: market.bookmaker
+          });
+        }
+      }
+
+      const dataLayers: ScrapedLayer[] = [
+        { layer: 'MATCH DATA (Form, Stats, Injuries, Lineup)', sources }
+      ];
+
+      const homeTeamStats: TeamStats = { team: event.home_team };
+      const awayTeamStats: TeamStats = { team: event.away_team };
+
+      return {
+        match: matchKey,
+        sport: event.sport,
+        league: event.league,
+        start_time: event.start_time_aedt,
+        home_team_stats: homeTeamStats,
+        away_team_stats: awayTeamStats,
+        odds: oddsArray,
+        data_layers: dataLayers
+      };
+    });
     // Format as institutional-grade output for Perplexity
     const timestamp = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Sydney' });
     
