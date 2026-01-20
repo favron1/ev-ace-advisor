@@ -919,6 +919,68 @@ serve(async (req) => {
 
     console.log(`STEP 1: Found ${events.length} events`);
 
+    // TENNIS FAST PATH: Skip all scraping and go straight to odds-only model
+    const isTennisOnly = sports.length === 1 && sports[0] === 'tennis';
+    if (isTennisOnly) {
+      console.log('TENNIS MODE: Bypassing team stats scraping, using odds-only model...');
+      
+      // Build eventsWithOdds for tennis directly from the query results
+      const tennisEventsWithOdds = events.map(event => {
+        const bestOdds: Record<string, { odds: number; bookmaker: string; market_id: string }> = {};
+        
+        for (const market of event.markets || []) {
+          const key = `${market.market_type}_${market.selection}`;
+          const odds = parseFloat(market.odds_decimal);
+          if (!bestOdds[key] || odds > bestOdds[key].odds) {
+            bestOdds[key] = { odds, bookmaker: market.bookmaker, market_id: market.id };
+          }
+        }
+
+        return {
+          event_id: event.id,
+          sport: event.sport,
+          league: event.league,
+          home_team: event.home_team,
+          away_team: event.away_team,
+          start_time_aedt: event.start_time_aedt,
+          _raw_markets: event.markets || [],
+          home_team_stats: null,
+          away_team_stats: null,
+          markets: Object.entries(bestOdds).map(([key, data]) => {
+            const [marketType, selection] = key.split('_');
+            return {
+              market_id: data.market_id,
+              type: marketType === 'h2h' ? 'moneyline' : marketType,
+              selection,
+              odds_decimal: data.odds,
+              bookmaker: data.bookmaker,
+              implied_probability: (1 / data.odds).toFixed(4),
+            };
+          })
+        };
+      });
+
+      const maxDailyUnits = bankroll_units * max_daily_exposure_pct;
+      const { bets, eventsAnalyzed } = buildTennisBetsFromOdds(tennisEventsWithOdds, bankroll_units, maxDailyUnits, max_bets);
+      
+      console.log(`TENNIS: Analyzed ${eventsAnalyzed} events, found ${bets.length} value bets`);
+      
+      return new Response(
+        JSON.stringify({
+          recommended_bets: bets,
+          reason: bets.length === 0 
+            ? `No tennis value edges found. Analyzed ${eventsAnalyzed} events but none had sufficient edge (>=2%).` 
+            : undefined,
+          events_analyzed: eventsAnalyzed,
+          events_fetched: tennisEventsWithOdds.length,
+          model: 'tennis_odds_only_v1',
+          timestamp: new Date().toISOString()
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
+    }
+
+    // TEAM SPORTS PATH: Need stats scraping
     // STEP 2: Call scrape-match-data to get enhanced stats
     console.log('STEP 2: Fetching enhanced stats via scrape-match-data...');
     
@@ -1006,20 +1068,7 @@ serve(async (req) => {
 
     const maxDailyUnits = bankroll_units * max_daily_exposure_pct;
 
-    // Tennis is supported via an odds-only model (no team stats required)
-    if (sports.length === 1 && sports[0] === 'tennis') {
-      const { bets } = buildTennisBetsFromOdds(eventsWithOdds, bankroll_units, maxDailyUnits, max_bets);
-      return new Response(
-        JSON.stringify({
-          recommended_bets: bets,
-          reason: bets.length ? undefined : 'No tennis value edges found from current markets. Try increasing the time window or refresh odds.',
-          events_analyzed: bets.length ? bets.length : 0,
-          events_fetched: eventsWithOdds.filter((e) => e.sport === 'tennis').length,
-          model: 'tennis_odds_only_v1',
-        }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
-      );
-    }
+    // Note: Tennis is handled earlier in the "TENNIS FAST PATH" section
 
     // STRICT ENFORCEMENT for team sports: Do NOT fall back to incomplete data
     // This ensures Find Bets only analyzes the same events that Scrape Data Only returns
