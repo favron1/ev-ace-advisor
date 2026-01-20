@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Activity, Settings, Bell, LogOut, User, Receipt, Clock } from "lucide-react";
+import { Activity, Settings, Bell, LogOut, User, Receipt, Clock, Database } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import { useNavigate, Link } from "react-router-dom";
@@ -86,10 +86,12 @@ export function Header() {
         </div>
 
         <nav className="hidden md:flex items-center gap-6">
-          <Link to="/" className="text-sm font-medium text-foreground hover:text-primary transition-colors">Dashboard</Link>
-          <Link to="/daily-bets" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">Daily Best Bets</Link>
-          <Link to="/simulation" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">Simulation</Link>
-          <a href="#analyzer" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">Analyzer</a>
+          <Link to="/" className="text-sm font-medium text-foreground hover:text-primary transition-colors">Find Bets</Link>
+          <Link to="/bet-log" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">Bet Log</Link>
+          <Link to="/scrape-history" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1">
+            <Database className="h-3 w-3" />
+            Scrape History
+          </Link>
           <button 
             onClick={() => setIsOpen(true)}
             className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
