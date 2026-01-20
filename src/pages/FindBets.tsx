@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Loader2, Search, TrendingUp, Target, DollarSign, RefreshCw } from "lucide-react";
+import { Loader2, Search, TrendingUp, Target, DollarSign, RefreshCw, FileText, Copy, Check } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { RecommendedBet, BettingModelResponse } from "@/types/model-betting";
@@ -18,6 +18,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
 
 const SPORTS = [
   { id: 'soccer', label: 'Soccer', icon: '⚽' },
@@ -38,6 +46,12 @@ export default function FindBets() {
   const [maxDailyExposure, setMaxDailyExposure] = useState(10);
   const [maxEventExposure, setMaxEventExposure] = useState(3);
   const [results, setResults] = useState<BettingModelResponse | null>(null);
+  
+  // Scrape data state
+  const [scraping, setScraping] = useState(false);
+  const [scrapedData, setScrapedData] = useState<string>("");
+  const [showScrapeDialog, setShowScrapeDialog] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const toggleSport = (sport: string) => {
     setSelectedSports(prev => 
@@ -126,7 +140,72 @@ export default function FindBets() {
     }
   };
 
-  const formatTime = (isoString: string) => {
+  const scrapeData = async () => {
+    if (selectedSports.length === 0) {
+      toast({
+        title: "Select Sports",
+        description: "Please select at least one sport",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setScraping(true);
+    setCopied(false);
+    try {
+      const { data, error } = await supabase.functions.invoke('scrape-match-data', {
+        body: {
+          sports: selectedSports,
+          window_hours: windowHours
+        }
+      });
+
+      if (error) throw error;
+
+      if (data.formatted_data) {
+        setScrapedData(data.formatted_data);
+        setShowScrapeDialog(true);
+        toast({
+          title: "Data Scraped",
+          description: `Scraped ${data.matches_scraped} matches`,
+        });
+      } else {
+        toast({
+          title: "No Data",
+          description: data.error || "No matches found to scrape",
+          variant: "destructive",
+        });
+      }
+    } catch (error) {
+      console.error('Error scraping data:', error);
+      toast({
+        title: "Error",
+        description: "Failed to scrape match data",
+        variant: "destructive",
+      });
+    } finally {
+      setScraping(false);
+    }
+  };
+
+  const copyToClipboard = async () => {
+    try {
+      await navigator.clipboard.writeText(scrapedData);
+      setCopied(true);
+      toast({
+        title: "Copied!",
+        description: "Data copied to clipboard",
+      });
+      setTimeout(() => setCopied(false), 2000);
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to copy to clipboard",
+        variant: "destructive",
+      });
+    }
+  };
+
     return new Date(isoString).toLocaleString('en-AU', {
       timeZone: 'Australia/Sydney',
       day: '2-digit',
@@ -293,6 +372,20 @@ export default function FindBets() {
                 )}
                 Find Best Bets
               </Button>
+
+              <Button 
+                onClick={scrapeData} 
+                disabled={scraping}
+                variant="outline"
+                className="w-full gap-2"
+              >
+                {scraping ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <FileText className="h-4 w-4" />
+                )}
+                Scrape Data Only
+              </Button>
             </CardContent>
           </Card>
 
@@ -434,6 +527,43 @@ export default function FindBets() {
           </div>
         </div>
       </main>
+
+      {/* Scrape Data Dialog */}
+      <Dialog open={showScrapeDialog} onOpenChange={setShowScrapeDialog}>
+        <DialogContent className="max-w-4xl max-h-[80vh]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FileText className="h-5 w-5" />
+              Scraped Match Data
+            </DialogTitle>
+            <DialogDescription>
+              Copy this data and paste it into Perplexity for manual analysis
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="flex justify-end">
+              <Button onClick={copyToClipboard} variant="outline" className="gap-2">
+                {copied ? (
+                  <>
+                    <Check className="h-4 w-4" />
+                    Copied!
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-4 w-4" />
+                    Copy to Clipboard
+                  </>
+                )}
+              </Button>
+            </div>
+            <Textarea 
+              value={scrapedData}
+              readOnly
+              className="h-[50vh] font-mono text-xs"
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
