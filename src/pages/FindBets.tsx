@@ -174,11 +174,12 @@ export default function FindBets() {
   };
 
   const scrapeData = async () => {
-    // Perplexity export is always Soccer for the next 72 hours (across all leagues)
+    // Run API-Football (quantitative) and Firecrawl (qualitative) in PARALLEL
     setScraping(true);
     setCopied(false);
     try {
-      const { data, error } = await supabase.functions.invoke('scrape-match-data', {
+      // STEP 1: Start quantitative scrape (API-Football)
+      const quantitativePromise = supabase.functions.invoke('scrape-match-data', {
         body: {
           sports: selectedSports,
           window_hours: windowHours,
@@ -186,19 +187,101 @@ export default function FindBets() {
         },
       });
 
-      if (error) throw error;
+      // Wait for quantitative to get events list first
+      const { data: quantData, error: quantError } = await quantitativePromise;
+      
+      if (quantError) throw quantError;
 
-      if (data.formatted_data) {
-        setScrapedData(data.formatted_data);
+      // STEP 2: If we have events, run qualitative scrape in parallel with showing results
+      let qualitativeContext = null;
+      if (quantData.raw_data?.length > 0) {
+        // Fire off qualitative scrape but don't block on it
+        const qualitativePromise = supabase.functions.invoke('scrape-qualitative-context', {
+          body: {
+            events: quantData.raw_data.map((e: any) => ({
+              id: e.event_id || e.id,
+              home_team: e.home_team,
+              away_team: e.away_team,
+              league: e.league,
+            })),
+          },
+        });
+        
+        // Try to get qualitative data (with timeout fallback)
+        try {
+          const { data: qualData } = await Promise.race([
+            qualitativePromise,
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 30000))
+          ]) as { data: any };
+          
+          qualitativeContext = qualData?.qualitative_context;
+          console.log('Qualitative context loaded:', qualitativeContext?.length || 0, 'events');
+        } catch (qualErr) {
+          console.log('Qualitative scrape skipped or timed out:', qualErr);
+        }
+      }
+
+      if (quantData.formatted_data) {
+        // Append qualitative context to formatted data if available
+        let enrichedData = quantData.formatted_data;
+        
+        if (qualitativeContext && qualitativeContext.length > 0) {
+          enrichedData += '\n\n═══════════════════════════════════════════════════════════════════════════════\n';
+          enrichedData += '🔍 QUALITATIVE CONTEXT (Firecrawl Web Intelligence)\n';
+          enrichedData += '═══════════════════════════════════════════════════════════════════════════════\n\n';
+          
+          for (const ctx of qualitativeContext) {
+            const homeFlags = ctx.home_context?.contextual_flags || [];
+            const awayFlags = ctx.away_context?.contextual_flags || [];
+            const matchFlags = ctx.match_context || [];
+            
+            if (homeFlags.length > 0 || awayFlags.length > 0 || matchFlags.length > 0) {
+              enrichedData += `📰 ${ctx.home_team} vs ${ctx.away_team}\n`;
+              
+              if (homeFlags.length > 0) {
+                enrichedData += `   ${ctx.home_team}: [${homeFlags.join(', ')}]\n`;
+              }
+              if (awayFlags.length > 0) {
+                enrichedData += `   ${ctx.away_team}: [${awayFlags.join(', ')}]\n`;
+              }
+              if (matchFlags.length > 0) {
+                enrichedData += `   Match: [${matchFlags.join(', ')}]\n`;
+              }
+              
+              // Add injury updates if present
+              const homeInjuries = ctx.home_context?.injury_updates || [];
+              const awayInjuries = ctx.away_context?.injury_updates || [];
+              if (homeInjuries.length > 0) {
+                enrichedData += `   📋 ${ctx.home_team} injuries: ${homeInjuries.slice(0, 2).join('; ')}\n`;
+              }
+              if (awayInjuries.length > 0) {
+                enrichedData += `   📋 ${ctx.away_team} injuries: ${awayInjuries.slice(0, 2).join('; ')}\n`;
+              }
+              
+              enrichedData += '\n';
+            }
+          }
+          
+          const totalFlags = qualitativeContext.reduce((sum: number, ctx: any) => 
+            sum + (ctx.home_context?.contextual_flags?.length || 0) + 
+            (ctx.away_context?.contextual_flags?.length || 0) + 
+            (ctx.match_context?.length || 0), 0
+          );
+          enrichedData += `📊 Total qualitative signals detected: ${totalFlags}\n`;
+        }
+        
+        setScrapedData(enrichedData);
         setShowScrapeDialog(true);
+        
+        const qualMessage = qualitativeContext ? ` + ${qualitativeContext.length} qualitative profiles` : '';
         toast({
-          title: "Data Scraped",
-          description: `Scraped ${data.matches_scraped} matches`,
+          title: "Data Scraped (Parallel)",
+          description: `Scraped ${quantData.matches_scraped} matches${qualMessage}`,
         });
       } else {
         toast({
           title: "No Data",
-          description: data.error || "No matches found to scrape",
+          description: quantData.error || "No matches found to scrape",
           variant: "destructive",
         });
       }
