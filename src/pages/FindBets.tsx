@@ -153,6 +153,7 @@ export default function FindBets() {
         body: {
           sports: ['soccer'],
           window_hours: 72,
+          max_events: 1,
         },
       });
 
