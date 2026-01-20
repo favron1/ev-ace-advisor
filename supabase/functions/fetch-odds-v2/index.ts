@@ -34,7 +34,7 @@ function mapSportKey(sportKey: string): string {
   if (sportKey.startsWith('aussierules')) return 'afl';
   if (sportKey.startsWith('rugbyleague')) return 'nrl';
   if (sportKey.startsWith('tennis')) return 'tennis';
-  return 'soccer';
+  return 'other';
 }
 
 // Convert UTC to AEDT (Australia/Sydney)
@@ -97,6 +97,15 @@ serve(async (req) => {
       'basketball_nbl', // Australia NBL
       'basketball_euroleague',
       'basketball_wncaa', // Women's NCAA
+      // Tennis (year-round, majors + ATP/WTA tours)
+      'tennis_atp_australian_open',
+      'tennis_wta_australian_open',
+      'tennis_atp_french_open',
+      'tennis_wta_french_open',
+      'tennis_atp_wimbledon',
+      'tennis_wta_wimbledon',
+      'tennis_atp_us_open',
+      'tennis_wta_us_open',
       // Other sports
       'aussierules_afl',
       'rugbyleague_nrl'
