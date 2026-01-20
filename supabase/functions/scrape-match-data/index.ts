@@ -6,23 +6,17 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-interface ScrapedLayer {
-  layer: string;
-  sources: Array<{ title: string; url: string; content: string }>;
-}
-
 interface TeamStats {
   team: string;
+  league_position?: number;
+  points_per_game?: number;
   recent_form?: string;
   goals_scored_last_5?: number;
   goals_conceded_last_5?: number;
-  xg_for?: number;
-  xg_against?: number;
-  league_position?: number;
-  home_away_record?: string;
+  home_record?: string;
+  away_record?: string;
   days_rest?: number;
-  key_injuries?: string[];
-  key_transfers?: string[];
+  injuries?: string[];
 }
 
 interface MatchData {
@@ -39,57 +33,123 @@ interface MatchData {
     implied_probability: string;
     bookmaker: string;
   }>;
-  data_layers: ScrapedLayer[];
 }
 
-// Firecrawl search helper (keep it lightweight to avoid timeouts)
-async function firecrawlSearch(
-  firecrawlApiKey: string,
-  query: string,
-  {
-    limit = 1,
-    tbs = 'qdr:w',
-    maxChars = 900,
-    timeoutMs = 8000,
-  }: { limit?: number; tbs?: string; maxChars?: number; timeoutMs?: number } = {}
-): Promise<Array<{ title: string; url: string; content: string }>> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+// API-Football league ID mapping
+const LEAGUE_IDS: Record<string, number> = {
+  'English Premier League': 39,
+  'EPL': 39,
+  'Premier League': 39,
+  'La Liga': 140,
+  'Serie A': 135,
+  'Bundesliga': 78,
+  'Ligue 1': 61,
+  'Champions League': 2,
+  'Europa League': 3,
+  'A-League': 188,
+  'MLS': 253,
+};
+
+// Get current season year
+function getCurrentSeason(): number {
+  const now = new Date();
+  const month = now.getMonth();
+  const year = now.getFullYear();
+  // If before August, use previous year as season start
+  return month < 7 ? year - 1 : year;
+}
+
+// Fetch team stats from API-Football
+async function fetchTeamStats(
+  teamName: string,
+  leagueName: string,
+  apiKey: string
+): Promise<TeamStats> {
+  const stats: TeamStats = { team: teamName };
+  const leagueId = LEAGUE_IDS[leagueName] || LEAGUE_IDS['Premier League'];
+  const season = getCurrentSeason();
 
   try {
-    const response = await fetch('https://api.firecrawl.dev/v1/search', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${firecrawlApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        query,
-        limit,
-        tbs,
-        scrapeOptions: { formats: ['markdown'] }
-      }),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      console.error(`Firecrawl failed: ${response.status}`);
-      return [];
+    // Search for team ID
+    const searchRes = await fetch(
+      `https://v3.football.api-sports.io/teams?search=${encodeURIComponent(teamName)}`,
+      { headers: { 'x-apisports-key': apiKey } }
+    );
+    const searchData = await searchRes.json();
+    const team = searchData.response?.[0]?.team;
+    
+    if (!team?.id) {
+      console.log(`Team not found: ${teamName}`);
+      return stats;
     }
 
-    const data = await response.json();
-    return data.data?.map((result: any) => ({
-      title: result.title || '',
-      url: result.url || '',
-      content: result.markdown?.substring(0, maxChars) || result.description || ''
-    })) || [];
+    const teamId = team.id;
+
+    // Fetch standings for league position
+    const standingsRes = await fetch(
+      `https://v3.football.api-sports.io/standings?league=${leagueId}&season=${season}`,
+      { headers: { 'x-apisports-key': apiKey } }
+    );
+    const standingsData = await standingsRes.json();
+    const standings = standingsData.response?.[0]?.league?.standings?.[0] || [];
+    
+    const teamStanding = standings.find((s: any) => s.team?.id === teamId);
+    if (teamStanding) {
+      stats.league_position = teamStanding.rank;
+      stats.points_per_game = teamStanding.points / (teamStanding.all?.played || 1);
+      stats.recent_form = teamStanding.form?.slice(-5);
+      stats.home_record = `${teamStanding.home?.win}-${teamStanding.home?.draw}-${teamStanding.home?.lose}`;
+      stats.away_record = `${teamStanding.away?.win}-${teamStanding.away?.draw}-${teamStanding.away?.lose}`;
+    }
+
+    // Fetch last 5 fixtures for goals
+    const fixturesRes = await fetch(
+      `https://v3.football.api-sports.io/fixtures?team=${teamId}&last=5`,
+      { headers: { 'x-apisports-key': apiKey } }
+    );
+    const fixturesData = await fixturesRes.json();
+    const fixtures = fixturesData.response || [];
+
+    let goalsFor = 0;
+    let goalsAgainst = 0;
+    let lastMatchDate: Date | null = null;
+
+    for (const fixture of fixtures) {
+      const isHome = fixture.teams?.home?.id === teamId;
+      goalsFor += isHome ? fixture.goals?.home || 0 : fixture.goals?.away || 0;
+      goalsAgainst += isHome ? fixture.goals?.away || 0 : fixture.goals?.home || 0;
+      
+      const matchDate = new Date(fixture.fixture?.date);
+      if (!lastMatchDate || matchDate > lastMatchDate) {
+        lastMatchDate = matchDate;
+      }
+    }
+
+    stats.goals_scored_last_5 = goalsFor;
+    stats.goals_conceded_last_5 = goalsAgainst;
+
+    if (lastMatchDate) {
+      const daysSince = Math.floor((Date.now() - lastMatchDate.getTime()) / (1000 * 60 * 60 * 24));
+      stats.days_rest = daysSince;
+    }
+
+    // Fetch injuries
+    const injuriesRes = await fetch(
+      `https://v3.football.api-sports.io/injuries?team=${teamId}&season=${season}`,
+      { headers: { 'x-apisports-key': apiKey } }
+    );
+    const injuriesData = await injuriesRes.json();
+    const injuries = injuriesData.response || [];
+    
+    stats.injuries = injuries
+      .slice(0, 5)
+      .map((inj: any) => `${inj.player?.name} (${inj.player?.type || 'injured'})`);
+
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error('Error scraping:', msg);
-    return [];
-  } finally {
-    clearTimeout(timeout);
+    console.error(`Error fetching stats for ${teamName}:`, error);
   }
+
+  return stats;
 }
 
 serve(async (req) => {
@@ -100,10 +160,10 @@ serve(async (req) => {
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-    const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY');
+    const apiFootballKey = Deno.env.get('API_FOOTBALL_KEY');
 
-    if (!firecrawlApiKey) {
-      throw new Error('FIRECRAWL_API_KEY not configured');
+    if (!apiFootballKey) {
+      throw new Error('API_FOOTBALL_KEY not configured');
     }
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
@@ -132,32 +192,16 @@ serve(async (req) => {
       );
     }
 
-    console.log(`Found ${events.length} events to scrape (max_events=${max_events})`);
+    console.log(`Fetching API-Football stats for ${events.length} events`);
 
-    // Build all search queries upfront, then execute in parallel batches
-    const matchQueries = events.map(event => ({
-      event,
-      matchKey: `${event.home_team} vs ${event.away_team}`,
-      query: `"${event.home_team}" "${event.away_team}" ${event.league} stats form xG goals injuries lineup`
-    }));
+    // Fetch stats for all teams in parallel
+    const matchDataPromises = events.map(async (event) => {
+      const [homeStats, awayStats] = await Promise.all([
+        fetchTeamStats(event.home_team, event.league, apiFootballKey),
+        fetchTeamStats(event.away_team, event.league, apiFootballKey),
+      ]);
 
-    // Execute ONE combined search per match (instead of 3)
-    const searchResults = await Promise.all(
-      matchQueries.map(async ({ event, matchKey, query }) => {
-        console.log(`Fast scrape: ${matchKey}`);
-        const sources = await firecrawlSearch(firecrawlApiKey, query, { 
-          limit: 3, 
-          tbs: 'qdr:w', 
-          maxChars: 800, 
-          timeoutMs: 10000 
-        });
-        return { event, matchKey, sources };
-      })
-    );
-
-    // Build results from search data
-    const scrapedResults: MatchData[] = searchResults.map(({ event, matchKey, sources }) => {
-      // Best odds (dedup by market_type+selection)
+      // Build odds array
       const oddsArray: MatchData['odds'] = [];
       const processedSelections = new Set<string>();
 
@@ -176,46 +220,28 @@ serve(async (req) => {
         }
       }
 
-      const dataLayers: ScrapedLayer[] = [
-        { layer: 'MATCH DATA (Form, Stats, Injuries, Lineup)', sources }
-      ];
-
-      const homeTeamStats: TeamStats = { team: event.home_team };
-      const awayTeamStats: TeamStats = { team: event.away_team };
-
       return {
-        match: matchKey,
+        match: `${event.home_team} vs ${event.away_team}`,
         sport: event.sport,
         league: event.league,
         start_time: event.start_time_aedt,
-        home_team_stats: homeTeamStats,
-        away_team_stats: awayTeamStats,
-        odds: oddsArray,
-        data_layers: dataLayers
+        home_team_stats: homeStats,
+        away_team_stats: awayStats,
+        odds: oddsArray
       };
     });
-    // Format as institutional-grade output for Perplexity
+
+    const scrapedResults = await Promise.all(matchDataPromises);
+
+    // Format for Perplexity analysis
     const timestamp = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Sydney' });
     
     const formattedOutput = `========================================================
 INSTITUTIONAL SPORTS BETTING DATA EXPORT
 Timestamp: ${timestamp} AEDT
 Events: ${scrapedResults.length} matches | Window: Next ${window_hours} hours
+Data Source: API-Football (Structured Stats)
 ========================================================
-
-CRITICAL ANALYSIS REQUIREMENTS:
-For each team, extract and structure the following from the scraped data:
-1. TEAM RATING: League position, points per game, overall strength
-2. RECENT FORM: Last 5 match results (W/D/L sequence)
-3. GOALS FOR/AGAINST: Last 5 matches scoring record
-4. EXPECTED GOALS (xG): xG for and against if available
-5. HOME/AWAY STRENGTH: Performance split by venue
-6. DAYS REST: Days since last competitive match
-7. KEY ABSENCES: Starting XI players out (injuries/suspensions)
-8. TRANSFER IMPACT: New signings or departures affecting squad
-
-USE THESE STRUCTURED STATS to calculate Model Probability that differs from Implied Probability.
-Without structured stats, you cannot identify true edge over the market.
 
 ${scrapedResults.map((match, idx) => {
   const eventDate = new Date(match.start_time);
@@ -228,6 +254,15 @@ ${scrapedResults.map((match, idx) => {
     minute: '2-digit' 
   });
   
+  const formatTeamStats = (stats: TeamStats) => {
+    return `  Position: ${stats.league_position || '?'} | PPG: ${stats.points_per_game?.toFixed(2) || '?'}
+  Form (L5): ${stats.recent_form || '?'}
+  Goals L5: ${stats.goals_scored_last_5 ?? '?'} for, ${stats.goals_conceded_last_5 ?? '?'} against
+  Home Record: ${stats.home_record || '?'} | Away: ${stats.away_record || '?'}
+  Days Rest: ${stats.days_rest ?? '?'}
+  Injuries: ${stats.injuries?.length ? stats.injuries.join(', ') : 'None reported'}`;
+  };
+
   return `
 ================================================================
 EVENT ${idx + 1}: ${match.match}
@@ -235,38 +270,22 @@ EVENT ${idx + 1}: ${match.match}
 Sport: ${match.sport.toUpperCase()} | League: ${match.league}
 Kickoff: ${formattedDate} AEDT
 
+--- TEAM STATS ---
+${match.home_team_stats.team} (HOME):
+${formatTeamStats(match.home_team_stats)}
+
+${match.away_team_stats.team} (AWAY):
+${formatTeamStats(match.away_team_stats)}
+
 --- MARKET ODDS ---
 ${match.odds.map(o => `${o.selection}: ${o.odds.toFixed(2)} (Implied: ${o.implied_probability}) @ ${o.bookmaker}`).join('\n')}
-
-${match.data_layers.map(layer => {
-  if (layer.sources.length === 0) return '';
-  return `
---- ${layer.layer} ---
-${layer.sources.map(s => `
-[${s.title}]
-${s.content}
-`).join('\n')}`;
-}).filter(Boolean).join('\n')}
 `;
 }).join('\n')}
 
 ========================================================
 ANALYSIS FRAMEWORK
 ========================================================
-For each match, you MUST extract from the above data:
-
-| Metric | Home Team | Away Team |
-|--------|-----------|-----------|
-| League Position | ? | ? |
-| Last 5 Form | WWDLW | LDWDL |
-| Goals Scored (L5) | X | X |
-| Goals Conceded (L5) | X | X |
-| xG For | X.XX | X.XX |
-| xG Against | X.XX | X.XX |
-| Days Rest | X | X |
-| Key Absences | List | List |
-
-Then calculate:
+Using the structured stats above, calculate:
 1. Model Probability per outcome (based on team strength differential)
 2. Edge = Model Prob - Implied Prob
 3. Bet Score (0-100) using the institutional framework
