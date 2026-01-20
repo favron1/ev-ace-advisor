@@ -705,19 +705,30 @@ serve(async (req) => {
       };
     });
 
-    // Filter to only events with complete stats
+    // Filter to only events with complete stats - STRICT DATA GOVERNANCE
     const eventsWithCompleteStats = eventsWithOdds.filter(e => 
       e.home_team_stats?.stats_complete && e.away_team_stats?.stats_complete
     );
 
     console.log(`STEP 4: ${eventsWithCompleteStats.length}/${eventsWithOdds.length} events have complete stats`);
 
+    // STRICT ENFORCEMENT: Do NOT fall back to incomplete data
+    // This ensures Find Bets only analyzes the same events that Scrape Data Only returns
     if (eventsWithCompleteStats.length === 0) {
-      // Fall back to all events if none have complete stats
-      console.log('No events with complete stats, using all events');
+      console.log('NO events with complete stats - cannot proceed with betting analysis');
+      return new Response(
+        JSON.stringify({
+          recommended_bets: [],
+          reason: `No events passed data quality filter. ${eventsWithOdds.length} events found but 0 have complete stats (league position, form, goals data from API-Football). Run "Scrape Data Only" first to see which matches have sufficient data.`,
+          events_analyzed: 0,
+          events_fetched: eventsWithOdds.length,
+          data_quality_issue: true
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
     }
 
-    const eventsForAnalysis = eventsWithCompleteStats.length > 0 ? eventsWithCompleteStats : eventsWithOdds;
+    const eventsForAnalysis = eventsWithCompleteStats;
 
     // STEP 5: Send to Perplexity for analysis
     console.log('STEP 5: Sending to Perplexity for quantitative analysis...');
