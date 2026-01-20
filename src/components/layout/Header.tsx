@@ -25,16 +25,33 @@ export function Header() {
   }, []);
 
   useEffect(() => {
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      setUser(session?.user ?? null);
+    const validateAndSetUser = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.user) {
+        setUser(null);
+        return;
+      }
+
+      const { data, error } = await supabase.auth.getUser();
+      if (error) {
+        // Token invalid (bad_jwt) – ensure UI matches reality.
+        await supabase.auth.signOut();
+        setUser(null);
+        return;
+      }
+
+      setUser(data.user ?? null);
+    };
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(() => {
+      // Re-validate on auth changes.
+      void validateAndSetUser();
     });
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
-    });
+    void validateAndSetUser();
 
     return () => subscription.unsubscribe();
-  }, []);
+  }, [toast]);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
