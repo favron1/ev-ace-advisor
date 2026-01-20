@@ -37,12 +37,32 @@ const SPORTS = [
   { id: 'tennis', label: 'Tennis', icon: '🎾' },
 ];
 
+// Tier 1: Big 5 European Leagues (best data coverage)
+const TIER_1_LEAGUES = [
+  { id: 'epl', label: 'Premier League', flag: '🏴󠁧󠁢󠁥󠁮󠁧󠁿' },
+  { id: 'laliga', label: 'La Liga', flag: '🇪🇸' },
+  { id: 'bundesliga', label: 'Bundesliga', flag: '🇩🇪' },
+  { id: 'seriea', label: 'Serie A', flag: '🇮🇹' },
+  { id: 'ligue1', label: 'Ligue 1', flag: '🇫🇷' },
+];
+
+// Tier 2: Secondary leagues
+const TIER_2_LEAGUES = [
+  { id: 'ucl', label: 'Champions League', flag: '🏆' },
+  { id: 'uel', label: 'Europa League', flag: '🏆' },
+  { id: 'argentina', label: 'Argentina Primera', flag: '🇦🇷' },
+  { id: 'aleague', label: 'A-League', flag: '🇦🇺' },
+];
+
 export default function FindBets() {
   const { toast } = useToast();
   const myBets = useMyBets();
   const [loading, setLoading] = useState(false);
   const [refreshingOdds, setRefreshingOdds] = useState(false);
   const [selectedSports, setSelectedSports] = useState<string[]>(['soccer']);
+  const [selectedLeagues, setSelectedLeagues] = useState<string[]>([
+    'epl', 'laliga', 'bundesliga', 'seriea', 'ligue1', 'aleague', 'argentina'
+  ]);
   const [windowHours, setWindowHours] = useState(72);
   const [bankrollUnits, setBankrollUnits] = useState(100);
   const [maxBets, setMaxBets] = useState(10);
@@ -63,6 +83,14 @@ export default function FindBets() {
       prev.includes(sport) 
         ? prev.filter(s => s !== sport)
         : [...prev, sport]
+    );
+  };
+
+  const toggleLeague = (league: string) => {
+    setSelectedLeagues(prev => 
+      prev.includes(league) 
+        ? prev.filter(l => l !== league)
+        : [...prev, league]
     );
   };
 
@@ -363,6 +391,48 @@ export default function FindBets() {
                       >
                         <span>{sport.icon}</span>
                         {sport.label}
+                      </label>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* League Selection */}
+              <div className="space-y-3">
+                <Label>Leagues (Tier 1)</Label>
+                <div className="space-y-2">
+                  {TIER_1_LEAGUES.map(league => (
+                    <div key={league.id} className="flex items-center space-x-2">
+                      <Checkbox
+                        id={league.id}
+                        checked={selectedLeagues.includes(league.id)}
+                        onCheckedChange={() => toggleLeague(league.id)}
+                      />
+                      <label 
+                        htmlFor={league.id}
+                        className="text-sm cursor-pointer flex items-center gap-2"
+                      >
+                        <span>{league.flag}</span>
+                        {league.label}
+                      </label>
+                    </div>
+                  ))}
+                </div>
+                <Label className="mt-2">Leagues (Tier 2)</Label>
+                <div className="space-y-2">
+                  {TIER_2_LEAGUES.map(league => (
+                    <div key={league.id} className="flex items-center space-x-2">
+                      <Checkbox
+                        id={league.id}
+                        checked={selectedLeagues.includes(league.id)}
+                        onCheckedChange={() => toggleLeague(league.id)}
+                      />
+                      <label 
+                        htmlFor={league.id}
+                        className="text-sm cursor-pointer flex items-center gap-2"
+                      >
+                        <span>{league.flag}</span>
+                        {league.label}
                       </label>
                     </div>
                   ))}

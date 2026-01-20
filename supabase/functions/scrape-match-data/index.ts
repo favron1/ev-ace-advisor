@@ -36,18 +36,42 @@ interface MatchData {
 }
 
 // API-Football league ID mapping
-const LEAGUE_IDS: Record<string, number> = {
+// Tier 1: Big 5 European Leagues (best data coverage, high liquidity)
+const TIER_1_LEAGUES: Record<string, number> = {
   'English Premier League': 39,
   'EPL': 39,
   'Premier League': 39,
   'La Liga': 140,
-  'Serie A': 135,
+  'Spain La Liga': 140,
   'Bundesliga': 78,
+  'German Bundesliga': 78,
+  'Serie A': 135,
+  'Italy Serie A': 135,
   'Ligue 1': 61,
+  'France Ligue 1': 61,
+};
+
+// Tier 2: Secondary leagues (add once core works)
+const TIER_2_LEAGUES: Record<string, number> = {
   'Champions League': 2,
+  'UEFA Champions League': 2,
   'Europa League': 3,
+  'UEFA Europa League': 3,
+  'Argentina Primera División': 128,
+  'Liga Profesional Argentina': 128,
   'A-League': 188,
+  'Australia A-League': 188,
+  'A-League Men': 188,
+};
+
+// Combined league mapping
+const LEAGUE_IDS: Record<string, number> = {
+  ...TIER_1_LEAGUES,
+  ...TIER_2_LEAGUES,
+  // Fallback mappings
   'MLS': 253,
+  'Eredivisie': 88,
+  'Primeira Liga': 94,
 };
 
 // Get current season year
