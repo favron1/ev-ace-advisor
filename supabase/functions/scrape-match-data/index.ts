@@ -35,8 +35,7 @@ serve(async (req) => {
       .eq('status', 'upcoming')
       .gte('start_time_utc', now.toISOString())
       .lte('start_time_utc', windowEnd.toISOString())
-      .order('start_time_utc', { ascending: true })
-      .limit(10);
+      .order('start_time_utc', { ascending: true });
 
     if (eventsError) throw new Error(eventsError.message);
     if (!events || events.length === 0) {
@@ -46,12 +45,12 @@ serve(async (req) => {
       );
     }
 
-    console.log(`Found ${events.length} events to scrape`);
+    console.log(`Found ${events.length} events to scrape across all leagues`);
 
-    // Scrape data for each match
+    // Scrape data for each match - process all events
     const scrapedResults: any[] = [];
 
-    for (const event of events.slice(0, 8)) {
+    for (const event of events) {
       const matchKey = `${event.home_team} vs ${event.away_team}`;
       const searchQuery = `${event.home_team} vs ${event.away_team} ${event.league} preview injuries team news form`;
 
