@@ -50,30 +50,49 @@ interface MatchData {
 // API-Football league ID mapping
 // Tier 1: Big 5 European Leagues (best data coverage, high liquidity)
 const TIER_1_LEAGUES: Record<string, number> = {
+  // England
   'English Premier League': 39,
   'EPL': 39,
   'Premier League': 39,
+  // Spain
   'La Liga': 140,
+  'La Liga - Spain': 140,
   'Spain La Liga': 140,
+  // Germany
   'Bundesliga': 78,
   'German Bundesliga': 78,
+  // Italy
   'Serie A': 135,
   'Italy Serie A': 135,
+  // France
   'Ligue 1': 61,
   'France Ligue 1': 61,
 };
 
-// Tier 2: Secondary leagues (add once core works)
+// Tier 2: Secondary leagues
 const TIER_2_LEAGUES: Record<string, number> = {
+  // UEFA
   'Champions League': 2,
   'UEFA Champions League': 2,
   'Europa League': 3,
   'UEFA Europa League': 3,
+  'Copa Libertadores': 13,
+  'Copa Sudamericana': 14,
+  // Argentina
   'Argentina Primera División': 128,
   'Liga Profesional Argentina': 128,
+  'Primera División - Argentina': 128,
+  // Australia (season 2024-2025 runs Aug 2024 - May 2025)
   'A-League': 188,
   'Australia A-League': 188,
   'A-League Men': 188,
+  // Brazil
+  'Brazil Série A': 71,
+  'Brasileirão': 71,
+  // Other
+  'Austrian Football Bundesliga': 218,
+  'Belgium First Div': 144,
+  'Primera División - Chile': 265,
 };
 
 // Combined league mapping
@@ -86,11 +105,23 @@ const LEAGUE_IDS: Record<string, number> = {
   'Primeira Liga': 94,
 };
 
-// Get current season year
-function getCurrentSeason(): number {
+// Get current season year based on league hemisphere
+function getSeasonForLeague(leagueId: number): number {
   const now = new Date();
   const month = now.getMonth();
   const year = now.getFullYear();
+  
+  // Southern hemisphere leagues (A-League, Argentina, Brazil, Chile)
+  // Their season typically spans across calendar years (e.g., 2024-2025)
+  const southernHemisphereLeagues = [188, 128, 71, 265];
+  
+  if (southernHemisphereLeagues.includes(leagueId)) {
+    // For A-League: season 2024-2025 starts in Aug 2024
+    // If we're in Jan-July, use previous year as season start
+    return month < 7 ? year - 1 : year;
+  }
+  
+  // European leagues (Aug-May)
   // If before August, use previous year as season start
   return month < 7 ? year - 1 : year;
 }
@@ -119,7 +150,7 @@ async function fetchTeamStats(
   apiKey: string
 ): Promise<TeamStats> {
   const leagueId = LEAGUE_IDS[leagueName] || null;
-  const season = getCurrentSeason();
+  const season = leagueId ? getSeasonForLeague(leagueId) : new Date().getFullYear();
   
   const stats: TeamStats = { 
     team: teamName,
