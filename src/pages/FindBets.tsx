@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Loader2, Search, TrendingUp, Target, DollarSign, RefreshCw, FileText, Copy, Check } from "lucide-react";
+import { Loader2, Search, TrendingUp, Target, DollarSign, RefreshCw, FileText, Copy, Check, Star, Plus } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { RecommendedBet, BettingModelResponse } from "@/types/model-betting";
@@ -26,6 +26,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
+import { useMyBets } from "@/hooks/useMyBets";
+import { MyBetsDrawer } from "@/components/my-bets/MyBetsDrawer";
 
 const SPORTS = [
   { id: 'soccer', label: 'Soccer', icon: '⚽' },
@@ -37,6 +39,7 @@ const SPORTS = [
 
 export default function FindBets() {
   const { toast } = useToast();
+  const myBets = useMyBets();
   const [loading, setLoading] = useState(false);
   const [refreshingOdds, setRefreshingOdds] = useState(false);
   const [selectedSports, setSelectedSports] = useState<string[]>(['soccer']);
@@ -46,6 +49,7 @@ export default function FindBets() {
   const [maxDailyExposure, setMaxDailyExposure] = useState(10);
   const [maxEventExposure, setMaxEventExposure] = useState(3);
   const [results, setResults] = useState<BettingModelResponse | null>(null);
+  const [selectedBets, setSelectedBets] = useState<Set<number>>(new Set());
   
   // Scrape data state
   const [scraping, setScraping] = useState(false);
@@ -265,6 +269,39 @@ export default function FindBets() {
     return <Badge variant="outline" className="text-muted-foreground">{edgePct}%</Badge>;
   };
 
+  const toggleBetSelection = (index: number) => {
+    setSelectedBets(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(index)) {
+        newSet.delete(index);
+      } else {
+        newSet.add(index);
+      }
+      return newSet;
+    });
+  };
+
+  const selectAllBets = () => {
+    if (!results?.recommended_bets) return;
+    const allIndexes = results.recommended_bets.map((_, i) => i);
+    setSelectedBets(new Set(allIndexes));
+  };
+
+  const deselectAllBets = () => {
+    setSelectedBets(new Set());
+  };
+
+  const addSelectedToMyBets = () => {
+    if (!results?.recommended_bets) return;
+    const betsToAdd = results.recommended_bets.filter((_, i) => selectedBets.has(i));
+    myBets.addMultipleBets(betsToAdd);
+    toast({
+      title: "Bets Added",
+      description: `Added ${betsToAdd.length} bet(s) to My Bets`,
+    });
+    setSelectedBets(new Set());
+  };
+
   return (
     <div className="min-h-screen bg-background">
       <Header />
@@ -275,19 +312,28 @@ export default function FindBets() {
             <h1 className="text-3xl font-bold text-foreground">Find Best Bets</h1>
             <p className="text-muted-foreground">AI-powered value bet detection</p>
           </div>
-          <Button
-            variant="outline"
-            onClick={refreshOdds}
-            disabled={refreshingOdds}
-            className="gap-2"
-          >
-            {refreshingOdds ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <RefreshCw className="h-4 w-4" />
-            )}
-            Refresh Odds
-          </Button>
+          <div className="flex items-center gap-2">
+            <MyBetsDrawer
+              bets={myBets.bets}
+              onRemove={myBets.removeBet}
+              onUpdateFromRecheck={myBets.updateBetFromRecheck}
+              onSetStatus={myBets.setStatus}
+              onClearAll={myBets.clearAll}
+            />
+            <Button
+              variant="outline"
+              onClick={refreshOdds}
+              disabled={refreshingOdds}
+              className="gap-2"
+            >
+              {refreshingOdds ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <RefreshCw className="h-4 w-4" />
+              )}
+              Refresh Odds
+            </Button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
@@ -466,13 +512,38 @@ export default function FindBets() {
             {/* Bets Table */}
             <Card>
               <CardHeader>
-                <CardTitle>Recommended Bets</CardTitle>
-                <CardDescription>
-                  {results 
-                    ? `${results.events_analyzed} events analyzed`
-                    : 'Configure parameters and click "Find Best Bets"'
-                  }
-                </CardDescription>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle>Recommended Bets</CardTitle>
+                    <CardDescription>
+                      {results 
+                        ? `${results.events_analyzed} events analyzed`
+                        : 'Configure parameters and click "Find Best Bets"'
+                      }
+                    </CardDescription>
+                  </div>
+                  {results?.recommended_bets && results.recommended_bets.length > 0 && (
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={selectedBets.size === results.recommended_bets.length ? deselectAllBets : selectAllBets}
+                      >
+                        {selectedBets.size === results.recommended_bets.length ? 'Deselect All' : 'Select All'}
+                      </Button>
+                      {selectedBets.size > 0 && (
+                        <Button
+                          size="sm"
+                          onClick={addSelectedToMyBets}
+                          className="gap-2"
+                        >
+                          <Plus className="h-4 w-4" />
+                          Add {selectedBets.size} to My Bets
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </div>
               </CardHeader>
               <CardContent>
                 {loading ? (
@@ -487,6 +558,7 @@ export default function FindBets() {
                     <Table>
                       <TableHeader>
                         <TableRow>
+                          <TableHead className="w-12"></TableHead>
                           <TableHead>Head to Head</TableHead>
                           <TableHead>Kickoff</TableHead>
                           <TableHead>Selection</TableHead>
@@ -501,8 +573,23 @@ export default function FindBets() {
                       <TableBody>
                         {results.recommended_bets.map((bet, idx) => {
                           const kickoff = getKickoffDisplay(bet.start_time || '');
+                          const isAlreadyAdded = myBets.isBetAdded(bet.event_id, bet.selection);
+                          const isSelected = selectedBets.has(idx);
                           return (
-                            <TableRow key={idx} className={bet.confidence === 'high' ? 'bg-profit/5' : ''}>
+                            <TableRow 
+                              key={idx} 
+                              className={`${bet.confidence === 'high' ? 'bg-profit/5' : ''} ${isSelected ? 'bg-primary/10' : ''} ${isAlreadyAdded ? 'opacity-50' : ''}`}
+                            >
+                              <TableCell>
+                                {isAlreadyAdded ? (
+                                  <Star className="h-4 w-4 text-primary fill-primary" />
+                                ) : (
+                                  <Checkbox
+                                    checked={isSelected}
+                                    onCheckedChange={() => toggleBetSelection(idx)}
+                                  />
+                                )}
+                              </TableCell>
                               <TableCell>
                                 <div>
                                   <p className="font-medium text-sm">{bet.event_name || bet.selection_label.split(' to ')[0] || bet.selection}</p>
