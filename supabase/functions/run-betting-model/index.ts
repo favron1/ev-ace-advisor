@@ -495,7 +495,7 @@ Return JSON:
     "total_stake_units": number,
     "expected_ev_units": number,
     "league_distribution": {}
-  },
+  }
 }`;
 
   console.log('Sending calibrated data to Perplexity (v3.0)...');
@@ -537,22 +537,50 @@ Return JSON:
 
   let jsonContent = content.trim();
 
+  // Extract JSON from markdown code blocks
   const jsonMatch = jsonContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
   if (jsonMatch) {
     jsonContent = jsonMatch[1];
   }
 
+  // Find the JSON object boundaries
   const jsonStart = jsonContent.indexOf('{');
   const jsonEnd = jsonContent.lastIndexOf('}');
   if (jsonStart !== -1 && jsonEnd !== -1) {
     jsonContent = jsonContent.substring(jsonStart, jsonEnd + 1);
   }
 
-  const parsed = JSON.parse(jsonContent.trim());
-  console.log('Perplexity parsed keys:', Object.keys(parsed || {}));
-  console.log('Perplexity recommended_bets count:', Array.isArray(parsed?.recommended_bets) ? parsed.recommended_bets.length : 'n/a');
-
-  return parsed;
+  // Clean up common JSON issues from LLM responses
+  // Remove trailing commas before ] or }
+  jsonContent = jsonContent.replace(/,(\s*[\]\}])/g, '$1');
+  // Remove any control characters
+  jsonContent = jsonContent.replace(/[\x00-\x1F\x7F]/g, ' ');
+  
+  try {
+    const parsed = JSON.parse(jsonContent.trim());
+    console.log('Perplexity parsed keys:', Object.keys(parsed || {}));
+    console.log('Perplexity recommended_bets count:', Array.isArray(parsed?.recommended_bets) ? parsed.recommended_bets.length : 'n/a');
+    return parsed;
+  } catch (parseError) {
+    console.error('JSON parse failed, attempting recovery...');
+    console.error('Raw content causing error:', jsonContent.substring(0, 1000));
+    
+    // Try to extract just the recommended_bets array
+    const betsMatch = jsonContent.match(/"recommended_bets"\s*:\s*(\[[\s\S]*?\])/);
+    if (betsMatch) {
+      try {
+        const betsArray = JSON.parse(betsMatch[1].replace(/,(\s*[\]\}])/g, '$1'));
+        console.log('Recovered recommended_bets array with', betsArray.length, 'bets');
+        return {
+          recommended_bets: betsArray,
+          portfolio_summary: { total_stake_units: 0, expected_ev_units: 0, league_distribution: {} }
+        };
+      } catch (e) {
+        console.error('Recovery failed:', e);
+      }
+    }
+    throw parseError;
+  }
 }
 
 serve(async (req) => {
