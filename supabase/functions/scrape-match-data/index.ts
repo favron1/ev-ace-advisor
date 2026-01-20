@@ -244,44 +244,62 @@ async function fetchTeamStats(
     console.log(`Resolved team: ${teamName} -> ID ${teamId} | league ${leagueName} (${leagueId}) season ${season}`);
 
     // Fetch standings for this specific league and season
-    const standingsRes = await fetch(
-      `https://v3.football.api-sports.io/standings?league=${leagueId}&season=${season}`,
-      { headers: { 'x-apisports-key': apiKey } }
-    );
-    const standingsData = await standingsRes.json();
-    const standings = standingsData.response?.[0]?.league?.standings;
-    
-    // Handle group stages (e.g., Champions League) - flatten all groups
-    const allStandings = Array.isArray(standings?.[0]) 
-      ? standings.flat() 
-      : standings || [];
-    
-    const teamStanding = allStandings.find((s: any) => s.team?.id === teamId);
-    
+    // NOTE: Some leagues (e.g., Argentina) may not have the new season published yet early in the year.
+    // We try the computed season first, then fall back to season-1 if standings are empty.
+    const seasonCandidates = Array.from(new Set([season, season - 1].filter((y) => y > 2000)));
+
+    let teamStanding: any = null;
+    let usedStandingsSeason: number | null = null;
+
+    for (const sYear of seasonCandidates) {
+      const standingsRes = await fetch(
+        `https://v3.football.api-sports.io/standings?league=${leagueId}&season=${sYear}`,
+        { headers: { 'x-apisports-key': apiKey } }
+      );
+      const standingsData = await standingsRes.json();
+      const standings = standingsData.response?.[0]?.league?.standings;
+
+      // Handle group stages (e.g., Champions League) - flatten all groups
+      const allStandings = Array.isArray(standings?.[0]) ? standings.flat() : standings || [];
+
+      const found = allStandings.find((st: any) => st.team?.id === teamId);
+      if (found) {
+        teamStanding = found;
+        usedStandingsSeason = sYear;
+        break;
+      }
+    }
+
+    if (usedStandingsSeason !== null) {
+      stats.season = usedStandingsSeason;
+    }
+
     if (teamStanding) {
       stats.league_position = teamStanding.rank;
       const played = teamStanding.all?.played || 1;
       stats.points_per_game = Number((teamStanding.points / played).toFixed(2));
       stats.recent_form = teamStanding.form?.slice(-5) || '';
-      
+
       // Home record
       const home = teamStanding.home || {};
       stats.home_record = `${home.win || 0}-${home.draw || 0}-${home.lose || 0}`;
       stats.home_goals_for = home.goals?.for || 0;
       stats.home_goals_against = home.goals?.against || 0;
-      
+
       // Away record
       const away = teamStanding.away || {};
       stats.away_record = `${away.win || 0}-${away.draw || 0}-${away.lose || 0}`;
       stats.away_goals_for = away.goals?.for || 0;
       stats.away_goals_against = away.goals?.against || 0;
     } else {
-      console.log(`Team ${teamName} (${teamId}) not found in standings for league ${leagueId} season ${season}`);
+      console.log(
+        `Team ${teamName} (${teamId}) not found in standings for league ${leagueId} seasons tried: ${seasonCandidates.join(', ')}`
+      );
     }
 
-    // Fetch last 5 fixtures for goals and days rest
+    // Fetch last 5 competitive fixtures (do not constrain to league; cups still count as competitive)
     const fixturesRes = await fetch(
-      `https://v3.football.api-sports.io/fixtures?team=${teamId}&last=5&league=${leagueId}`,
+      `https://v3.football.api-sports.io/fixtures?team=${teamId}&last=5`,
       { headers: { 'x-apisports-key': apiKey } }
     );
     const fixturesData = await fixturesRes.json();
