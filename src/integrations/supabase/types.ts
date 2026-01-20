@@ -420,6 +420,162 @@ export type Database = {
         }
         Relationships: []
       }
+      tennis_h2h: {
+        Row: {
+          clay_player1_wins: number | null
+          clay_player2_wins: number | null
+          created_at: string
+          grass_player1_wins: number | null
+          grass_player2_wins: number | null
+          hard_player1_wins: number | null
+          hard_player2_wins: number | null
+          id: string
+          last_match_date: string | null
+          last_match_surface: string | null
+          last_updated: string | null
+          last_winner: string | null
+          player1_name: string
+          player1_wins: number | null
+          player2_name: string
+          player2_wins: number | null
+        }
+        Insert: {
+          clay_player1_wins?: number | null
+          clay_player2_wins?: number | null
+          created_at?: string
+          grass_player1_wins?: number | null
+          grass_player2_wins?: number | null
+          hard_player1_wins?: number | null
+          hard_player2_wins?: number | null
+          id?: string
+          last_match_date?: string | null
+          last_match_surface?: string | null
+          last_updated?: string | null
+          last_winner?: string | null
+          player1_name: string
+          player1_wins?: number | null
+          player2_name: string
+          player2_wins?: number | null
+        }
+        Update: {
+          clay_player1_wins?: number | null
+          clay_player2_wins?: number | null
+          created_at?: string
+          grass_player1_wins?: number | null
+          grass_player2_wins?: number | null
+          hard_player1_wins?: number | null
+          hard_player2_wins?: number | null
+          id?: string
+          last_match_date?: string | null
+          last_match_surface?: string | null
+          last_updated?: string | null
+          last_winner?: string | null
+          player1_name?: string
+          player1_wins?: number | null
+          player2_name?: string
+          player2_wins?: number | null
+        }
+        Relationships: []
+      }
+      tennis_players: {
+        Row: {
+          atp_ranking: number | null
+          clay_win_rate: number | null
+          created_at: string
+          data_quality: string | null
+          data_source: string | null
+          days_since_last_match: number | null
+          elo_clay: number | null
+          elo_grass: number | null
+          elo_hard: number | null
+          elo_overall: number | null
+          grand_slam_wins: number | null
+          grass_win_rate: number | null
+          hard_win_rate: number | null
+          id: string
+          injury_details: string | null
+          injury_status: string | null
+          last_match_date: string | null
+          last_updated: string | null
+          masters_wins: number | null
+          matches_last_14_days: number | null
+          matches_last_7_days: number | null
+          player_name: string
+          player_name_normalized: string
+          qualitative_tags: string[] | null
+          quality_score: number | null
+          ranking_points: number | null
+          recent_form: string | null
+          win_rate_last_10: number | null
+          win_rate_last_20: number | null
+          wta_ranking: number | null
+        }
+        Insert: {
+          atp_ranking?: number | null
+          clay_win_rate?: number | null
+          created_at?: string
+          data_quality?: string | null
+          data_source?: string | null
+          days_since_last_match?: number | null
+          elo_clay?: number | null
+          elo_grass?: number | null
+          elo_hard?: number | null
+          elo_overall?: number | null
+          grand_slam_wins?: number | null
+          grass_win_rate?: number | null
+          hard_win_rate?: number | null
+          id?: string
+          injury_details?: string | null
+          injury_status?: string | null
+          last_match_date?: string | null
+          last_updated?: string | null
+          masters_wins?: number | null
+          matches_last_14_days?: number | null
+          matches_last_7_days?: number | null
+          player_name: string
+          player_name_normalized: string
+          qualitative_tags?: string[] | null
+          quality_score?: number | null
+          ranking_points?: number | null
+          recent_form?: string | null
+          win_rate_last_10?: number | null
+          win_rate_last_20?: number | null
+          wta_ranking?: number | null
+        }
+        Update: {
+          atp_ranking?: number | null
+          clay_win_rate?: number | null
+          created_at?: string
+          data_quality?: string | null
+          data_source?: string | null
+          days_since_last_match?: number | null
+          elo_clay?: number | null
+          elo_grass?: number | null
+          elo_hard?: number | null
+          elo_overall?: number | null
+          grand_slam_wins?: number | null
+          grass_win_rate?: number | null
+          hard_win_rate?: number | null
+          id?: string
+          injury_details?: string | null
+          injury_status?: string | null
+          last_match_date?: string | null
+          last_updated?: string | null
+          masters_wins?: number | null
+          matches_last_14_days?: number | null
+          matches_last_7_days?: number | null
+          player_name?: string
+          player_name_normalized?: string
+          qualitative_tags?: string[] | null
+          quality_score?: number | null
+          ranking_points?: number | null
+          recent_form?: string | null
+          win_rate_last_10?: number | null
+          win_rate_last_20?: number | null
+          wta_ranking?: number | null
+        }
+        Relationships: []
+      }
       user_bets: {
         Row: {
           bet_score: number | null

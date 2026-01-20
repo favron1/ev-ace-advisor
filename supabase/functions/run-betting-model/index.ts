@@ -105,6 +105,281 @@ function kellyStakeUnits(
   return clamp(stake, 0, maxPerBetUnits);
 }
 
+// ============= TENNIS PLAYER STATS INTERFACE =============
+interface TennisPlayerStats {
+  player_name: string;
+  atp_ranking?: number;
+  wta_ranking?: number;
+  elo_overall?: number;
+  elo_hard?: number;
+  elo_clay?: number;
+  elo_grass?: number;
+  recent_form?: string;
+  win_rate_last_10?: number;
+  hard_win_rate?: number;
+  clay_win_rate?: number;
+  grass_win_rate?: number;
+  matches_last_14_days?: number;
+  days_since_last_match?: number;
+  injury_status?: string;
+  qualitative_tags?: string[];
+  data_quality?: 'high' | 'medium' | 'low';
+  quality_score?: number;
+}
+
+interface TennisH2H {
+  player1_wins: number;
+  player2_wins: number;
+  hard_player1_wins?: number;
+  hard_player2_wins?: number;
+  clay_player1_wins?: number;
+  clay_player2_wins?: number;
+  grass_player1_wins?: number;
+  grass_player2_wins?: number;
+}
+
+interface TennisMatchEnrichment {
+  player1: TennisPlayerStats;
+  player2: TennisPlayerStats;
+  h2h?: TennisH2H;
+  surface: 'hard' | 'clay' | 'grass' | 'unknown';
+  tournament_tier: 'grand_slam' | 'masters' | 'atp500' | 'atp250' | 'challenger' | 'unknown';
+}
+
+// ============= TENNIS PROBABILITY CALIBRATION =============
+function calibrateTennisProbabilities(
+  p1Stats: TennisPlayerStats,
+  p2Stats: TennisPlayerStats,
+  h2h: TennisH2H | undefined,
+  surface: 'hard' | 'clay' | 'grass' | 'unknown',
+  oddsFairP1: number, // Market consensus probability for player 1
+  oddsFairP2: number,
+): { p1Prob: number; p2Prob: number; dataQuality: 'high' | 'medium' | 'low' } {
+  
+  // Get surface-specific Elo
+  const getEloForSurface = (stats: TennisPlayerStats, surf: string): number => {
+    if (surf === 'clay') return stats.elo_clay || stats.elo_overall || 1500;
+    if (surf === 'grass') return stats.elo_grass || stats.elo_overall || 1500;
+    return stats.elo_hard || stats.elo_overall || 1500;
+  };
+  
+  const p1Elo = getEloForSurface(p1Stats, surface);
+  const p2Elo = getEloForSurface(p2Stats, surface);
+  
+  // Calculate Elo-based probability
+  const eloDiff = p1Elo - p2Elo;
+  const eloProb = 1 / (1 + Math.pow(10, -eloDiff / 400));
+  
+  // Get surface-specific win rates
+  const getSurfaceWinRate = (stats: TennisPlayerStats, surf: string): number | undefined => {
+    if (surf === 'clay') return stats.clay_win_rate;
+    if (surf === 'grass') return stats.grass_win_rate;
+    return stats.hard_win_rate;
+  };
+  
+  const p1SurfaceWR = getSurfaceWinRate(p1Stats, surface);
+  const p2SurfaceWR = getSurfaceWinRate(p2Stats, surface);
+  
+  // Surface win rate adjustment
+  let surfaceAdj = 0;
+  if (p1SurfaceWR !== undefined && p2SurfaceWR !== undefined) {
+    surfaceAdj = (p1SurfaceWR - p2SurfaceWR) * 0.15;
+  }
+  
+  // H2H adjustment
+  let h2hAdj = 0;
+  if (h2h && (h2h.player1_wins + h2h.player2_wins >= 2)) {
+    const totalMeetings = h2h.player1_wins + h2h.player2_wins;
+    const p1H2HRate = h2h.player1_wins / totalMeetings;
+    // Weight H2H more heavily with more matches
+    const h2hWeight = Math.min(0.10, totalMeetings * 0.02);
+    h2hAdj = (p1H2HRate - 0.5) * h2hWeight;
+  }
+  
+  // Form adjustment from recent results
+  let formAdj = 0;
+  if (p1Stats.recent_form && p2Stats.recent_form) {
+    const countWins = (form: string) => (form.match(/W/g) || []).length / form.length;
+    const p1Form = countWins(p1Stats.recent_form);
+    const p2Form = countWins(p2Stats.recent_form);
+    formAdj = (p1Form - p2Form) * 0.08;
+  }
+  
+  // Fatigue adjustment
+  let fatigueAdj = 0;
+  const p1Matches = p1Stats.matches_last_14_days || 0;
+  const p2Matches = p2Stats.matches_last_14_days || 0;
+  if (p1Matches > 6 && p2Matches < 4) fatigueAdj = -0.03;
+  else if (p2Matches > 6 && p1Matches < 4) fatigueAdj = 0.03;
+  
+  // Injury adjustment
+  if (p1Stats.injury_status === 'doubtful') fatigueAdj -= 0.05;
+  if (p2Stats.injury_status === 'doubtful') fatigueAdj += 0.05;
+  
+  // Blend model probability with market probability
+  // Weight based on data quality
+  const avgQuality = ((p1Stats.quality_score || 0) + (p2Stats.quality_score || 0)) / 2;
+  const modelWeight = avgQuality >= 60 ? 0.4 : avgQuality >= 40 ? 0.25 : 0.10;
+  const marketWeight = 1 - modelWeight;
+  
+  let modelP1 = eloProb + surfaceAdj + h2hAdj + formAdj + fatigueAdj;
+  modelP1 = clamp(modelP1, 0.05, 0.95);
+  
+  // Blend with market
+  const blendedP1 = modelP1 * modelWeight + oddsFairP1 * marketWeight;
+  const blendedP2 = 1 - blendedP1;
+  
+  // Determine data quality
+  const dataQuality: 'high' | 'medium' | 'low' = 
+    avgQuality >= 60 ? 'high' : avgQuality >= 40 ? 'medium' : 'low';
+  
+  console.log(`[Tennis Prob] ${p1Stats.player_name}: Elo=${p1Elo}, model=${modelP1.toFixed(3)}, market=${oddsFairP1.toFixed(3)}, blended=${blendedP1.toFixed(3)}, quality=${dataQuality}`);
+  
+  return { p1Prob: blendedP1, p2Prob: blendedP2, dataQuality };
+}
+
+// ============= ENHANCED TENNIS MODEL (with stats) =============
+function buildTennisBetsEnhanced(
+  eventsWithOdds: any[],
+  enrichments: Record<string, TennisMatchEnrichment>,
+  bankrollUnits: number,
+  maxDailyUnits: number,
+  maxBets: number,
+): { bets: RecommendedBet[]; eventsAnalyzed: number; model: string } {
+  const tennisEvents = eventsWithOdds.filter((e) => e.sport === 'tennis');
+  const candidates: RecommendedBet[] = [];
+  let statsBasedCount = 0;
+
+  for (const event of tennisEvents) {
+    const h2h = (event._raw_markets || []).filter((m: any) => m.market_type === 'h2h');
+    if (h2h.length < 2) continue;
+
+    const selections: string[] = Array.from(new Set(h2h.map((m: any) => String(m.selection))));
+    if (selections.length !== 2) continue;
+    const [p1, p2] = selections as [string, string];
+
+    const oddsFor = (name: string): number[] => h2h
+      .filter((m: any) => m.selection === name)
+      .map((m: any) => Number(m.odds_decimal))
+      .filter((o: number) => Number.isFinite(o) && o > 1.001);
+
+    const o1 = oddsFor(p1);
+    const o2 = oddsFor(p2);
+    if (o1.length === 0 || o2.length === 0) continue;
+
+    // Calculate market fair probabilities
+    const avgImplied1 = o1.reduce((s: number, o: number) => s + 1 / o, 0) / o1.length;
+    const avgImplied2 = o2.reduce((s: number, o: number) => s + 1 / o, 0) / o2.length;
+    const sum = avgImplied1 + avgImplied2;
+    if (sum <= 0) continue;
+
+    const marketFairP1 = avgImplied1 / sum;
+    const marketFairP2 = avgImplied2 / sum;
+
+    // Get enrichment data
+    const enrichment = enrichments[event.event_id];
+    
+    let p1Prob: number;
+    let p2Prob: number;
+    let dataQuality: 'high' | 'medium' | 'low' = 'low';
+    let model = 'odds_only';
+    
+    if (enrichment && enrichment.player1 && enrichment.player2) {
+      // Use calibrated model
+      const calibrated = calibrateTennisProbabilities(
+        enrichment.player1,
+        enrichment.player2,
+        enrichment.h2h,
+        enrichment.surface,
+        marketFairP1,
+        marketFairP2
+      );
+      p1Prob = calibrated.p1Prob;
+      p2Prob = calibrated.p2Prob;
+      dataQuality = calibrated.dataQuality;
+      model = dataQuality === 'low' ? 'odds_only' : 'stats_based';
+      if (model === 'stats_based') statsBasedCount++;
+    } else {
+      // Fallback to market consensus
+      p1Prob = marketFairP1;
+      p2Prob = marketFairP2;
+    }
+
+    const bestMoneylines = (event.markets || []).filter((m: any) => m.type === 'moneyline');
+    const bestFor = (name: string) => bestMoneylines.find((m: any) => m.selection === name);
+    const best1 = bestFor(p1);
+    const best2 = bestFor(p2);
+    if (!best1 || !best2) continue;
+
+    const consider = [
+      { sel: p1, fairP: p1Prob, best: best1 },
+      { sel: p2, fairP: p2Prob, best: best2 },
+    ];
+
+    for (const c of consider) {
+      const offered = Number(c.best.odds_decimal);
+      const implied = 1 / offered;
+      const edge = c.fairP - implied;
+      if (edge < 0.02) continue;
+
+      // Higher bet scores for stats-based bets
+      const baseScore = model === 'stats_based' ? 72 : 70;
+      const betScore = Math.round(clamp(baseScore + edge * 800, baseScore, 92));
+      const confidence: 'high' | 'medium' | 'low' = edge >= 0.05 ? 'high' : edge >= 0.03 ? 'medium' : 'low';
+      
+      // Reduce stake for low quality data
+      const qualityMultiplier = dataQuality === 'high' ? 1.0 : dataQuality === 'medium' ? 0.75 : 0.5;
+      const stake = kellyStakeUnits(bankrollUnits, c.fairP, offered, bankrollUnits * 0.015) * qualityMultiplier;
+
+      // Build rationale
+      let rationale = `Tennis (${model}): fair_p=${c.fairP.toFixed(3)} vs implied=${implied.toFixed(3)}.`;
+      if (enrichment && model === 'stats_based') {
+        const playerStats = c.sel === p1 ? enrichment.player1 : enrichment.player2;
+        const ranking = playerStats.atp_ranking || playerStats.wta_ranking;
+        if (ranking) rationale += ` Ranking: #${ranking}.`;
+        if (enrichment.h2h && (enrichment.h2h.player1_wins + enrichment.h2h.player2_wins > 0)) {
+          rationale += ` H2H: ${enrichment.h2h.player1_wins}-${enrichment.h2h.player2_wins}.`;
+        }
+        if (playerStats.recent_form) rationale += ` Form: ${playerStats.recent_form.slice(0, 5)}.`;
+      }
+
+      candidates.push({
+        event_id: event.event_id,
+        market_id: c.best.market_id,
+        sport: 'tennis',
+        league: event.league,
+        event_name: `${event.home_team} vs ${event.away_team}`,
+        start_time: event.start_time_aedt,
+        selection: c.sel,
+        selection_label: c.sel,
+        odds_decimal: offered,
+        bookmaker: c.best.bookmaker,
+        model_probability: c.fairP,
+        implied_probability: implied,
+        edge,
+        bet_score: betScore,
+        confidence,
+        recommended_stake_units: stake,
+        rationale,
+      });
+    }
+  }
+
+  candidates.sort((a, b) => b.edge - a.edge);
+  const selected: RecommendedBet[] = [];
+  let total = 0;
+  for (const b of candidates) {
+    if (selected.length >= maxBets) break;
+    if (total + b.recommended_stake_units > maxDailyUnits) continue;
+    selected.push(b);
+    total += b.recommended_stake_units;
+  }
+  
+  const modelType = statsBasedCount > tennisEvents.length / 2 ? 'tennis_stats_v1' : 'tennis_hybrid_v1';
+  return { bets: selected, eventsAnalyzed: tennisEvents.length, model: modelType };
+}
+
+// ============= LEGACY ODDS-ONLY MODEL (fallback) =============
 function buildTennisBetsFromOdds(
   eventsWithOdds: any[],
   bankrollUnits: number,
@@ -115,7 +390,6 @@ function buildTennisBetsFromOdds(
   const candidates: RecommendedBet[] = [];
 
   for (const event of tennisEvents) {
-    // Use all h2h markets (not just "best odds") to estimate a consensus fair price
     const h2h = (event._raw_markets || []).filter((m: any) => m.market_type === 'h2h');
     if (h2h.length < 2) continue;
 
@@ -137,11 +411,9 @@ function buildTennisBetsFromOdds(
     const sum = avgImplied1 + avgImplied2;
     if (sum <= 0) continue;
 
-    // Remove overround by normalizing
     const fairP1 = avgImplied1 / sum;
     const fairP2 = avgImplied2 / sum;
 
-    // Best available price (already computed in event.markets)
     const bestMoneylines = (event.markets || []).filter((m: any) => m.type === 'moneyline');
     const bestFor = (name: string) => bestMoneylines.find((m: any) => m.selection === name);
     const best1 = bestFor(p1);
@@ -157,7 +429,7 @@ function buildTennisBetsFromOdds(
       const offered = Number(c.best.odds_decimal);
       const implied = 1 / offered;
       const edge = c.fairP - implied;
-      if (edge < 0.02) continue; // require >=2% edge
+      if (edge < 0.02) continue;
 
       const betScore = Math.round(clamp(70 + edge * 800, 70, 90));
       const confidence: 'high' | 'medium' | 'low' = edge >= 0.05 ? 'high' : edge >= 0.03 ? 'medium' : 'low';
@@ -185,7 +457,6 @@ function buildTennisBetsFromOdds(
     }
   }
 
-  // Rank by edge and take up to maxBets / within daily cap
   candidates.sort((a, b) => b.edge - a.edge);
   const selected: RecommendedBet[] = [];
   let total = 0;
@@ -919,12 +1190,12 @@ serve(async (req) => {
 
     console.log(`STEP 1: Found ${events.length} events`);
 
-    // TENNIS FAST PATH: Skip all scraping and go straight to odds-only model
+    // TENNIS PATH: Use enhanced stats-based model
     const isTennisOnly = sports.length === 1 && sports[0] === 'tennis';
     if (isTennisOnly) {
-      console.log('TENNIS MODE: Bypassing team stats scraping, using odds-only model...');
+      console.log('TENNIS MODE: Fetching player stats via scrape-tennis-data...');
       
-      // Build eventsWithOdds for tennis directly from the query results
+      // Build eventsWithOdds for tennis
       const tennisEventsWithOdds = events.map(event => {
         const bestOdds: Record<string, { odds: number; bookmaker: string; market_id: string }> = {};
         
@@ -944,8 +1215,6 @@ serve(async (req) => {
           away_team: event.away_team,
           start_time_aedt: event.start_time_aedt,
           _raw_markets: event.markets || [],
-          home_team_stats: null,
-          away_team_stats: null,
           markets: Object.entries(bestOdds).map(([key, data]) => {
             const [marketType, selection] = key.split('_');
             return {
@@ -960,20 +1229,47 @@ serve(async (req) => {
         };
       });
 
+      // Try to get enriched stats
+      let enrichments: Record<string, any> = {};
+      try {
+        const matchesToEnrich = tennisEventsWithOdds.slice(0, 10).map(e => ({
+          event_id: e.event_id,
+          home_team: e.home_team,
+          away_team: e.away_team,
+          league: e.league,
+        }));
+        
+        const enrichResponse = await supabase.functions.invoke('scrape-tennis-data', {
+          body: { matches: matchesToEnrich }
+        });
+        
+        if (enrichResponse.data?.enrichments) {
+          enrichments = enrichResponse.data.enrichments;
+          console.log(`TENNIS: Got stats for ${Object.keys(enrichments).length} matches`);
+        }
+      } catch (err) {
+        console.log('TENNIS: Stats fetch failed, using odds-only fallback', err);
+      }
+
       const maxDailyUnits = bankroll_units * max_daily_exposure_pct;
-      const { bets, eventsAnalyzed } = buildTennisBetsFromOdds(tennisEventsWithOdds, bankroll_units, maxDailyUnits, max_bets);
       
-      console.log(`TENNIS: Analyzed ${eventsAnalyzed} events, found ${bets.length} value bets`);
+      // Use enhanced model if we have enrichments, otherwise fallback
+      const hasEnrichments = Object.keys(enrichments).length > 0;
+      const result = hasEnrichments
+        ? buildTennisBetsEnhanced(tennisEventsWithOdds, enrichments, bankroll_units, maxDailyUnits, max_bets)
+        : { ...buildTennisBetsFromOdds(tennisEventsWithOdds, bankroll_units, maxDailyUnits, max_bets), model: 'tennis_odds_only_v1' };
+      
+      console.log(`TENNIS: Analyzed ${result.eventsAnalyzed} events, found ${result.bets.length} value bets (model: ${result.model})`);
       
       return new Response(
         JSON.stringify({
-          recommended_bets: bets,
-          reason: bets.length === 0 
-            ? `No tennis value edges found. Analyzed ${eventsAnalyzed} events but none had sufficient edge (>=2%).` 
+          recommended_bets: result.bets,
+          reason: result.bets.length === 0 
+            ? `No tennis value edges found. Analyzed ${result.eventsAnalyzed} events but none had sufficient edge (>=2%).` 
             : undefined,
-          events_analyzed: eventsAnalyzed,
+          events_analyzed: result.eventsAnalyzed,
           events_fetched: tennisEventsWithOdds.length,
-          model: 'tennis_odds_only_v1',
+          model: result.model,
           timestamp: new Date().toISOString()
         }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
