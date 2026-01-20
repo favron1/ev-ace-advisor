@@ -37,6 +37,7 @@ export interface RecommendedBet {
   implied_probability: number;
   edge: number;
   bet_score: number;
+  confidence: 'high' | 'medium' | 'low';
   recommended_stake_units: number;
   rationale: string;
 }
