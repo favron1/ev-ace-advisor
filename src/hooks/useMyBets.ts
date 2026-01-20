@@ -1,145 +1,404 @@
 import { useState, useEffect, useCallback } from 'react';
 import { MyBet, MyBetsState } from '@/types/my-bets';
 import { RecommendedBet } from '@/types/model-betting';
-
-const STORAGE_KEY = 'my-bets-v1';
-
-function generateId(): string {
-  return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-}
-
-function loadFromStorage(): MyBetsState {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      return JSON.parse(stored);
-    }
-  } catch (error) {
-    console.error('Error loading my bets from storage:', error);
-  }
-  return { bets: [], lastUpdated: new Date().toISOString() };
-}
-
-function saveToStorage(state: MyBetsState): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch (error) {
-    console.error('Error saving my bets to storage:', error);
-  }
-}
+import { supabase } from '@/integrations/supabase/client';
+import { useToast } from '@/hooks/use-toast';
 
 export function useMyBets() {
-  const [state, setState] = useState<MyBetsState>(() => loadFromStorage());
+  const { toast } = useToast();
+  const [state, setState] = useState<MyBetsState>({ bets: [], lastUpdated: new Date().toISOString() });
+  const [userId, setUserId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  // Persist to localStorage on state change
+  // Listen for auth changes
   useEffect(() => {
-    saveToStorage(state);
-  }, [state]);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      setUserId(session?.user?.id ?? null);
+    });
 
-  const addBet = useCallback((bet: RecommendedBet) => {
-    setState(prev => {
-      // Check if bet already exists (by event_id + selection)
-      const exists = prev.bets.some(
-        b => b.event_id === bet.event_id && b.selection === bet.selection
-      );
-      if (exists) return prev;
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUserId(session?.user?.id ?? null);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Load bets from database when user changes
+  useEffect(() => {
+    if (userId) {
+      loadBetsFromDatabase();
+    } else {
+      setState({ bets: [], lastUpdated: new Date().toISOString() });
+      setLoading(false);
+    }
+  }, [userId]);
+
+  const loadBetsFromDatabase = async () => {
+    if (!userId) return;
+    
+    setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('user_bets')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+
+      const bets: MyBet[] = (data || []).map(row => ({
+        id: row.id,
+        event_id: row.event_name,
+        market_id: '',
+        event_name: row.event_name,
+        league: row.league,
+        sport: row.sport,
+        selection: row.selection,
+        selection_label: row.selection,
+        odds_decimal: Number(row.odds),
+        bookmaker: row.bookmaker,
+        start_time: row.start_time || '',
+        model_probability: row.model_probability ? Number(row.model_probability) : 0,
+        implied_probability: row.implied_probability ? Number(row.implied_probability) : 0,
+        edge: row.edge ? Number(row.edge) : 0,
+        bet_score: row.bet_score ?? 0,
+        confidence: (row.confidence as 'high' | 'medium' | 'low') || 'medium',
+        recommended_stake_units: row.stake_units ? Number(row.stake_units) : 0,
+        rationale: row.rationale ?? '',
+        addedAt: row.created_at,
+        lastCheckedAt: null,
+        status: row.status === 'pending' ? 'tracking' : row.status as MyBet['status'],
+      }));
+
+      setState({
+        bets,
+        lastUpdated: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error('Error loading bets:', error);
+      toast({
+        title: "Error",
+        description: "Failed to load your bets",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const addBet = useCallback(async (bet: RecommendedBet) => {
+    if (!userId) {
+      toast({
+        title: "Login Required",
+        description: "Please log in to save bets",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Check if bet already exists locally
+    const exists = state.bets.some(
+      b => b.event_name === bet.event_name && b.selection === bet.selection
+    );
+    if (exists) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('user_bets')
+        .insert({
+          user_id: userId,
+          event_name: bet.event_name,
+          league: bet.league,
+          sport: bet.sport || 'soccer',
+          selection: bet.selection,
+          odds: bet.odds_decimal,
+          bookmaker: bet.bookmaker,
+          start_time: bet.start_time,
+          model_probability: bet.model_probability,
+          implied_probability: bet.implied_probability,
+          edge: bet.edge,
+          bet_score: bet.bet_score,
+          confidence: bet.confidence,
+          stake_units: bet.recommended_stake_units,
+          rationale: bet.rationale,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
 
       const myBet: MyBet = {
-        ...bet,
-        id: generateId(),
-        addedAt: new Date().toISOString(),
+        id: data.id,
+        event_id: data.event_name,
+        market_id: '',
+        event_name: data.event_name,
+        league: data.league,
+        sport: data.sport,
+        selection: data.selection,
+        selection_label: data.selection,
+        odds_decimal: Number(data.odds),
+        bookmaker: data.bookmaker,
+        start_time: data.start_time || '',
+        model_probability: data.model_probability ? Number(data.model_probability) : 0,
+        implied_probability: data.implied_probability ? Number(data.implied_probability) : 0,
+        edge: data.edge ? Number(data.edge) : 0,
+        bet_score: data.bet_score ?? 0,
+        confidence: (data.confidence as 'high' | 'medium' | 'low') || 'medium',
+        recommended_stake_units: data.stake_units ? Number(data.stake_units) : 0,
+        rationale: data.rationale ?? '',
+        addedAt: data.created_at,
         lastCheckedAt: null,
         status: 'tracking',
       };
 
-      return {
-        bets: [...prev.bets, myBet],
+      setState(prev => ({
+        bets: [myBet, ...prev.bets],
         lastUpdated: new Date().toISOString(),
-      };
-    });
-  }, []);
+      }));
+    } catch (error) {
+      console.error('Error adding bet:', error);
+      toast({
+        title: "Error",
+        description: "Failed to save bet",
+        variant: "destructive",
+      });
+    }
+  }, [userId, state.bets, toast]);
 
-  const addMultipleBets = useCallback((bets: RecommendedBet[]) => {
-    setState(prev => {
-      const newBets: MyBet[] = [];
-      
-      for (const bet of bets) {
-        const exists = prev.bets.some(
-          b => b.event_id === bet.event_id && b.selection === bet.selection
-        );
-        if (!exists) {
-          newBets.push({
-            ...bet,
-            id: generateId(),
-            addedAt: new Date().toISOString(),
-            lastCheckedAt: null,
-            status: 'tracking',
-          });
-        }
+  const addMultipleBets = useCallback(async (bets: RecommendedBet[]) => {
+    if (!userId) {
+      toast({
+        title: "Login Required",
+        description: "Please log in to save bets",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const newBets = bets.filter(bet => 
+      !state.bets.some(b => b.event_name === bet.event_name && b.selection === bet.selection)
+    );
+
+    if (newBets.length === 0) return;
+
+    try {
+      const inserts = newBets.map(bet => ({
+        user_id: userId,
+        event_name: bet.event_name,
+        league: bet.league,
+        sport: bet.sport || 'soccer',
+        selection: bet.selection,
+        odds: bet.odds_decimal,
+        bookmaker: bet.bookmaker,
+        start_time: bet.start_time,
+        model_probability: bet.model_probability,
+        implied_probability: bet.implied_probability,
+        edge: bet.edge,
+        bet_score: bet.bet_score,
+        confidence: bet.confidence,
+        stake_units: bet.recommended_stake_units,
+        rationale: bet.rationale,
+      }));
+
+      const { data, error } = await supabase
+        .from('user_bets')
+        .insert(inserts)
+        .select();
+
+      if (error) throw error;
+
+      const addedBets: MyBet[] = (data || []).map(row => ({
+        id: row.id,
+        event_id: row.event_name,
+        market_id: '',
+        event_name: row.event_name,
+        league: row.league,
+        sport: row.sport,
+        selection: row.selection,
+        selection_label: row.selection,
+        odds_decimal: Number(row.odds),
+        bookmaker: row.bookmaker,
+        start_time: row.start_time || '',
+        model_probability: row.model_probability ? Number(row.model_probability) : 0,
+        implied_probability: row.implied_probability ? Number(row.implied_probability) : 0,
+        edge: row.edge ? Number(row.edge) : 0,
+        bet_score: row.bet_score ?? 0,
+        confidence: (row.confidence as 'high' | 'medium' | 'low') || 'medium',
+        recommended_stake_units: row.stake_units ? Number(row.stake_units) : 0,
+        rationale: row.rationale ?? '',
+        addedAt: row.created_at,
+        lastCheckedAt: null,
+        status: 'tracking' as const,
+      }));
+
+      setState(prev => ({
+        bets: [...addedBets, ...prev.bets],
+        lastUpdated: new Date().toISOString(),
+      }));
+
+      toast({
+        title: "Bets Saved",
+        description: `Added ${addedBets.length} bet(s) to your list`,
+      });
+    } catch (error) {
+      console.error('Error adding bets:', error);
+      toast({
+        title: "Error",
+        description: "Failed to save bets",
+        variant: "destructive",
+      });
+    }
+  }, [userId, state.bets, toast]);
+
+  const removeBet = useCallback(async (id: string) => {
+    if (!userId) return;
+
+    try {
+      const { error } = await supabase
+        .from('user_bets')
+        .delete()
+        .eq('id', id)
+        .eq('user_id', userId);
+
+      if (error) throw error;
+
+      setState(prev => ({
+        bets: prev.bets.filter(b => b.id !== id),
+        lastUpdated: new Date().toISOString(),
+      }));
+    } catch (error) {
+      console.error('Error removing bet:', error);
+      toast({
+        title: "Error",
+        description: "Failed to remove bet",
+        variant: "destructive",
+      });
+    }
+  }, [userId, toast]);
+
+  const updateBet = useCallback(async (id: string, updates: Partial<MyBet>) => {
+    if (!userId) return;
+
+    try {
+      const dbUpdates: Record<string, any> = {};
+      if (updates.odds_decimal !== undefined) dbUpdates.odds = updates.odds_decimal;
+      if (updates.bet_score !== undefined) dbUpdates.bet_score = updates.bet_score;
+      if (updates.edge !== undefined) dbUpdates.edge = updates.edge;
+      if (updates.model_probability !== undefined) dbUpdates.model_probability = updates.model_probability;
+      if (updates.rationale !== undefined) dbUpdates.rationale = updates.rationale;
+
+      if (Object.keys(dbUpdates).length > 0) {
+        const { error } = await supabase
+          .from('user_bets')
+          .update(dbUpdates)
+          .eq('id', id)
+          .eq('user_id', userId);
+
+        if (error) throw error;
       }
 
-      if (newBets.length === 0) return prev;
-
-      return {
-        bets: [...prev.bets, ...newBets],
+      setState(prev => ({
+        bets: prev.bets.map(b => b.id === id ? { ...b, ...updates } : b),
         lastUpdated: new Date().toISOString(),
-      };
-    });
-  }, []);
+      }));
+    } catch (error) {
+      console.error('Error updating bet:', error);
+    }
+  }, [userId]);
 
-  const removeBet = useCallback((id: string) => {
-    setState(prev => ({
-      bets: prev.bets.filter(b => b.id !== id),
-      lastUpdated: new Date().toISOString(),
-    }));
-  }, []);
+  const updateBetFromRecheck = useCallback(async (id: string, recheckData: RecommendedBet) => {
+    if (!userId) return;
 
-  const updateBet = useCallback((id: string, updates: Partial<MyBet>) => {
-    setState(prev => ({
-      bets: prev.bets.map(b => 
-        b.id === id ? { ...b, ...updates } : b
-      ),
-      lastUpdated: new Date().toISOString(),
-    }));
-  }, []);
+    try {
+      const { error } = await supabase
+        .from('user_bets')
+        .update({
+          odds: recheckData.odds_decimal,
+          model_probability: recheckData.model_probability,
+          implied_probability: recheckData.implied_probability,
+          edge: recheckData.edge,
+          bet_score: recheckData.bet_score,
+          rationale: recheckData.rationale,
+        })
+        .eq('id', id)
+        .eq('user_id', userId);
 
-  const updateBetFromRecheck = useCallback((id: string, recheckData: RecommendedBet) => {
-    setState(prev => ({
-      bets: prev.bets.map(b => 
-        b.id === id 
-          ? { 
-              ...b, 
-              ...recheckData,
-              lastCheckedAt: new Date().toISOString(),
-            } 
-          : b
-      ),
-      lastUpdated: new Date().toISOString(),
-    }));
-  }, []);
+      if (error) throw error;
 
-  const setStatus = useCallback((id: string, status: MyBet['status']) => {
-    setState(prev => ({
-      bets: prev.bets.map(b => 
-        b.id === id ? { ...b, status } : b
-      ),
-      lastUpdated: new Date().toISOString(),
-    }));
-  }, []);
+      setState(prev => ({
+        bets: prev.bets.map(b =>
+          b.id === id
+            ? { ...b, ...recheckData, lastCheckedAt: new Date().toISOString() }
+            : b
+        ),
+        lastUpdated: new Date().toISOString(),
+      }));
+    } catch (error) {
+      console.error('Error updating bet from recheck:', error);
+    }
+  }, [userId]);
 
-  const clearAll = useCallback(() => {
-    setState({ bets: [], lastUpdated: new Date().toISOString() });
-  }, []);
+  const setStatus = useCallback(async (id: string, status: MyBet['status']) => {
+    if (!userId) return;
+
+    const dbStatus = status === 'tracking' ? 'pending' : status;
+
+    try {
+      const updateData: Record<string, any> = { status: dbStatus };
+      if (status === 'won' || status === 'lost' || status === 'void') {
+        updateData.settled_at = new Date().toISOString();
+      }
+
+      const { error } = await supabase
+        .from('user_bets')
+        .update(updateData)
+        .eq('id', id)
+        .eq('user_id', userId);
+
+      if (error) throw error;
+
+      setState(prev => ({
+        bets: prev.bets.map(b => b.id === id ? { ...b, status } : b),
+        lastUpdated: new Date().toISOString(),
+      }));
+    } catch (error) {
+      console.error('Error setting status:', error);
+    }
+  }, [userId]);
+
+  const clearAll = useCallback(async () => {
+    if (!userId) return;
+
+    try {
+      const { error } = await supabase
+        .from('user_bets')
+        .delete()
+        .eq('user_id', userId);
+
+      if (error) throw error;
+
+      setState({ bets: [], lastUpdated: new Date().toISOString() });
+    } catch (error) {
+      console.error('Error clearing bets:', error);
+      toast({
+        title: "Error",
+        description: "Failed to clear bets",
+        variant: "destructive",
+      });
+    }
+  }, [userId, toast]);
 
   const isBetAdded = useCallback((eventId: string, selection: string) => {
     return state.bets.some(
-      b => b.event_id === eventId && b.selection === selection
+      b => (b.event_id === eventId || b.event_name === eventId) && b.selection === selection
     );
   }, [state.bets]);
 
   return {
     bets: state.bets,
     lastUpdated: state.lastUpdated,
+    loading,
+    isLoggedIn: !!userId,
     addBet,
     addMultipleBets,
     removeBet,
@@ -148,5 +407,6 @@ export function useMyBets() {
     setStatus,
     clearAll,
     isBetAdded,
+    refresh: loadBetsFromDatabase,
   };
 }

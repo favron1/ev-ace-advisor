@@ -420,6 +420,81 @@ export type Database = {
         }
         Relationships: []
       }
+      user_bets: {
+        Row: {
+          bet_score: number | null
+          bookmaker: string
+          confidence: string | null
+          created_at: string
+          edge: number | null
+          event_name: string
+          id: string
+          implied_probability: number | null
+          league: string
+          model_probability: number | null
+          odds: number
+          profit_loss: number | null
+          rationale: string | null
+          result_odds: number | null
+          selection: string
+          settled_at: string | null
+          sport: string
+          stake_units: number | null
+          start_time: string | null
+          status: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          bet_score?: number | null
+          bookmaker: string
+          confidence?: string | null
+          created_at?: string
+          edge?: number | null
+          event_name: string
+          id?: string
+          implied_probability?: number | null
+          league: string
+          model_probability?: number | null
+          odds: number
+          profit_loss?: number | null
+          rationale?: string | null
+          result_odds?: number | null
+          selection: string
+          settled_at?: string | null
+          sport?: string
+          stake_units?: number | null
+          start_time?: string | null
+          status?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          bet_score?: number | null
+          bookmaker?: string
+          confidence?: string | null
+          created_at?: string
+          edge?: number | null
+          event_name?: string
+          id?: string
+          implied_probability?: number | null
+          league?: string
+          model_probability?: number | null
+          odds?: number
+          profit_loss?: number | null
+          rationale?: string | null
+          result_odds?: number | null
+          selection?: string
+          settled_at?: string | null
+          sport?: string
+          stake_units?: number | null
+          start_time?: string | null
+          status?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       value_bets: {
         Row: {
           actual_probability: number
