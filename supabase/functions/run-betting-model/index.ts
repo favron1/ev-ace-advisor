@@ -58,100 +58,24 @@ function getNowAEDT(): string {
   });
 }
 
-// Research events using Perplexity for real-time data
-async function researchEventsWithPerplexity(
-  events: any[],
-  perplexityApiKey: string
-): Promise<Map<string, any>> {
-  const researchMap = new Map<string, any>();
-  
-  // Build a batch query for all events
-  const eventsQuery = events.slice(0, 10).map(e => 
-    `${e.home_team} vs ${e.away_team} (${e.league})`
-  ).join(', ');
-
-  const researchPrompt = `Research the following upcoming sports matches and provide betting-relevant analysis for each:
-
-${eventsQuery}
-
-For each match, provide:
-1. Recent form (last 5 games for each team)
-2. Key injuries or suspensions
-3. Head-to-head record
-4. Any relevant news (manager changes, motivation factors)
-5. Weather conditions if outdoor sport
-6. Expert/bookmaker consensus
-
-Format as JSON with match names as keys.`;
-
-  try {
-    const response = await fetch('https://api.perplexity.ai/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${perplexityApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'sonar-pro',
-        messages: [
-          { 
-            role: 'system', 
-            content: 'You are a sports betting research analyst. Provide factual, current information about upcoming matches. Focus on data that affects betting decisions: form, injuries, head-to-head, and expert opinions.' 
-          },
-          { role: 'user', content: researchPrompt }
-        ],
-        search_recency_filter: 'week',
-        temperature: 0.1
-      }),
-    });
-
-    if (!response.ok) {
-      console.error('Perplexity research error:', await response.text());
-      return researchMap;
-    }
-
-    const data = await response.json();
-    const content = data.choices?.[0]?.message?.content || '';
-    const citations = data.citations || [];
-    
-    console.log('Perplexity research response received with', citations.length, 'citations');
-    
-    // Store the research for each event
-    for (const event of events) {
-      const matchKey = `${event.home_team} vs ${event.away_team}`;
-      researchMap.set(event.id, {
-        research: content,
-        citations,
-        matchKey
-      });
-    }
-  } catch (error) {
-    console.error('Perplexity research failed:', error);
-  }
-
-  return researchMap;
-}
-
-// Use Perplexity to analyze bets with real-time context
+// Use Perplexity to analyze bets - single call with all data
 async function analyzeBetsWithPerplexity(
   events: any[],
-  researchData: Map<string, any>,
   context: any,
   perplexityApiKey: string
 ): Promise<ModelResponse> {
   
-  // Build events with odds data
-  const eventsWithOdds = events.map(event => {
-    const research = researchData.get(event.id);
-    
-    // Get best odds for each selection
-    const marketsBySelection: Record<string, { odds: number; bookmaker: string; market_id: string }> = {};
+  // Build compact events with best odds for each selection
+  const eventsWithOdds = events.slice(0, 15).map(event => {
+    // Get best odds for each selection across all bookmakers
+    const bestOdds: Record<string, { odds: number; bookmaker: string; market_id: string }> = {};
     
     for (const market of event.markets || []) {
       const key = `${market.market_type}_${market.selection}`;
-      if (!marketsBySelection[key] || market.odds_decimal > marketsBySelection[key].odds) {
-        marketsBySelection[key] = {
-          odds: parseFloat(market.odds_decimal),
+      const odds = parseFloat(market.odds_decimal);
+      if (!bestOdds[key] || odds > bestOdds[key].odds) {
+        bestOdds[key] = {
+          odds: odds,
           bookmaker: market.bookmaker,
           market_id: market.id
         };
@@ -162,51 +86,39 @@ async function analyzeBetsWithPerplexity(
       event_id: event.id,
       sport: event.sport,
       league: event.league,
-      home_team: event.home_team,
-      away_team: event.away_team,
-      start_time_aedt: event.start_time_aedt,
-      research: research?.research || 'No research available',
-      available_bets: Object.entries(marketsBySelection).map(([key, data]) => ({
-        selection: key.split('_')[1],
-        market_type: key.split('_')[0],
-        odds: data.odds,
-        bookmaker: data.bookmaker,
-        market_id: data.market_id,
-        implied_prob: (1 / data.odds).toFixed(4)
-      }))
+      match: `${event.home_team} vs ${event.away_team}`,
+      home: event.home_team,
+      away: event.away_team,
+      kickoff: event.start_time_aedt,
+      markets: Object.entries(bestOdds).map(([key, data]) => {
+        const [marketType, selection] = key.split('_');
+        return {
+          market_id: data.market_id,
+          type: marketType === 'h2h' ? 'moneyline' : marketType,
+          selection,
+          odds: data.odds,
+          bookmaker: data.bookmaker,
+          implied_prob: 1 / data.odds
+        };
+      })
     };
   });
 
-  const systemPrompt = `You are an elite quantitative sports betting analyst using Perplexity's real-time research capabilities.
+  const systemPrompt = `You are a sports betting analyst with access to real-time web data. Your job is to find VALUE BETS.
 
-Your job is to identify VALUE BETS where the true probability exceeds the implied probability from bookmaker odds.
+TASK:
+1. Search for current info on each match: team form, injuries, news, h2h
+2. Estimate TRUE probability for each outcome
+3. Compare to bookmaker implied probability 
+4. Recommend bets where your probability > implied probability by at least 3%
 
-METHODOLOGY:
-1. Analyze the research data provided for each match
-2. Estimate the TRUE probability of each outcome based on:
-   - Recent form and momentum
-   - Injuries and team news
-   - Head-to-head history
-   - Home/away factors
-   - Motivation and context
-3. Compare your probability to the implied probability from odds
-4. Only recommend bets where:
-   - Your estimated probability significantly exceeds implied probability
-   - The edge is at least 3%
-   - The bet score is 70 or higher
+RULES:
+- Only recommend bets with Bet Score >= 70
+- Bet Score = confidence in your edge (70-100 scale)
+- Use Kelly criterion for stake sizing, capped at max exposure
+- Be conservative - if unsure, don't recommend
 
-BET SCORE CALCULATION:
-- Base on edge strength (higher edge = higher score)
-- Consider confidence in your probability estimate
-- Account for information quality and recency
-- Range: 0-100, only recommend if >= 70
-
-STAKE SIZING (Kelly Criterion):
-- stake = (edge * bankroll) / (odds - 1)
-- Cap at max_per_event_exposure
-- Be conservative with uncertain probabilities
-
-You MUST return ONLY valid JSON with this structure:
+Return ONLY valid JSON:
 {
   "recommended_bets": [
     {
@@ -214,43 +126,42 @@ You MUST return ONLY valid JSON with this structure:
       "market_id": "string",
       "sport": "string",
       "league": "string", 
-      "selection": "string",
-      "selection_label": "Team Name to Win/Draw/etc",
-      "odds_decimal": number,
+      "selection": "outcome name",
+      "selection_label": "Team X to Win",
+      "odds_decimal": 2.50,
       "bookmaker": "string",
-      "model_probability": number (0-1, your estimate),
-      "implied_probability": number (0-1),
-      "edge": number (model_prob - implied_prob),
-      "bet_score": number (70-100),
-      "recommended_stake_units": number,
-      "rationale": "Brief explanation citing specific research"
+      "model_probability": 0.45,
+      "implied_probability": 0.40,
+      "edge": 0.05,
+      "bet_score": 78,
+      "recommended_stake_units": 1.5,
+      "rationale": "Brief reason citing form/injuries/etc"
     }
   ],
   "portfolio_summary": {
-    "total_stake_units": number,
-    "bankroll_units": number,
-    "expected_value_units": number
+    "total_stake_units": 1.5,
+    "bankroll_units": 100,
+    "expected_value_units": 0.08
   }
 }
 
-If no value bets found, return:
-{
-  "recommended_bets": [],
-  "reason": "Analysis complete - no bets met the 70+ bet score threshold"
-}`;
+If no value found: {"recommended_bets": [], "reason": "No value bets identified"}`;
 
-  const userPrompt = `CONTEXT:
-- Timezone: Australia/Sydney  
-- Current time: ${context.now_aedt}
+  const userPrompt = `Find value bets from these matches. Use your search capabilities to get current form, injuries, and news.
+
+CONTEXT:
+- Now: ${context.now_aedt} (Sydney time)
 - Bankroll: ${context.bankroll_units} units
-- Max daily exposure: ${(context.max_daily_exposure_pct * 100)}%
-- Max per event: ${(context.max_per_event_exposure_pct * 100)}%
+- Max daily exposure: ${context.max_daily_exposure_pct * 100}%
+- Max per event: ${context.max_per_event_exposure_pct * 100}%
 - Max bets: ${context.max_bets}
 
-EVENTS TO ANALYZE:
+MATCHES:
 ${JSON.stringify(eventsWithOdds, null, 2)}
 
-Analyze each event using the research provided. Identify any value bets and return your recommendations as JSON.`;
+Search for info on these teams, analyze the odds, and return your value bet recommendations as JSON.`;
+
+  console.log(`Sending ${eventsWithOdds.length} events to Perplexity for analysis`);
 
   try {
     const response = await fetch('https://api.perplexity.ai/chat/completions', {
@@ -260,44 +171,61 @@ Analyze each event using the research provided. Identify any value bets and retu
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'sonar-pro',
+        model: 'sonar',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
         ],
-        temperature: 0.2,
-        search_recency_filter: 'day'
+        temperature: 0.1,
+        max_tokens: 4000
       }),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('Perplexity analysis error:', errorText);
+      console.error('Perplexity API error:', response.status, errorText);
       throw new Error(`Perplexity API error: ${response.status}`);
     }
 
     const data = await response.json();
     const content = data.choices?.[0]?.message?.content;
+    const citations = data.citations || [];
+
+    console.log(`Perplexity responded with ${citations.length} citations`);
 
     if (!content) {
       throw new Error('No content in Perplexity response');
     }
 
-    console.log('Perplexity analysis response:', content.substring(0, 500));
+    console.log('Perplexity response preview:', content.substring(0, 300));
 
     // Parse JSON from response
     let jsonContent = content.trim();
-    if (jsonContent.startsWith('```json')) {
-      jsonContent = jsonContent.slice(7);
+    
+    // Remove markdown code blocks if present
+    const jsonMatch = jsonContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (jsonMatch) {
+      jsonContent = jsonMatch[1];
     }
-    if (jsonContent.startsWith('```')) {
-      jsonContent = jsonContent.slice(3);
-    }
-    if (jsonContent.endsWith('```')) {
-      jsonContent = jsonContent.slice(0, -3);
+    
+    // Try to find JSON object in response
+    const jsonStart = jsonContent.indexOf('{');
+    const jsonEnd = jsonContent.lastIndexOf('}');
+    if (jsonStart !== -1 && jsonEnd !== -1) {
+      jsonContent = jsonContent.substring(jsonStart, jsonEnd + 1);
     }
 
-    return JSON.parse(jsonContent.trim());
+    const parsed = JSON.parse(jsonContent.trim());
+    
+    // Add citations to rationale if available
+    if (citations.length > 0 && parsed.recommended_bets) {
+      parsed.recommended_bets = parsed.recommended_bets.map((bet: any) => ({
+        ...bet,
+        rationale: bet.rationale + ` [Sources: ${citations.slice(0, 2).join(', ')}]`
+      }));
+    }
+    
+    return parsed;
   } catch (error) {
     console.error('Perplexity analysis failed:', error);
     throw error;
@@ -313,7 +241,6 @@ serve(async (req) => {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const perplexityApiKey = Deno.env.get('PERPLEXITY_API_KEY');
-    const oddsApiKey = Deno.env.get('ODDS_API_KEY');
 
     if (!perplexityApiKey) {
       throw new Error('PERPLEXITY_API_KEY not configured');
@@ -342,34 +269,13 @@ serve(async (req) => {
       max_bets = 10
     } = input;
 
-    console.log('Running betting model with Perplexity, input:', input);
-
-    // STEP 1: Fetch fresh odds data first
-    if (oddsApiKey) {
-      console.log('Fetching fresh odds data...');
-      try {
-        const fetchResponse = await fetch(`${supabaseUrl}/functions/v1/fetch-odds-v2`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${supabaseServiceKey}`,
-            'Content-Type': 'application/json',
-          }
-        });
-        
-        if (fetchResponse.ok) {
-          const fetchResult = await fetchResponse.json();
-          console.log('Fetched odds:', fetchResult);
-        }
-      } catch (fetchError) {
-        console.error('Error fetching odds:', fetchError);
-      }
-    }
+    console.log('Running betting model with Perplexity:', { sports, window_hours, max_bets });
 
     // Calculate time window
     const now = new Date();
     const windowEnd = new Date(now.getTime() + window_hours * 60 * 60 * 1000);
 
-    // STEP 2: Query events from database
+    // Query events from database
     const { data: events, error: eventsError } = await supabase
       .from('events')
       .select(`
@@ -380,7 +286,8 @@ serve(async (req) => {
       .eq('status', 'upcoming')
       .gte('start_time_utc', now.toISOString())
       .lte('start_time_utc', windowEnd.toISOString())
-      .order('start_time_utc', { ascending: true });
+      .order('start_time_utc', { ascending: true })
+      .limit(20);
 
     if (eventsError) {
       throw new Error(`Error fetching events: ${eventsError.message}`);
@@ -390,26 +297,20 @@ serve(async (req) => {
       return new Response(
         JSON.stringify({
           recommended_bets: [],
-          reason: 'No upcoming events found. The odds data may not be available yet - try again in a few minutes.',
+          reason: 'No upcoming events found in the selected time window. Try clicking "Refresh Odds" first or expanding the time window.',
           events_analyzed: 0
         }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    console.log(`Found ${events.length} events to analyze`);
+    console.log(`Found ${events.length} events with ${events.reduce((sum, e) => sum + (e.markets?.length || 0), 0)} markets`);
 
-    // STEP 3: Research events with Perplexity
-    console.log('Researching events with Perplexity...');
-    const researchData = await researchEventsWithPerplexity(events, perplexityApiKey);
-
-    // STEP 4: Analyze bets with Perplexity
-    console.log('Analyzing bets with Perplexity...');
+    // Analyze bets with Perplexity
     const nowAEDT = getNowAEDT();
     
     const modelResponse = await analyzeBetsWithPerplexity(
       events,
-      researchData,
       {
         now_aedt: nowAEDT,
         bankroll_units,
@@ -421,7 +322,7 @@ serve(async (req) => {
       perplexityApiKey
     );
 
-    // STEP 5: Validate and enforce server-side limits
+    // Validate and enforce server-side limits
     const maxDailyUnits = bankroll_units * max_daily_exposure_pct;
     const maxPerEventUnits = bankroll_units * max_per_event_exposure_pct;
     
@@ -433,7 +334,7 @@ serve(async (req) => {
       if (bet.bet_score < 70) continue;
       
       // Cap stake at per-event limit
-      const cappedStake = Math.min(bet.recommended_stake_units, maxPerEventUnits);
+      const cappedStake = Math.min(bet.recommended_stake_units || 1, maxPerEventUnits);
       
       // Check daily exposure limit
       if (totalStake + cappedStake > maxDailyUnits) continue;
@@ -448,11 +349,13 @@ serve(async (req) => {
       });
     }
 
-    // STEP 6: Save validated bets to database
+    console.log(`Validated ${validatedBets.length} bets, total stake: ${totalStake}`);
+
+    // Save validated bets to database
     if (userId && validatedBets.length > 0) {
       const betsToInsert = validatedBets.map(bet => {
         const event = events.find(e => e.id === bet.event_id);
-        const eventName = event ? `${event.home_team} vs ${event.away_team}` : 'Unknown Event';
+        const eventName = event ? `${event.home_team} vs ${event.away_team}` : bet.selection_label;
         
         return {
           user_id: userId,
@@ -493,10 +396,10 @@ serve(async (req) => {
           total_stake_units: totalStake,
           bankroll_units,
           expected_value_units: validatedBets.reduce((sum, bet) => 
-            sum + (bet.edge * bet.recommended_stake_units), 0)
+            sum + ((bet.edge || 0) * (bet.recommended_stake_units || 0)), 0)
         },
         events_analyzed: events.length,
-        research_sources: researchData.size,
+        reason: validatedBets.length === 0 ? (modelResponse.reason || 'No bets met the 70+ bet score threshold') : undefined,
         timestamp: new Date().toISOString()
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
