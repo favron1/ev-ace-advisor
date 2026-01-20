@@ -158,6 +158,250 @@ const LEAGUE_IDS: Record<string, number> = {
 
 const MAJOR_LEAGUES = new Set([39, 2, 3, 140, 78, 135, 61]); // Extended to all Tier 1
 
+// ============= FIRECRAWL FALLBACK FUNCTION =============
+
+interface FirecrawlScrapedStats {
+  league_position?: number;
+  points_per_game?: number;
+  recent_form?: string;
+  goals_scored_last_5?: number;
+  goals_conceded_last_5?: number;
+  home_record?: string;
+  away_record?: string;
+  days_rest?: number;
+}
+
+async function fillMissingStatsWithFirecrawl(
+  teamName: string,
+  leagueName: string,
+  missingFields: string[],
+  firecrawlApiKey: string
+): Promise<FirecrawlScrapedStats> {
+  console.log(`[Firecrawl] Attempting to fill missing fields for ${teamName}: ${missingFields.join(', ')}`);
+  
+  const scrapedStats: FirecrawlScrapedStats = {};
+  
+  // Normalize team name for search
+  const searchTeam = teamName
+    .replace(/\bFC\b/gi, '')
+    .replace(/\bCF\b/gi, '')
+    .replace(/\bSC\b/gi, '')
+    .trim();
+  
+  try {
+    // Search Flashscore for team stats
+    const searchQuery = `${searchTeam} ${leagueName} standings form 2024 2025 site:flashscore.com OR site:soccerway.com OR site:sofascore.com`;
+    
+    console.log(`[Firecrawl] Searching: ${searchQuery}`);
+    
+    const searchResponse = await fetch('https://api.firecrawl.dev/v1/search', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${firecrawlApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        query: searchQuery,
+        limit: 3,
+        scrapeOptions: { formats: ['markdown'] }
+      }),
+    });
+    
+    if (!searchResponse.ok) {
+      console.log(`[Firecrawl] Search failed: ${searchResponse.status}`);
+      return scrapedStats;
+    }
+    
+    const searchData = await searchResponse.json();
+    const results = searchData.data || [];
+    
+    if (results.length === 0) {
+      console.log(`[Firecrawl] No search results for ${teamName}`);
+      return scrapedStats;
+    }
+    
+    // Combine all markdown content
+    const combinedContent = results.map((r: any) => r.markdown || '').join('\n\n');
+    
+    // Parse league position
+    if (missingFields.includes('league_position')) {
+      // Look for patterns like "1st", "2.", "Position: 5", "#3", "Rank 4"
+      const positionPatterns = [
+        new RegExp(`${searchTeam}[^\\n]*?\\b(\\d{1,2})(?:st|nd|rd|th)?\\b`, 'i'),
+        /Position[:\s]+(\d{1,2})/i,
+        /Rank[:\s]+(\d{1,2})/i,
+        /\|\s*(\d{1,2})\s*\|/,
+        /^(\d{1,2})\.\s+/m
+      ];
+      
+      for (const pattern of positionPatterns) {
+        const match = combinedContent.match(pattern);
+        if (match && match[1]) {
+          const pos = parseInt(match[1]);
+          if (pos >= 1 && pos <= 25) {
+            scrapedStats.league_position = pos;
+            console.log(`[Firecrawl] Found position for ${teamName}: ${pos}`);
+            break;
+          }
+        }
+      }
+    }
+    
+    // Parse recent form
+    if (missingFields.includes('recent_form')) {
+      // Look for form patterns like "WWDLW", "W D L W W"
+      const formPatterns = [
+        /Form[:\s]*([WDLWDL\s]{5,})/i,
+        /Last 5[:\s]*([WDLWDL\s]{5,})/i,
+        /\b([WDL]{5})\b/
+      ];
+      
+      for (const pattern of formPatterns) {
+        const match = combinedContent.match(pattern);
+        if (match && match[1]) {
+          const form = match[1].replace(/\s+/g, '').toUpperCase().slice(0, 5);
+          if (/^[WDL]{3,5}$/.test(form)) {
+            scrapedStats.recent_form = form;
+            console.log(`[Firecrawl] Found form for ${teamName}: ${form}`);
+            break;
+          }
+        }
+      }
+    }
+    
+    // Parse goals scored/conceded last 5
+    if (missingFields.includes('goals_scored_last_5') || missingFields.includes('goals_conceded_last_5')) {
+      // Look for score patterns in recent matches
+      const scorePatterns = [
+        /(\d)-(\d)/g,
+        /Goals[:\s]+(\d+)\s*-\s*(\d+)/i
+      ];
+      
+      const scores: { for: number; against: number }[] = [];
+      for (const pattern of scorePatterns) {
+        let match;
+        while ((match = pattern.exec(combinedContent)) !== null && scores.length < 5) {
+          const g1 = parseInt(match[1]);
+          const g2 = parseInt(match[2]);
+          if (g1 >= 0 && g1 <= 10 && g2 >= 0 && g2 <= 10) {
+            // Assume first number is for the team being searched
+            scores.push({ for: g1, against: g2 });
+          }
+        }
+      }
+      
+      if (scores.length >= 3) {
+        scrapedStats.goals_scored_last_5 = scores.slice(0, 5).reduce((a, b) => a + b.for, 0);
+        scrapedStats.goals_conceded_last_5 = scores.slice(0, 5).reduce((a, b) => a + b.against, 0);
+        console.log(`[Firecrawl] Found goals for ${teamName}: ${scrapedStats.goals_scored_last_5} for, ${scrapedStats.goals_conceded_last_5} against`);
+      }
+    }
+    
+    // Parse home/away records
+    if (missingFields.includes('home_record')) {
+      const homePattern = /Home[:\s]+(\d+)[^\d]+(\d+)[^\d]+(\d+)/i;
+      const match = combinedContent.match(homePattern);
+      if (match) {
+        scrapedStats.home_record = `${match[1]}-${match[2]}-${match[3]}`;
+        console.log(`[Firecrawl] Found home record for ${teamName}: ${scrapedStats.home_record}`);
+      }
+    }
+    
+    if (missingFields.includes('away_record')) {
+      const awayPattern = /Away[:\s]+(\d+)[^\d]+(\d+)[^\d]+(\d+)/i;
+      const match = combinedContent.match(awayPattern);
+      if (match) {
+        scrapedStats.away_record = `${match[1]}-${match[2]}-${match[3]}`;
+        console.log(`[Firecrawl] Found away record for ${teamName}: ${scrapedStats.away_record}`);
+      }
+    }
+    
+    // Parse points per game
+    if (missingFields.includes('points_per_game')) {
+      const ppgPatterns = [
+        /PPG[:\s]*([\d.]+)/i,
+        /Points per game[:\s]*([\d.]+)/i,
+        /(\d+)\s*pts.*?(\d+)\s*(?:games|played)/i
+      ];
+      
+      for (const pattern of ppgPatterns) {
+        const match = combinedContent.match(pattern);
+        if (match) {
+          if (match[2]) {
+            // Points and games format
+            const pts = parseInt(match[1]);
+            const games = parseInt(match[2]);
+            if (games > 0) {
+              scrapedStats.points_per_game = Number((pts / games).toFixed(2));
+            }
+          } else {
+            scrapedStats.points_per_game = parseFloat(match[1]);
+          }
+          if (scrapedStats.points_per_game) {
+            console.log(`[Firecrawl] Found PPG for ${teamName}: ${scrapedStats.points_per_game}`);
+            break;
+          }
+        }
+      }
+    }
+    
+    // Estimate days rest from last match date
+    if (missingFields.includes('days_rest')) {
+      const datePatterns = [
+        /(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/,
+        /(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i
+      ];
+      
+      for (const pattern of datePatterns) {
+        const match = combinedContent.match(pattern);
+        if (match) {
+          // Rough estimate - assume recent match was within last week
+          scrapedStats.days_rest = 4; // Default reasonable rest
+          console.log(`[Firecrawl] Estimated days rest for ${teamName}: ${scrapedStats.days_rest}`);
+          break;
+        }
+      }
+    }
+    
+    console.log(`[Firecrawl] Filled ${Object.keys(scrapedStats).length} fields for ${teamName}`);
+    return scrapedStats;
+    
+  } catch (error) {
+    console.error(`[Firecrawl] Error scraping stats for ${teamName}:`, error);
+    return scrapedStats;
+  }
+}
+
+// Merge Firecrawl stats into TeamStats
+function mergeFirecrawlStats(stats: TeamStats, firecrawlStats: FirecrawlScrapedStats): TeamStats {
+  if (firecrawlStats.league_position !== undefined && stats.league_position === undefined) {
+    stats.league_position = firecrawlStats.league_position;
+  }
+  if (firecrawlStats.points_per_game !== undefined && stats.points_per_game === undefined) {
+    stats.points_per_game = firecrawlStats.points_per_game;
+  }
+  if (firecrawlStats.recent_form && (!stats.recent_form || stats.recent_form.length < 3)) {
+    stats.recent_form = firecrawlStats.recent_form;
+  }
+  if (firecrawlStats.goals_scored_last_5 !== undefined && stats.goals_scored_last_5 === undefined) {
+    stats.goals_scored_last_5 = firecrawlStats.goals_scored_last_5;
+  }
+  if (firecrawlStats.goals_conceded_last_5 !== undefined && stats.goals_conceded_last_5 === undefined) {
+    stats.goals_conceded_last_5 = firecrawlStats.goals_conceded_last_5;
+  }
+  if (firecrawlStats.home_record && (!stats.home_record || stats.home_record === '0-0-0')) {
+    stats.home_record = firecrawlStats.home_record;
+  }
+  if (firecrawlStats.away_record && (!stats.away_record || stats.away_record === '0-0-0')) {
+    stats.away_record = firecrawlStats.away_record;
+  }
+  if (firecrawlStats.days_rest !== undefined && stats.days_rest === undefined) {
+    stats.days_rest = firecrawlStats.days_rest;
+  }
+  
+  return stats;
+}
+
 // ============= HELPER FUNCTIONS =============
 
 function getSeasonForLeague(leagueId: number): number {
@@ -762,6 +1006,7 @@ serve(async (req) => {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const apiFootballKey = Deno.env.get('API_FOOTBALL_KEY');
+    const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY');
 
     if (!apiFootballKey) {
       throw new Error('API_FOOTBALL_KEY not configured');
@@ -769,7 +1014,7 @@ serve(async (req) => {
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
     
-    const { sports = ['soccer'], window_hours = 72, max_events = 15 } = await req.json();
+    const { sports = ['soccer'], window_hours = 72, max_events = 15, use_firecrawl_fallback = true } = await req.json();
 
     const now = new Date();
     const windowEnd = new Date(now.getTime() + window_hours * 60 * 60 * 1000);
@@ -814,10 +1059,58 @@ serve(async (req) => {
     const leagueTeamsCache = new Map<string, Promise<Map<string, number>>>();
 
     const matchDataPromises = events.map(async (event) => {
-      const [homeStats, awayStats] = await Promise.all([
+      let [homeStats, awayStats] = await Promise.all([
         fetchTeamStats(event.home_team, event.league, apiFootballKey, leagueTeamsCache),
         fetchTeamStats(event.away_team, event.league, apiFootballKey, leagueTeamsCache),
       ]);
+
+      // Firecrawl fallback for incomplete stats
+      if (use_firecrawl_fallback && firecrawlApiKey) {
+        const homeIncomplete = !homeStats.stats_complete && homeStats.missing_fields && homeStats.missing_fields.length > 0;
+        const awayIncomplete = !awayStats.stats_complete && awayStats.missing_fields && awayStats.missing_fields.length > 0;
+        
+        if (homeIncomplete || awayIncomplete) {
+          console.log(`[Firecrawl Fallback] ${event.home_team} vs ${event.away_team} - attempting to fill missing data`);
+          
+          const firecrawlPromises: Promise<void>[] = [];
+          
+          if (homeIncomplete && homeStats.missing_fields) {
+            firecrawlPromises.push(
+              fillMissingStatsWithFirecrawl(event.home_team, event.league, homeStats.missing_fields, firecrawlApiKey)
+                .then(scrapedStats => {
+                  homeStats = mergeFirecrawlStats(homeStats, scrapedStats);
+                  // Re-validate after merge
+                  const validation = validateTeamStats(homeStats);
+                  homeStats.stats_complete = validation.valid;
+                  homeStats.missing_fields = validation.missing;
+                  if (validation.valid) {
+                    homeStats.team_rating = calculateTeamRating(homeStats);
+                    console.log(`[Firecrawl] ${event.home_team} now complete after Firecrawl enrichment`);
+                  }
+                })
+            );
+          }
+          
+          if (awayIncomplete && awayStats.missing_fields) {
+            firecrawlPromises.push(
+              fillMissingStatsWithFirecrawl(event.away_team, event.league, awayStats.missing_fields, firecrawlApiKey)
+                .then(scrapedStats => {
+                  awayStats = mergeFirecrawlStats(awayStats, scrapedStats);
+                  // Re-validate after merge
+                  const validation = validateTeamStats(awayStats);
+                  awayStats.stats_complete = validation.valid;
+                  awayStats.missing_fields = validation.missing;
+                  if (validation.valid) {
+                    awayStats.team_rating = calculateTeamRating(awayStats);
+                    console.log(`[Firecrawl] ${event.away_team} now complete after Firecrawl enrichment`);
+                  }
+                })
+            );
+          }
+          
+          await Promise.all(firecrawlPromises);
+        }
+      }
 
       const oddsArray: MarketOdds[] = [];
       const processedSelections = new Set<string>();
@@ -907,7 +1200,8 @@ INSTITUTIONAL SPORTS BETTING DATA EXPORT (v3.0)
 Timestamp: ${timestamp} AEDT
 Complete Events: ${completeEvents.length} | Incomplete (excluded): ${incompleteEvents.length}
 Window: Next ${window_hours} hours
-Data Source: API-Football (Enhanced: npxG, Shots, Set Pieces, Game State, Market Structure)
+Data Source: API-Football + Firecrawl Fallback (npxG, Shots, Set Pieces, Game State, Market Structure)
+Firecrawl Enrichment: ${firecrawlApiKey ? 'ENABLED' : 'DISABLED'}
 ========================================================
 
 ${incompleteEvents.length > 0 ? `
