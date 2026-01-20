@@ -168,7 +168,7 @@ serve(async (req) => {
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
     
-    const { sports = ['soccer'], window_hours = 72, max_events = 3 } = await req.json();
+    const { sports = ['soccer'], window_hours = 72, max_events = 15 } = await req.json();
 
     // Query upcoming events
     const now = new Date();
