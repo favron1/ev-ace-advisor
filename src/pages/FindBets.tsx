@@ -142,11 +142,23 @@ export default function FindBets() {
     return <Badge variant="secondary">{score}</Badge>;
   };
 
+  const getConfidenceBadge = (confidence: 'high' | 'medium' | 'low') => {
+    switch (confidence) {
+      case 'high':
+        return <Badge className="bg-profit/20 text-profit border-profit/30">High</Badge>;
+      case 'medium':
+        return <Badge className="bg-warning/20 text-warning border-warning/30">Medium</Badge>;
+      case 'low':
+        return <Badge variant="outline" className="text-muted-foreground">Low</Badge>;
+    }
+  };
+
   const getEdgeBadge = (edge: number) => {
     const edgePct = (edge * 100).toFixed(1);
     if (edge >= 0.05) return <Badge className="bg-profit text-white">+{edgePct}%</Badge>;
     if (edge >= 0.02) return <Badge className="bg-warning text-black">+{edgePct}%</Badge>;
-    return <Badge variant="secondary">+{edgePct}%</Badge>;
+    if (edge >= 0) return <Badge variant="secondary">+{edgePct}%</Badge>;
+    return <Badge variant="outline" className="text-muted-foreground">{edgePct}%</Badge>;
   };
 
   return (
@@ -360,6 +372,7 @@ export default function FindBets() {
                           <TableHead>Event</TableHead>
                           <TableHead>Selection</TableHead>
                           <TableHead className="text-center">Odds</TableHead>
+                          <TableHead className="text-center">Confidence</TableHead>
                           <TableHead className="text-center">Bet Score</TableHead>
                           <TableHead className="text-center">Edge</TableHead>
                           <TableHead className="text-center">Stake</TableHead>
@@ -368,7 +381,7 @@ export default function FindBets() {
                       </TableHeader>
                       <TableBody>
                         {results.recommended_bets.map((bet, idx) => (
-                          <TableRow key={idx}>
+                          <TableRow key={idx} className={bet.confidence === 'high' ? 'bg-profit/5' : ''}>
                             <TableCell>
                               <div>
                                 <p className="font-medium text-sm">{bet.selection_label.split(' to ')[0] || bet.selection}</p>
@@ -381,6 +394,9 @@ export default function FindBets() {
                             </TableCell>
                             <TableCell className="text-center">
                               <span className="font-mono font-bold">{bet.odds_decimal.toFixed(2)}</span>
+                            </TableCell>
+                            <TableCell className="text-center">
+                              {getConfidenceBadge(bet.confidence || 'low')}
                             </TableCell>
                             <TableCell className="text-center">
                               {getBetScoreBadge(bet.bet_score)}

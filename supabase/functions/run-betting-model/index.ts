@@ -29,6 +29,7 @@ interface RecommendedBet {
   implied_probability: number;
   edge: number;
   bet_score: number;
+  confidence: 'high' | 'medium' | 'low';
   recommended_stake_units: number;
   rationale: string;
 }
@@ -135,15 +136,11 @@ async function analyzeWithPerplexity(
     };
   });
 
-  // Your original prompt from the spec
+  // Updated prompt - always return bets with confidence ratings
   const systemPrompt = `You are an institutional-grade sports betting analyst and quantitative decision engine.
 
-Objective: maximise long-term expected value (EV) and positive Closing Line Value (CLV).
-Only consider strictly upcoming events.
-Assign a Bet Score from 0–100.
-Do not recommend any bet with Bet Score < 70.
-Respect bankroll and exposure limits.
-Return VALID JSON ONLY.
+CRITICAL RULE: You MUST return 3-5 recommended bets from the available matches. NEVER return an empty array.
+Even if no bet is perfect, return the BEST available options with appropriate confidence ratings.
 
 METHODOLOGY:
 1. Analyze the SCRAPED DATA provided for each match - this contains real team news, injuries, form, and previews
@@ -153,17 +150,23 @@ METHODOLOGY:
 5. Calculate edge = model_probability - implied_probability
 
 BET SCORE CALCULATION (0-100):
-- Base on edge strength
+- Base on edge strength (larger edge = higher score)
 - Adjust for confidence in scraped data quality
 - Adjust for information recency
-- Score >= 85: Strong bet
-- Score 75-84: Good bet
-- Score 70-74: Marginal bet
-- Score < 70: Do not recommend
+- Minimum score is 50 (for the weakest recommendations)
 
-STAKE SIZING (Kelly Criterion):
-- Use quarter Kelly for safety
-- Cap at max_per_event_exposure`;
+CONFIDENCE LEVELS (REQUIRED for each bet):
+- "high": bet_score >= 80, strong data support, clear positive edge, high conviction
+- "medium": bet_score 65-79, reasonable edge but some uncertainty in data
+- "low": bet_score < 65, speculative, limited data, but still best available
+
+STAKE SIZING (Fractional Kelly @ 25%):
+- stake_units = 0.25 * edge / (odds - 1)
+- For "high" confidence: use full calculated stake (capped at 1.5 units)
+- For "medium" confidence: use 75% of calculated stake
+- For "low" confidence: use 50% of calculated stake (minimum 0.25 units)
+
+Return VALID JSON ONLY.`;
 
   const userPrompt = `CONTEXT:
 {
@@ -181,6 +184,8 @@ ${JSON.stringify(eventsPayload, null, 2)}
 
 Analyze each event using the SCRAPED DATA provided. This data was gathered from real sports websites and contains actual team news, injuries, and match previews.
 
+IMPORTANT: You MUST return at least 3-5 bets. Never return an empty array.
+
 Return your analysis as VALID JSON with this structure:
 {
   "recommended_bets": [
@@ -195,8 +200,9 @@ Return your analysis as VALID JSON with this structure:
       "bookmaker": "string",
       "model_probability": number (0-1),
       "implied_probability": number (0-1),
-      "edge": number (positive means value),
-      "bet_score": number (0-100),
+      "edge": number (positive means value, can be negative for low confidence picks),
+      "bet_score": number (50-100),
+      "confidence": "high" | "medium" | "low",
       "recommended_stake_units": number,
       "rationale": "string (cite specific info from scraped data)"
     }
@@ -206,12 +212,6 @@ Return your analysis as VALID JSON with this structure:
     "bankroll_units": number,
     "expected_value_units": number
   }
-}
-
-If no bets meet criteria:
-{
-  "recommended_bets": [],
-  "reason": "No bets met Bet Score and risk thresholds."
 }`;
 
   console.log('Sending to Perplexity for analysis...');
@@ -417,7 +417,7 @@ serve(async (req) => {
 
     console.log('STEP 4: Perplexity analysis complete');
 
-    // STEP 5: Validate and enforce limits
+    // STEP 5: Validate and enforce limits (no longer filtering by bet_score since we always want bets)
     const maxDailyUnits = bankroll_units * max_daily_exposure_pct;
     const maxPerEventUnits = bankroll_units * max_per_event_exposure_pct;
     
@@ -425,14 +425,16 @@ serve(async (req) => {
     const validatedBets: RecommendedBet[] = [];
 
     for (const bet of modelResponse.recommended_bets || []) {
-      if (bet.bet_score < 70) continue;
-      
-      const cappedStake = Math.min(bet.recommended_stake_units || 1, maxPerEventUnits);
+      const cappedStake = Math.min(bet.recommended_stake_units || 0.5, maxPerEventUnits);
       if (totalStake + cappedStake > maxDailyUnits) continue;
       if (validatedBets.length >= max_bets) break;
       
       totalStake += cappedStake;
-      validatedBets.push({ ...bet, recommended_stake_units: cappedStake });
+      validatedBets.push({ 
+        ...bet, 
+        recommended_stake_units: cappedStake,
+        confidence: bet.confidence || (bet.bet_score >= 80 ? 'high' : bet.bet_score >= 65 ? 'medium' : 'low')
+      });
     }
 
     console.log(`STEP 5: Validated ${validatedBets.length} bets`);
