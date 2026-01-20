@@ -43,24 +43,16 @@ function getNowAEDT(): string {
   return now.toLocaleString('sv-SE', { timeZone: 'Australia/Sydney' }).replace(' ', 'T') + '+11:00';
 }
 
-// Scrape sports data using Firecrawl search
+// Scrape sports data using Firecrawl search - enhanced for structured stats
 async function scrapeMatchData(
   teams: { home: string; away: string; league: string; sport: string }[],
   firecrawlApiKey: string
 ): Promise<Record<string, any>> {
   const scrapedData: Record<string, any> = {};
   
-  // Build search queries for each match
-  const searchPromises = teams.slice(0, 8).map(async (match) => {
-    const matchKey = `${match.home} vs ${match.away}`;
-    
+  // Helper to search with Firecrawl
+  async function firecrawlSearch(query: string, limit: number = 3): Promise<any[]> {
     try {
-      // Search for recent news and form data
-      // (Avoid hardcoding a year; let search find the most recent previews/injury reports)
-      const searchQuery = `${match.home} vs ${match.away} ${match.league} preview injuries team news predicted lineup form`;
-
-      console.log(`Searching for: ${searchQuery}`);
-
       const response = await fetch('https://api.firecrawl.dev/v1/search', {
         method: 'POST',
         headers: {
@@ -68,39 +60,83 @@ async function scrapeMatchData(
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          query: searchQuery,
-          limit: 5,
-          tbs: 'qdr:w', // Last week
-          scrapeOptions: {
-            formats: ['markdown']
-          }
+          query,
+          limit,
+          tbs: 'qdr:w',
+          scrapeOptions: { formats: ['markdown'] }
         }),
       });
-
-      if (!response.ok) {
-        console.error(`Firecrawl search failed for ${matchKey}:`, response.status);
-        return { matchKey, data: null };
-      }
-
+      if (!response.ok) return [];
       const data = await response.json();
-      
-      // Extract relevant content from search results
-      const content = data.data?.map((result: any) => ({
-        title: result.title,
-        url: result.url,
-        content: result.markdown?.substring(0, 1500) || result.description
+      return data.data?.map((r: any) => ({
+        title: r.title || '',
+        url: r.url || '',
+        content: r.markdown?.substring(0, 1500) || r.description || ''
       })) || [];
+    } catch {
+      return [];
+    }
+  }
 
-      console.log(`Found ${content.length} results for ${matchKey}`);
-      
-      return { matchKey, data: content };
+  // Process each match with enriched data queries
+  const matchPromises = teams.slice(0, 8).map(async (match) => {
+    const matchKey = `${match.home} vs ${match.away}`;
+    console.log(`Scraping enriched data: ${matchKey}`);
+    
+    try {
+      // Parallel scrape: team form, stats, injuries, H2H
+      const [
+        homeFormResults,
+        awayFormResults,
+        statsResults,
+        injuryResults,
+        newsResults
+      ] = await Promise.all([
+        // Home team recent form & results
+        firecrawlSearch(`"${match.home}" ${match.league} last 5 matches results form 2024-25`, 2),
+        // Away team recent form & results
+        firecrawlSearch(`"${match.away}" ${match.league} last 5 matches results form 2024-25`, 2),
+        // Team stats (xG, goals, ratings)
+        firecrawlSearch(`"${match.home}" OR "${match.away}" xG goals scored conceded statistics ${match.league}`, 2),
+        // Injuries & suspensions
+        firecrawlSearch(`"${match.home}" OR "${match.away}" injuries suspensions team news lineup`, 3),
+        // Transfers & news affecting XI
+        firecrawlSearch(`"${match.home}" OR "${match.away}" transfer starting eleven squad news`, 2)
+      ]);
+
+      const enrichedData = {
+        home_team_form: homeFormResults,
+        away_team_form: awayFormResults,
+        team_stats: statsResults,
+        injuries_suspensions: injuryResults,
+        transfers_news: newsResults,
+        // Formatted summary for Perplexity
+        summary: `
+=== ${match.home} FORM & STATS ===
+${homeFormResults.map(r => `[${r.title}]\n${r.content}`).join('\n---\n') || 'No form data'}
+
+=== ${match.away} FORM & STATS ===
+${awayFormResults.map(r => `[${r.title}]\n${r.content}`).join('\n---\n') || 'No form data'}
+
+=== TEAM STATISTICS (xG, Goals) ===
+${statsResults.map(r => `[${r.title}]\n${r.content}`).join('\n---\n') || 'No stats data'}
+
+=== INJURIES & SUSPENSIONS ===
+${injuryResults.map(r => `[${r.title}]\n${r.content}`).join('\n---\n') || 'No injury data'}
+
+=== TRANSFERS & NEWS ===
+${newsResults.map(r => `[${r.title}]\n${r.content}`).join('\n---\n') || 'No news data'}
+`
+      };
+
+      return { matchKey, data: enrichedData };
     } catch (error) {
       console.error(`Error scraping ${matchKey}:`, error);
       return { matchKey, data: null };
     }
   });
 
-  const results = await Promise.all(searchPromises);
+  const results = await Promise.all(matchPromises);
   
   for (const result of results) {
     if (result.data) {
@@ -119,10 +155,10 @@ async function analyzeWithPerplexity(
   perplexityApiKey: string
 ): Promise<any> {
   
-  // Build the payload with scraped data included
+  // Build the payload with enriched scraped data
   const eventsPayload = eventsWithOdds.map(event => {
     const matchKey = `${event.home_team} vs ${event.away_team}`;
-    const scraped = scrapedData[matchKey] || [];
+    const scraped = scrapedData[matchKey] || {};
     
     return {
       event_id: event.event_id,
@@ -131,42 +167,54 @@ async function analyzeWithPerplexity(
       home_team: event.home_team,
       away_team: event.away_team,
       start_time_aedt: event.start_time_aedt,
-      // Scraped research data
-      scraped_data: scraped.length > 0 ? scraped : 'No scraped data available',
+      // Enriched scraped data with structured sections
+      scraped_data: scraped.summary || 'No scraped data available',
       // Market odds
       markets: event.markets
     };
   });
 
-  // Updated prompt - always return bets with confidence ratings
+  // Enhanced prompt with structured stats extraction
   const systemPrompt = `You are an institutional-grade sports betting analyst and quantitative decision engine.
 
 CRITICAL RULE: You MUST return 3-5 recommended bets from the available matches. NEVER return an empty array.
-Even if no bet is perfect, return the BEST available options with appropriate confidence ratings.
 
-METHODOLOGY:
-1. Analyze the SCRAPED DATA provided for each match - this contains real team news, injuries, form, and previews
-2. Use this data to estimate TRUE PROBABILITY for each outcome
-3. Compare to implied probability from bookmaker odds (1/odds)
-4. Calculate implied_probability = 1 / odds_decimal
-5. Calculate edge = model_probability - implied_probability
+STEP 1: EXTRACT STRUCTURED STATS
+For each team, extract from the scraped data:
+- Recent Form: Last 5 match results (e.g., WWDLW)
+- Goals Scored (Last 5): Total goals scored
+- Goals Conceded (Last 5): Total goals conceded
+- xG (Expected Goals): If available, xG for and against
+- League Position/Rating: Current standing or strength indicator
+- Days Rest: If mentioned, days since last match
+- Key Absences: Named players out (injuries/suspensions)
+- Home/Away Strength: Split performance if available
 
-BET SCORE CALCULATION (0-100):
-- Base on edge strength (larger edge = higher score)
-- Adjust for confidence in scraped data quality
-- Adjust for information recency
-- Minimum score is 50 (for the weakest recommendations)
+STEP 2: CALCULATE MODEL PROBABILITY
+Use the extracted stats to build probabilities that DIFFER from implied odds:
+- Strong home form + poor away form = adjust home win probability UP
+- Key absences on one side = adjust their probability DOWN
+- High xG differential = adjust accordingly
+- Fatigue (low days rest) = negative adjustment
 
-CONFIDENCE LEVELS (REQUIRED for each bet):
-- "high": bet_score >= 80, strong data support, clear positive edge, high conviction
-- "medium": bet_score 65-79, reasonable edge but some uncertainty in data
-- "low": bet_score < 65, speculative, limited data, but still best available
+STEP 3: CALCULATE EDGE
+Edge = Model Probability - Implied Probability (1/odds)
+Only recommend positive edge bets, but rank by edge size.
 
-STAKE SIZING (Fractional Kelly @ 25%):
-- stake_units = 0.25 * edge / (odds - 1)
-- For "high" confidence: use full calculated stake (capped at 1.5 units)
-- For "medium" confidence: use 75% of calculated stake
-- For "low" confidence: use 50% of calculated stake (minimum 0.25 units)
+BET SCORE (0-100):
+- 85+: Strong edge (>5%), solid data, high confidence
+- 70-84: Moderate edge (2-5%), reasonable data
+- 55-69: Small edge (<2%), limited data
+- <55: No bet
+
+CONFIDENCE LEVELS:
+- "high": bet_score >= 80, multiple data points support the edge
+- "medium": bet_score 65-79, some supporting data
+- "low": bet_score < 65, speculative but best available
+
+STAKE SIZING (25% Kelly):
+stake = 0.25 * edge / (odds - 1)
+Adjust: high = 100%, medium = 75%, low = 50% (min 0.25u, max 1.5u)
 
 Return VALID JSON ONLY.`;
 
