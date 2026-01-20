@@ -91,8 +91,13 @@ serve(async (req) => {
     // Sports to fetch from The Odds API
     // We dynamically fetch *all* soccer leagues so we don't miss upcoming matches.
     const baseSports = [
+      // Basketball (all major leagues)
       'basketball_nba',
-      'basketball_nbl',
+      'basketball_ncaab', // NCAA Basketball
+      'basketball_nbl', // Australia NBL
+      'basketball_euroleague',
+      'basketball_wncaa', // Women's NCAA
+      // Other sports
       'aussierules_afl',
       'rugbyleague_nrl'
     ];
