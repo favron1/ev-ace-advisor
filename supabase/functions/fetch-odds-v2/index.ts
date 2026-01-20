@@ -89,18 +89,29 @@ serve(async (req) => {
     const nowAEDT = getNowAEDT();
     
     // Sports to fetch from The Odds API
-    const sports = [
-      'soccer_epl',
-      'soccer_australia_aleague',
-      'soccer_spain_la_liga',
-      'soccer_germany_bundesliga',
-      'soccer_italy_serie_a',
-      'soccer_france_ligue_one',
+    // We dynamically fetch *all* soccer leagues so we don't miss upcoming matches.
+    const baseSports = [
       'basketball_nba',
       'basketball_nbl',
       'aussierules_afl',
       'rugbyleague_nrl'
     ];
+
+    // Discover all available soccer leagues from the API
+    const sportsIndexUrl = `https://api.the-odds-api.com/v4/sports/?apiKey=${oddsApiKey}`;
+    const sportsIndexResp = await fetch(sportsIndexUrl);
+    if (!sportsIndexResp.ok) {
+      throw new Error(`Failed to fetch sports index: ${sportsIndexResp.status}`);
+    }
+
+    const sportsIndex: Array<{ key: string; active: boolean }> = await sportsIndexResp.json();
+    const soccerLeagues = sportsIndex
+      .filter((s) => s.active && s.key.startsWith('soccer_'))
+      .map((s) => s.key);
+
+    const sports = Array.from(new Set([...soccerLeagues, ...baseSports]));
+    console.log(`Discovered ${soccerLeagues.length} soccer leagues; fetching odds for ${sports.length} sports keys total.`);
+
 
     let totalEvents = 0;
     let totalMarkets = 0;
