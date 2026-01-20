@@ -33,15 +33,49 @@ export function useMyBets() {
     }
   }, [userId]);
 
+  const requireSession = async () => {
+    const { data: { session }, error } = await supabase.auth.getSession();
+    if (error) throw error;
+    if (!session?.user) {
+      // Ensure we don't keep a stale userId around
+      setUserId(null);
+      return null;
+    }
+    return session;
+  };
+
+  const requireUserId = async () => {
+    const session = await requireSession();
+    return session?.user?.id ?? null;
+  };
+
+  const requireLoginToast = () => {
+    toast({
+      title: "Login Required",
+      description: "Please sign in again to save bets.",
+      variant: "destructive",
+    });
+  };
+
+  const isRlsAuthError = (err: unknown) => {
+    const msg = err instanceof Error ? err.message : '';
+    return msg.includes('row-level security') || msg.includes('42501');
+  };
+
   const loadBetsFromDatabase = async () => {
-    if (!userId) return;
-    
+    const authedUserId = await requireUserId();
+    if (!authedUserId) {
+      setState({ bets: [], lastUpdated: new Date().toISOString() });
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     try {
       const { data, error } = await supabase
         .from('user_bets')
         .select('*')
-        .eq('user_id', userId)
+        .eq('user_id', authedUserId)
         .order('created_at', { ascending: false });
 
       if (error) throw error;
@@ -76,23 +110,24 @@ export function useMyBets() {
       });
     } catch (error) {
       console.error('Error loading bets:', error);
-      toast({
-        title: "Error",
-        description: "Failed to load your bets",
-        variant: "destructive",
-      });
+      if (isRlsAuthError(error)) {
+        requireLoginToast();
+      } else {
+        toast({
+          title: "Error",
+          description: "Failed to load your bets",
+          variant: "destructive",
+        });
+      }
     } finally {
       setLoading(false);
     }
   };
 
   const addBet = useCallback(async (bet: RecommendedBet) => {
-    if (!userId) {
-      toast({
-        title: "Login Required",
-        description: "Please log in to save bets",
-        variant: "destructive",
-      });
+    const authedUserId = await requireUserId();
+    if (!authedUserId) {
+      requireLoginToast();
       return;
     }
 
@@ -106,7 +141,7 @@ export function useMyBets() {
       const { data, error } = await supabase
         .from('user_bets')
         .insert({
-          user_id: userId,
+          user_id: authedUserId,
           event_name: bet.event_name,
           league: bet.league,
           sport: bet.sport || 'soccer',
@@ -157,21 +192,22 @@ export function useMyBets() {
       }));
     } catch (error) {
       console.error('Error adding bet:', error);
-      toast({
-        title: "Error",
-        description: "Failed to save bet",
-        variant: "destructive",
-      });
+      if (isRlsAuthError(error)) {
+        requireLoginToast();
+      } else {
+        toast({
+          title: "Error",
+          description: "Failed to save bet",
+          variant: "destructive",
+        });
+      }
     }
-  }, [userId, state.bets, toast]);
+  }, [state.bets, toast]);
 
   const addMultipleBets = useCallback(async (bets: RecommendedBet[]) => {
-    if (!userId) {
-      toast({
-        title: "Login Required",
-        description: "Please log in to save bets",
-        variant: "destructive",
-      });
+    const authedUserId = await requireUserId();
+    if (!authedUserId) {
+      requireLoginToast();
       return;
     }
 
@@ -183,7 +219,7 @@ export function useMyBets() {
 
     try {
       const inserts = newBets.map(bet => ({
-        user_id: userId,
+        user_id: authedUserId,
         event_name: bet.event_name,
         league: bet.league,
         sport: bet.sport || 'soccer',
@@ -242,13 +278,17 @@ export function useMyBets() {
       });
     } catch (error) {
       console.error('Error adding bets:', error);
-      toast({
-        title: "Error",
-        description: "Failed to save bets",
-        variant: "destructive",
-      });
+      if (isRlsAuthError(error)) {
+        requireLoginToast();
+      } else {
+        toast({
+          title: "Error",
+          description: "Failed to save bets",
+          variant: "destructive",
+        });
+      }
     }
-  }, [userId, state.bets, toast]);
+  }, [state.bets, toast]);
 
   const removeBet = useCallback(async (id: string) => {
     if (!userId) return;
