@@ -34,23 +34,37 @@ export function useMyBets() {
   }, [userId]);
 
   const requireSession = async () => {
-    // getSession() is fast but may return a cached session; refreshSession() will
-    // validate/refresh tokens when the cached JWT is stale/corrupted.
+    // getSession() can be cached; we additionally validate with getUser().
     const { data: sessionData, error } = await supabase.auth.getSession();
     if (error) throw error;
 
-    if (sessionData.session?.user) return sessionData.session;
+    let session = sessionData.session;
 
-    // Attempt a token refresh (fixes cases where UI thinks you're logged in but
-    // the access token is invalid, causing RLS failures).
-    const { data: refreshed, error: refreshError } = await supabase.auth.refreshSession();
-    if (refreshError || !refreshed.session?.user) {
-      // Ensure we don't keep a stale userId around
+    // If there's no cached session, attempt refresh.
+    if (!session?.user) {
+      const { data: refreshed, error: refreshError } = await supabase.auth.refreshSession();
+      if (refreshError) {
+        setUserId(null);
+        return null;
+      }
+      session = refreshed.session;
+    }
+
+    if (!session?.user) {
       setUserId(null);
       return null;
     }
 
-    return refreshed.session;
+    // Validate token server-side. If it's invalid (bad_jwt), force re-login.
+    const { error: userErr } = await supabase.auth.getUser();
+    if (userErr) {
+      console.warn('Auth token invalid, signing out:', userErr);
+      await supabase.auth.signOut();
+      setUserId(null);
+      return null;
+    }
+
+    return session;
   };
 
   const requireUserId = async () => {
