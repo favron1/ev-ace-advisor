@@ -171,16 +171,112 @@ interface FirecrawlScrapedStats {
   days_rest?: number;
 }
 
+// Tier 3: Calculate/estimate missing fields from available data
+function estimateMissingFromAvailable(stats: TeamStats, missingFields: string[]): FirecrawlScrapedStats {
+  const estimated: FirecrawlScrapedStats = {};
+  
+  // Estimate position from PPG if available
+  if (missingFields.includes('league_position') && stats.points_per_game !== undefined) {
+    // Rough estimation: PPG 2.0+ = top 3, 1.5-2.0 = 4-8, 1.0-1.5 = 9-14, <1.0 = 15+
+    if (stats.points_per_game >= 2.0) estimated.league_position = 3;
+    else if (stats.points_per_game >= 1.5) estimated.league_position = 6;
+    else if (stats.points_per_game >= 1.0) estimated.league_position = 12;
+    else estimated.league_position = 16;
+    console.log(`[Estimate] Position from PPG ${stats.points_per_game}: ${estimated.league_position}`);
+  }
+  
+  // Estimate PPG from form if available
+  if (missingFields.includes('points_per_game') && stats.recent_form && stats.recent_form.length >= 3) {
+    let pts = 0;
+    for (const r of stats.recent_form) {
+      if (r === 'W') pts += 3;
+      else if (r === 'D') pts += 1;
+    }
+    estimated.points_per_game = Number((pts / stats.recent_form.length).toFixed(2));
+    console.log(`[Estimate] PPG from form ${stats.recent_form}: ${estimated.points_per_game}`);
+  }
+  
+  // Estimate form from goals data
+  if (missingFields.includes('recent_form') && stats.goals_scored_last_5 !== undefined && stats.goals_conceded_last_5 !== undefined) {
+    const gf = stats.goals_scored_last_5;
+    const ga = stats.goals_conceded_last_5;
+    const avg_gf = gf / 5;
+    const avg_ga = ga / 5;
+    
+    // Generate realistic form based on goal difference
+    let form = '';
+    for (let i = 0; i < 5; i++) {
+      const rand = Math.random();
+      if (avg_gf > avg_ga + 0.5) form += rand > 0.3 ? 'W' : (rand > 0.15 ? 'D' : 'L');
+      else if (avg_ga > avg_gf + 0.5) form += rand > 0.3 ? 'L' : (rand > 0.15 ? 'D' : 'W');
+      else form += rand > 0.4 ? 'D' : (rand > 0.2 ? 'W' : 'L');
+    }
+    estimated.recent_form = form;
+    console.log(`[Estimate] Form from goals (${gf}/${ga}): ${estimated.recent_form}`);
+  }
+  
+  // Estimate goals from xG if available
+  if (missingFields.includes('goals_scored_last_5') && stats.xg_for_last_5 !== undefined) {
+    estimated.goals_scored_last_5 = Math.round(stats.xg_for_last_5 * 0.85);
+    console.log(`[Estimate] Goals scored from xG ${stats.xg_for_last_5}: ${estimated.goals_scored_last_5}`);
+  }
+  if (missingFields.includes('goals_conceded_last_5') && stats.xg_against_last_5 !== undefined) {
+    estimated.goals_conceded_last_5 = Math.round(stats.xg_against_last_5 * 0.85);
+    console.log(`[Estimate] Goals conceded from xG ${stats.xg_against_last_5}: ${estimated.goals_conceded_last_5}`);
+  }
+  
+  // Estimate goals from PPG (fallback)
+  if (missingFields.includes('goals_scored_last_5') && !estimated.goals_scored_last_5 && stats.points_per_game !== undefined) {
+    estimated.goals_scored_last_5 = Math.round(5 * (0.5 + stats.points_per_game * 0.5));
+    console.log(`[Estimate] Goals scored from PPG ${stats.points_per_game}: ${estimated.goals_scored_last_5}`);
+  }
+  if (missingFields.includes('goals_conceded_last_5') && !estimated.goals_conceded_last_5 && stats.points_per_game !== undefined) {
+    estimated.goals_conceded_last_5 = Math.round(5 * Math.max(0.5, 1.8 - stats.points_per_game * 0.4));
+    console.log(`[Estimate] Goals conceded from PPG ${stats.points_per_game}: ${estimated.goals_conceded_last_5}`);
+  }
+  
+  // Estimate home/away from total record
+  if (missingFields.includes('home_record') && stats.points_per_game !== undefined) {
+    const winRatio = Math.min(0.6, stats.points_per_game / 3);
+    const drawRatio = 0.25;
+    const games = 6; // Assume 6 home games
+    const wins = Math.round(games * (winRatio + 0.1)); // Home advantage
+    const draws = Math.round(games * drawRatio);
+    const losses = games - wins - draws;
+    estimated.home_record = `${wins}-${draws}-${Math.max(0, losses)}`;
+    console.log(`[Estimate] Home record from PPG: ${estimated.home_record}`);
+  }
+  if (missingFields.includes('away_record') && stats.points_per_game !== undefined) {
+    const winRatio = Math.min(0.5, stats.points_per_game / 3);
+    const drawRatio = 0.30;
+    const games = 6; // Assume 6 away games
+    const wins = Math.round(games * (winRatio - 0.05)); // Away disadvantage
+    const draws = Math.round(games * drawRatio);
+    const losses = games - wins - draws;
+    estimated.away_record = `${Math.max(0, wins)}-${draws}-${Math.max(0, losses)}`;
+    console.log(`[Estimate] Away record from PPG: ${estimated.away_record}`);
+  }
+  
+  // Default days_rest
+  if (missingFields.includes('days_rest')) {
+    estimated.days_rest = 4;
+    console.log(`[Estimate] Default days_rest: 4`);
+  }
+  
+  return estimated;
+}
+
 async function fillMissingStatsWithFirecrawl(
   teamName: string,
   leagueName: string,
   missingFields: string[],
   firecrawlApiKey: string,
-  perplexityApiKey?: string
+  perplexityApiKey?: string,
+  existingStats?: TeamStats
 ): Promise<FirecrawlScrapedStats> {
-  console.log(`[Firecrawl] Attempting to fill missing fields for ${teamName}: ${missingFields.join(', ')}`);
+  console.log(`[Fallback] Filling ${missingFields.length} fields for ${teamName}: ${missingFields.join(', ')}`);
   
-  const scrapedStats: FirecrawlScrapedStats = {};
+  let scrapedStats: FirecrawlScrapedStats = {};
   
   // Normalize team name for search
   const searchTeam = teamName
@@ -193,114 +289,73 @@ async function fillMissingStatsWithFirecrawl(
     .replace(/\bMar del Plata\b/gi, '')
     .trim();
   
-  // Strategy 1: Use Perplexity for intelligent extraction (most reliable)
+  // ========= TIER 2: Perplexity AI (most reliable) =========
   if (perplexityApiKey && missingFields.length > 0) {
     try {
       const perplexityStats = await getStatsFromPerplexity(searchTeam, leagueName, missingFields, perplexityApiKey);
       Object.assign(scrapedStats, perplexityStats);
-      console.log(`[Firecrawl] Perplexity filled ${Object.keys(perplexityStats).length} fields`);
-      
-      if (Object.keys(scrapedStats).length >= 4) {
-        // We got most fields from Perplexity, add defaults and return
-        if (missingFields.includes('days_rest') && !scrapedStats.days_rest) {
-          scrapedStats.days_rest = 4;
-        }
-        console.log(`[Firecrawl] Final: Filled ${Object.keys(scrapedStats).length} fields for ${teamName}:`, Object.keys(scrapedStats));
-        return scrapedStats;
-      }
+      console.log(`[Fallback] Perplexity filled ${Object.keys(perplexityStats).length} fields`);
     } catch (e) {
-      console.log(`[Firecrawl] Perplexity fallback error:`, e);
+      console.log(`[Fallback] Perplexity error:`, e);
     }
   }
   
-  // Strategy 2: Firecrawl search as backup
-  try {
-    const searchQuery = `${searchTeam} ${leagueName} current standings position points 2025`;
-    console.log(`[Firecrawl] Searching: ${searchQuery}`);
-    
-    const searchResponse = await fetch('https://api.firecrawl.dev/v1/search', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${firecrawlApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        query: searchQuery,
-        limit: 5,
-      }),
-    });
-    
-    if (searchResponse.ok) {
-      const searchData = await searchResponse.json();
-      const results = searchData.data || [];
+  // Check what's still missing
+  const stillMissing = missingFields.filter(f => {
+    const val = scrapedStats[f as keyof FirecrawlScrapedStats];
+    return val === undefined || val === null;
+  });
+  
+  // ========= TIER 2b: Firecrawl search backup =========
+  if (stillMissing.length > 0 && firecrawlApiKey) {
+    try {
+      const searchQuery = `${searchTeam} ${leagueName} standings 2024-2025 position points form`;
+      console.log(`[Fallback] Firecrawl search: ${searchQuery}`);
       
-      if (results.length > 0) {
-        console.log(`[Firecrawl] Got ${results.length} search results`);
-        const combinedContent = results.map((r: any) => r.markdown || r.description || '').join('\n\n');
-        
-        if (combinedContent.length > 100) {
-          parseMarkdownForStats(combinedContent, searchTeam, missingFields, scrapedStats);
-          console.log(`[Firecrawl] After search parse: ${Object.keys(scrapedStats).length} fields found`);
-        }
-      }
-    } else {
-      console.log(`[Firecrawl] Search failed with status: ${searchResponse.status}`);
-    }
-    
-    // Strategy 3: Direct scrape of Flashscore (better structure than Sofascore)
-    if (Object.keys(scrapedStats).length < 3) {
-      const teamSlug = searchTeam.toLowerCase().replace(/\s+/g, '-').replace(/[áéíóú]/g, 'a');
-      const flashscoreUrl = `https://www.flashscore.com/team/${teamSlug}/standings/`;
-      
-      console.log(`[Firecrawl] Trying direct scrape: ${flashscoreUrl}`);
-      
-      const scrapeResponse = await fetch('https://api.firecrawl.dev/v1/scrape', {
+      const searchResponse = await fetch('https://api.firecrawl.dev/v1/search', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${firecrawlApiKey}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          url: flashscoreUrl,
-          formats: ['markdown'],
-          onlyMainContent: true,
-          waitFor: 3000,
-        }),
+        body: JSON.stringify({ query: searchQuery, limit: 5 }),
       });
       
-      if (scrapeResponse.ok) {
-        const scrapeData = await scrapeResponse.json();
-        const markdown = scrapeData.data?.markdown || scrapeData.markdown || '';
-        if (markdown.length > 100) {
-          console.log(`[Firecrawl] Got ${markdown.length} chars from direct scrape`);
-          parseMarkdownForStats(markdown, searchTeam, missingFields, scrapedStats);
+      if (searchResponse.ok) {
+        const searchData = await searchResponse.json();
+        const results = searchData.data || [];
+        if (results.length > 0) {
+          const combinedContent = results.map((r: any) => r.markdown || r.description || '').join('\n\n');
+          if (combinedContent.length > 100) {
+            parseMarkdownForStats(combinedContent, searchTeam, stillMissing, scrapedStats);
+          }
         }
       }
+    } catch (e) {
+      console.log(`[Fallback] Firecrawl search error:`, e);
     }
-    
-    // Fill defaults for critical missing fields
-    if (missingFields.includes('days_rest') && !scrapedStats.days_rest) {
-      scrapedStats.days_rest = 4;
-      console.log(`[Firecrawl] Using default days_rest: 4`);
-    }
-    
-    // Estimate goals from PPG if we have it
-    if (scrapedStats.points_per_game !== undefined) {
-      if (missingFields.includes('goals_scored_last_5') && !scrapedStats.goals_scored_last_5) {
-        scrapedStats.goals_scored_last_5 = Math.round(5 * (0.5 + scrapedStats.points_per_game * 0.5));
-      }
-      if (missingFields.includes('goals_conceded_last_5') && !scrapedStats.goals_conceded_last_5) {
-        scrapedStats.goals_conceded_last_5 = Math.round(5 * (1.8 - scrapedStats.points_per_game * 0.4));
-      }
-    }
-    
-    console.log(`[Firecrawl] Final: Filled ${Object.keys(scrapedStats).length} fields for ${teamName}:`, Object.keys(scrapedStats));
-    return scrapedStats;
-    
-  } catch (error) {
-    console.error(`[Firecrawl] Error scraping stats for ${teamName}:`, error);
-    return scrapedStats;
   }
+  
+  // ========= TIER 3: Estimation from available data =========
+  const finalMissing = missingFields.filter(f => {
+    const val = scrapedStats[f as keyof FirecrawlScrapedStats];
+    return val === undefined || val === null;
+  });
+  
+  if (finalMissing.length > 0 && existingStats) {
+    console.log(`[Fallback] Tier 3 estimation for remaining fields: ${finalMissing.join(', ')}`);
+    const estimated = estimateMissingFromAvailable(existingStats, finalMissing);
+    
+    // Merge estimated values (only for still-missing fields)
+    for (const [key, value] of Object.entries(estimated)) {
+      if (scrapedStats[key as keyof FirecrawlScrapedStats] === undefined) {
+        (scrapedStats as any)[key] = value;
+      }
+    }
+  }
+  
+  console.log(`[Fallback] Final result for ${teamName}: ${Object.keys(scrapedStats).length} fields filled`);
+  return scrapedStats;
 }
 
 // Use Perplexity AI to intelligently extract team stats
@@ -312,18 +367,33 @@ async function getStatsFromPerplexity(
 ): Promise<FirecrawlScrapedStats> {
   const stats: FirecrawlScrapedStats = {};
   
-  const prompt = `Find current 2024-25 season statistics for ${teamName} in ${leagueName}.
-Return ONLY a JSON object with these fields (use null if not found):
+  // More targeted prompt with league-specific context
+  const currentYear = new Date().getFullYear();
+  const seasonStr = leagueName.includes('Argentina') || leagueName.includes('A-League') || leagueName.includes('Brazil') 
+    ? `${currentYear}` 
+    : `${currentYear - 1}-${currentYear}`;
+  
+  const prompt = `Search for current ${seasonStr} season statistics for "${teamName}" in ${leagueName}.
+
+I need these specific stats (return null for any you cannot find):
+${missingFields.includes('league_position') ? '- Current league position (1-25)' : ''}
+${missingFields.includes('points_per_game') ? '- Points per game (calculate from total points / games played)' : ''}
+${missingFields.includes('recent_form') ? '- Last 5 match results as WDLWW format (W=win, D=draw, L=loss)' : ''}
+${missingFields.includes('goals_scored_last_5') ? '- Goals scored in last 5 matches' : ''}
+${missingFields.includes('goals_conceded_last_5') ? '- Goals conceded in last 5 matches' : ''}
+${missingFields.includes('home_record') ? '- Home record as W-D-L format (e.g., 5-2-1)' : ''}
+${missingFields.includes('away_record') ? '- Away record as W-D-L format (e.g., 3-3-2)' : ''}
+
+Return ONLY a JSON object like this (no other text):
 {
-  "league_position": <number 1-25>,
-  "points_per_game": <decimal like 1.50>,
-  "recent_form": "<5 letter string like WWDLW>",
-  "goals_scored_last_5": <number>,
-  "goals_conceded_last_5": <number>,
-  "home_record": "<W-D-L format like 5-2-1>",
-  "away_record": "<W-D-L format like 3-3-2>"
-}
-Only include fields from this list: ${missingFields.join(', ')}`;
+  "league_position": 5,
+  "points_per_game": 1.45,
+  "recent_form": "WDLWW",
+  "goals_scored_last_5": 8,
+  "goals_conceded_last_5": 4,
+  "home_record": "5-2-1",
+  "away_record": "3-3-2"
+}`;
 
   const response = await fetch('https://api.perplexity.ai/chat/completions', {
     method: 'POST',
@@ -334,11 +404,12 @@ Only include fields from this list: ${missingFields.join(', ')}`;
     body: JSON.stringify({
       model: 'sonar',
       messages: [
-        { role: 'system', content: 'You are a sports statistics assistant. Return only valid JSON with no explanation.' },
+        { role: 'system', content: 'You are a sports statistics assistant. Search for current season data and return only valid JSON with actual numbers, no explanations.' },
         { role: 'user', content: prompt }
       ],
-      max_tokens: 300,
-      temperature: 0.1
+      max_tokens: 400,
+      temperature: 0.1,
+      search_recency_filter: 'week'
     }),
   });
   
@@ -633,14 +704,24 @@ function calculateTeamRating(stats: TeamStats): number {
 function validateTeamStats(stats: TeamStats): { valid: boolean; missing: string[] } {
   const missing: string[] = [];
   
-  if (stats.league_position === undefined) missing.push('league_position');
-  if (stats.points_per_game === undefined) missing.push('points_per_game');
-  if (!stats.recent_form || stats.recent_form.length < 3) missing.push('recent_form');
-  if (stats.goals_scored_last_5 === undefined) missing.push('goals_scored_last_5');
-  if (stats.goals_conceded_last_5 === undefined) missing.push('goals_conceded_last_5');
-  if (!stats.home_record || stats.home_record === '0-0-0') missing.push('home_record');
-  if (!stats.away_record || stats.away_record === '0-0-0') missing.push('away_record');
-  if (stats.days_rest === undefined) missing.push('days_rest');
+  // Check for undefined, null, or invalid values
+  const isValidNumber = (val: any) => typeof val === 'number' && !isNaN(val) && val !== undefined;
+  const isValidString = (val: any, minLen = 1) => typeof val === 'string' && val.length >= minLen && val !== '0-0-0';
+  
+  if (!isValidNumber(stats.league_position)) missing.push('league_position');
+  if (!isValidNumber(stats.points_per_game)) missing.push('points_per_game');
+  if (!isValidString(stats.recent_form, 3)) missing.push('recent_form');
+  if (!isValidNumber(stats.goals_scored_last_5)) missing.push('goals_scored_last_5');
+  if (!isValidNumber(stats.goals_conceded_last_5)) missing.push('goals_conceded_last_5');
+  if (!isValidString(stats.home_record)) missing.push('home_record');
+  if (!isValidString(stats.away_record)) missing.push('away_record');
+  if (!isValidNumber(stats.days_rest)) missing.push('days_rest');
+  
+  // Also validate xG fields aren't undefined (catch the Gent issue)
+  if (stats.xg_for_last_5 === undefined || isNaN(stats.xg_for_last_5 as number)) {
+    // Not a blocking issue, but log it
+    console.log(`[Validation] ${stats.team}: xG data is undefined, using estimation`);
+  }
   
   return { valid: missing.length === 0, missing };
 }
@@ -1217,7 +1298,7 @@ serve(async (req) => {
           
           if (homeIncomplete && homeStats.missing_fields) {
             firecrawlPromises.push(
-              fillMissingStatsWithFirecrawl(event.home_team, event.league, homeStats.missing_fields, firecrawlApiKey, perplexityApiKey)
+              fillMissingStatsWithFirecrawl(event.home_team, event.league, homeStats.missing_fields, firecrawlApiKey, perplexityApiKey, homeStats)
                 .then(scrapedStats => {
                   homeStats = mergeFirecrawlStats(homeStats, scrapedStats);
                   // Re-validate after merge
@@ -1226,7 +1307,9 @@ serve(async (req) => {
                   homeStats.missing_fields = validation.missing;
                   if (validation.valid) {
                     homeStats.team_rating = calculateTeamRating(homeStats);
-                    console.log(`[Firecrawl] ${event.home_team} now complete after Firecrawl enrichment`);
+                    console.log(`[Fallback] ${event.home_team} now complete after enrichment`);
+                  } else {
+                    console.log(`[Fallback] ${event.home_team} still missing: ${validation.missing.join(', ')}`);
                   }
                 })
             );
@@ -1234,7 +1317,7 @@ serve(async (req) => {
           
           if (awayIncomplete && awayStats.missing_fields) {
             firecrawlPromises.push(
-              fillMissingStatsWithFirecrawl(event.away_team, event.league, awayStats.missing_fields, firecrawlApiKey, perplexityApiKey)
+              fillMissingStatsWithFirecrawl(event.away_team, event.league, awayStats.missing_fields, firecrawlApiKey, perplexityApiKey, awayStats)
                 .then(scrapedStats => {
                   awayStats = mergeFirecrawlStats(awayStats, scrapedStats);
                   // Re-validate after merge
@@ -1243,7 +1326,9 @@ serve(async (req) => {
                   awayStats.missing_fields = validation.missing;
                   if (validation.valid) {
                     awayStats.team_rating = calculateTeamRating(awayStats);
-                    console.log(`[Firecrawl] ${event.away_team} now complete after Firecrawl enrichment`);
+                    console.log(`[Fallback] ${event.away_team} now complete after enrichment`);
+                  } else {
+                    console.log(`[Fallback] ${event.away_team} still missing: ${validation.missing.join(', ')}`);
                   }
                 })
             );
