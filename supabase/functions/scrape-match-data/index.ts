@@ -6,6 +6,68 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+interface ScrapedLayer {
+  layer: string;
+  sources: Array<{ title: string; url: string; content: string }>;
+}
+
+interface MatchData {
+  match: string;
+  sport: string;
+  league: string;
+  start_time: string;
+  odds: Array<{
+    market: string;
+    odds: number;
+    implied_probability: string;
+    bookmaker: string;
+  }>;
+  data_layers: ScrapedLayer[];
+}
+
+async function scrapeLayer(
+  firecrawlApiKey: string,
+  matchKey: string,
+  league: string,
+  layerName: string,
+  searchTerms: string
+): Promise<ScrapedLayer> {
+  const query = `${matchKey} ${league} ${searchTerms}`;
+  
+  try {
+    const response = await fetch('https://api.firecrawl.dev/v1/search', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${firecrawlApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        query,
+        limit: 3,
+        tbs: 'qdr:w', // Last week
+        scrapeOptions: { formats: ['markdown'] }
+      }),
+    });
+
+    if (!response.ok) {
+      console.error(`Firecrawl failed for ${layerName}: ${response.status}`);
+      return { layer: layerName, sources: [] };
+    }
+
+    const data = await response.json();
+    const sources = data.data?.map((result: any) => ({
+      title: result.title || '',
+      url: result.url || '',
+      content: result.markdown?.substring(0, 1500) || result.description || ''
+    })) || [];
+
+    return { layer: layerName, sources };
+  } catch (error) {
+    console.error(`Error scraping ${layerName}:`, error);
+    return { layer: layerName, sources: [] };
+  }
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -47,89 +109,97 @@ serve(async (req) => {
 
     console.log(`Found ${events.length} events to scrape across all leagues`);
 
-    // Scrape data for each match - process all events
-    const scrapedResults: any[] = [];
+    // Define data layers with their search terms
+    const dataLayers = [
+      { name: 'PERFORMANCE & FORM', terms: 'recent form last 5 matches results statistics' },
+      { name: 'LINEUPS & INJURIES', terms: 'team news injuries suspensions confirmed lineup squad' },
+      { name: 'SCHEDULING & FATIGUE', terms: 'fixture congestion rest days travel schedule' },
+      { name: 'WEATHER & VENUE', terms: 'weather forecast stadium pitch conditions' },
+      { name: 'REFEREE TENDENCIES', terms: 'referee statistics cards fouls penalties official' },
+      { name: 'MARKET SENTIMENT', terms: 'betting odds prediction tips expert picks consensus' },
+    ];
+
+    const scrapedResults: MatchData[] = [];
 
     for (const event of events) {
       const matchKey = `${event.home_team} vs ${event.away_team}`;
-      const searchQuery = `${event.home_team} vs ${event.away_team} ${event.league} preview injuries team news form`;
+      console.log(`Scraping: ${matchKey}`);
 
-      console.log(`Scraping: ${searchQuery}`);
-
-      try {
-        const response = await fetch('https://api.firecrawl.dev/v1/search', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${firecrawlApiKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            query: searchQuery,
-            limit: 5,
-            tbs: 'qdr:w',
-            scrapeOptions: { formats: ['markdown'] }
-          }),
-        });
-
-        if (!response.ok) {
-          console.error(`Firecrawl failed for ${matchKey}: ${response.status}`);
-          continue;
+      // Get best odds for this event
+      const bestOdds: Record<string, { odds: number; bookmaker: string }> = {};
+      for (const market of event.markets || []) {
+        const key = `${market.market_type}_${market.selection}`;
+        const odds = parseFloat(market.odds_decimal);
+        if (!bestOdds[key] || odds > bestOdds[key].odds) {
+          bestOdds[key] = { odds, bookmaker: market.bookmaker };
         }
-
-        const data = await response.json();
-        const content = data.data?.map((result: any) => ({
-          title: result.title,
-          url: result.url,
-          content: result.markdown?.substring(0, 2000) || result.description
-        })) || [];
-
-        // Get best odds for this event
-        const bestOdds: Record<string, { odds: number; bookmaker: string }> = {};
-        for (const market of event.markets || []) {
-          const key = `${market.market_type}_${market.selection}`;
-          const odds = parseFloat(market.odds_decimal);
-          if (!bestOdds[key] || odds > bestOdds[key].odds) {
-            bestOdds[key] = { odds, bookmaker: market.bookmaker };
-          }
-        }
-
-        scrapedResults.push({
-          match: matchKey,
-          sport: event.sport,
-          league: event.league,
-          start_time: event.start_time_aedt,
-          odds: Object.entries(bestOdds).map(([key, data]) => ({
-            market: key,
-            odds: data.odds,
-            implied_probability: (1 / data.odds).toFixed(4),
-            bookmaker: data.bookmaker
-          })),
-          scraped_data: content
-        });
-
-      } catch (error) {
-        console.error(`Error scraping ${matchKey}:`, error);
       }
+
+      // Scrape each data layer in parallel for this match
+      const layerPromises = dataLayers.map(layer => 
+        scrapeLayer(firecrawlApiKey, matchKey, event.league, layer.name, layer.terms)
+      );
+
+      const scrapedLayers = await Promise.all(layerPromises);
+
+      scrapedResults.push({
+        match: matchKey,
+        sport: event.sport,
+        league: event.league,
+        start_time: event.start_time_aedt,
+        odds: Object.entries(bestOdds).map(([key, data]) => ({
+          market: key,
+          odds: data.odds,
+          implied_probability: (1 / data.odds * 100).toFixed(1) + '%',
+          bookmaker: data.bookmaker
+        })),
+        data_layers: scrapedLayers
+      });
     }
 
-    // Format as copyable text for Perplexity
-    const formattedOutput = `# Sports Betting Data - ${new Date().toLocaleString('en-AU', { timeZone: 'Australia/Sydney' })}
+    // Format as institutional-grade output for Perplexity
+    const timestamp = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Sydney' });
+    
+    const formattedOutput = `========================================================
+INSTITUTIONAL SPORTS BETTING DATA EXPORT
+Timestamp: ${timestamp} AEDT
+Events: ${scrapedResults.length} matches | Window: Next ${window_hours} hours
+========================================================
 
-${scrapedResults.map(match => `
-## ${match.match}
-**Sport:** ${match.sport} | **League:** ${match.league}
-**Start Time (AEDT):** ${match.start_time}
+${scrapedResults.map((match, idx) => `
+--------------------------------------------------------
+EVENT ${idx + 1}: ${match.match}
+--------------------------------------------------------
+Sport: ${match.sport.toUpperCase()} | League: ${match.league}
+Start Time (AEDT): ${new Date(match.start_time).toLocaleString('en-AU', { timeZone: 'Australia/Sydney', weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
 
-### Current Odds
-${match.odds.map((o: any) => `- ${o.market}: ${o.odds} (implied: ${(parseFloat(o.implied_probability) * 100).toFixed(1)}%) @ ${o.bookmaker}`).join('\n')}
+=== MARKET & ODDS DATA ===
+${match.odds.map(o => `• ${o.market}: ${o.odds.toFixed(2)} (Implied: ${o.implied_probability}) @ ${o.bookmaker}`).join('\n')}
 
-### Scraped Research Data
-${match.scraped_data.map((s: any) => `
-**${s.title}**
+${match.data_layers.map(layer => `
+=== ${layer.layer} ===
+${layer.sources.length > 0 
+  ? layer.sources.map(s => `
+[${s.title}]
 Source: ${s.url}
 ${s.content}
-`).join('\n---\n')}
-`).join('\n\n========================================\n\n')}`;
+`).join('\n---\n')
+  : 'No data available for this layer.'
+}`).join('\n')}
+`).join('\n\n========================================================\n\n')}
+
+========================================================
+END OF DATA EXPORT
+========================================================
+
+INSTRUCTIONS FOR ANALYSIS:
+Use this data with the institutional betting system prompt to:
+1. Calculate Model Probability for each selection
+2. Compute Edge (Model − Implied)
+3. Generate Bet Score (0-100) per the framework
+4. Apply fractional Kelly staking (25% Kelly, max 1.5% bankroll per bet)
+5. Return only bets with Bet Score ≥55 and positive EV
+`;
 
     return new Response(
       JSON.stringify({
