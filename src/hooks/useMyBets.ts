@@ -34,14 +34,23 @@ export function useMyBets() {
   }, [userId]);
 
   const requireSession = async () => {
-    const { data: { session }, error } = await supabase.auth.getSession();
+    // getSession() is fast but may return a cached session; refreshSession() will
+    // validate/refresh tokens when the cached JWT is stale/corrupted.
+    const { data: sessionData, error } = await supabase.auth.getSession();
     if (error) throw error;
-    if (!session?.user) {
+
+    if (sessionData.session?.user) return sessionData.session;
+
+    // Attempt a token refresh (fixes cases where UI thinks you're logged in but
+    // the access token is invalid, causing RLS failures).
+    const { data: refreshed, error: refreshError } = await supabase.auth.refreshSession();
+    if (refreshError || !refreshed.session?.user) {
       // Ensure we don't keep a stale userId around
       setUserId(null);
       return null;
     }
-    return session;
+
+    return refreshed.session;
   };
 
   const requireUserId = async () => {
@@ -52,14 +61,14 @@ export function useMyBets() {
   const requireLoginToast = () => {
     toast({
       title: "Login Required",
-      description: "Please sign in again to save bets.",
+      description: "Your session expired. Please sign in again to save bets.",
       variant: "destructive",
     });
   };
 
   const isRlsAuthError = (err: unknown) => {
-    const msg = err instanceof Error ? err.message : '';
-    return msg.includes('row-level security') || msg.includes('42501');
+    const anyErr = err as any;
+    return anyErr?.code === '42501' || String(anyErr?.message || '').includes('row-level security');
   };
 
   const loadBetsFromDatabase = async () => {
