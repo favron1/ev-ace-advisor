@@ -529,19 +529,19 @@ export default function FindBets() {
                                 </div>
                               </TableCell>
                               <TableCell className="text-center">
-                                <span className="font-mono font-bold">{bet.odds_decimal.toFixed(2)}</span>
+                                <span className="font-mono font-bold">{(bet.odds_decimal ?? 0).toFixed(2)}</span>
                               </TableCell>
                               <TableCell className="text-center">
                                 {getConfidenceBadge(bet.confidence || 'low')}
                               </TableCell>
                               <TableCell className="text-center">
-                                {getBetScoreBadge(bet.bet_score)}
+                                {getBetScoreBadge(bet.bet_score ?? 0)}
                               </TableCell>
                               <TableCell className="text-center">
-                                {getEdgeBadge(bet.edge)}
+                                {getEdgeBadge(bet.edge ?? 0)}
                               </TableCell>
                               <TableCell className="text-center">
-                                <span className="font-mono font-bold">{bet.recommended_stake_units.toFixed(1)}u</span>
+                                <span className="font-mono font-bold">{(bet.recommended_stake_units ?? 0).toFixed(1)}u</span>
                               </TableCell>
                               <TableCell>
                                 <p className="text-sm text-muted-foreground max-w-xs truncate" title={bet.rationale}>
