@@ -86,6 +86,9 @@ interface TeamStats {
   contextual_tags?: string[];
   stats_complete: boolean;
   missing_fields?: string[];
+  // NEW v3.1: Data quality tiering
+  data_quality?: 'high' | 'medium' | 'low';
+  quality_score?: number; // 0-100
 }
 
 interface MarketOdds {
@@ -701,29 +704,71 @@ function calculateTeamRating(stats: TeamStats): number {
   return Math.round(baseRating + positionBonus + ppgBonus + goalDiffBonus + xgDiffBonus + npxgBonus + bigChanceBonus + formBonus + fatiguePenalty + injuryPenalty);
 }
 
-function validateTeamStats(stats: TeamStats): { valid: boolean; missing: string[] } {
+// Tiered validation - critical fields must exist, soft fields affect data quality score
+function validateTeamStats(stats: TeamStats): { 
+  valid: boolean; 
+  missing: string[]; 
+  dataQuality: 'high' | 'medium' | 'low';
+  qualityScore: number; // 0-100
+} {
   const missing: string[] = [];
   
   // Check for undefined, null, or invalid values
   const isValidNumber = (val: any) => typeof val === 'number' && !isNaN(val) && val !== undefined;
   const isValidString = (val: any, minLen = 1) => typeof val === 'string' && val.length >= minLen && val !== '0-0-0';
   
-  if (!isValidNumber(stats.league_position)) missing.push('league_position');
-  if (!isValidNumber(stats.points_per_game)) missing.push('points_per_game');
-  if (!isValidString(stats.recent_form, 3)) missing.push('recent_form');
-  if (!isValidNumber(stats.goals_scored_last_5)) missing.push('goals_scored_last_5');
-  if (!isValidNumber(stats.goals_conceded_last_5)) missing.push('goals_conceded_last_5');
-  if (!isValidString(stats.home_record)) missing.push('home_record');
-  if (!isValidString(stats.away_record)) missing.push('away_record');
-  if (!isValidNumber(stats.days_rest)) missing.push('days_rest');
+  // CRITICAL fields (carry most predictive power - exclude if missing)
+  const criticalFields = {
+    league_position: isValidNumber(stats.league_position),
+    points_per_game: isValidNumber(stats.points_per_game),
+    goals_scored_last_5: isValidNumber(stats.goals_scored_last_5),
+    goals_conceded_last_5: isValidNumber(stats.goals_conceded_last_5),
+  };
   
-  // Also validate xG fields aren't undefined (catch the Gent issue)
-  if (stats.xg_for_last_5 === undefined || isNaN(stats.xg_for_last_5 as number)) {
-    // Not a blocking issue, but log it
-    console.log(`[Validation] ${stats.team}: xG data is undefined, using estimation`);
+  // SOFT fields (nice to have - allow 1-2 missing with reduced confidence)
+  const softFields = {
+    recent_form: isValidString(stats.recent_form, 3),
+    home_record: isValidString(stats.home_record),
+    away_record: isValidString(stats.away_record),
+    days_rest: isValidNumber(stats.days_rest),
+  };
+  
+  // Track missing fields
+  for (const [field, valid] of Object.entries(criticalFields)) {
+    if (!valid) missing.push(field);
+  }
+  for (const [field, valid] of Object.entries(softFields)) {
+    if (!valid) missing.push(field);
   }
   
-  return { valid: missing.length === 0, missing };
+  // Calculate data quality score
+  const criticalPresent = Object.values(criticalFields).filter(Boolean).length;
+  const softPresent = Object.values(softFields).filter(Boolean).length;
+  const criticalTotal = Object.keys(criticalFields).length;
+  const softTotal = Object.keys(softFields).length;
+  
+  // Critical fields worth 70%, soft fields worth 30%
+  const qualityScore = Math.round((criticalPresent / criticalTotal) * 70 + (softPresent / softTotal) * 30);
+  
+  // Determine quality tier
+  let dataQuality: 'high' | 'medium' | 'low';
+  if (qualityScore >= 85) dataQuality = 'high';
+  else if (qualityScore >= 60) dataQuality = 'medium';
+  else dataQuality = 'low';
+  
+  // Valid if ALL critical fields present AND at least 2 soft fields
+  const allCriticalPresent = criticalPresent === criticalTotal;
+  const enoughSoftFields = softPresent >= 2;
+  const valid = allCriticalPresent && enoughSoftFields;
+  
+  // Log validation result
+  if (!valid) {
+    const criticalMissing = Object.entries(criticalFields).filter(([_, v]) => !v).map(([k]) => k);
+    const softMissing = Object.entries(softFields).filter(([_, v]) => !v).map(([k]) => k);
+    console.log(`[Validation] ${stats.team}: Critical missing: [${criticalMissing.join(', ')}], Soft missing: [${softMissing.join(', ')}], Score: ${qualityScore}`);
+  }
+  
+  return { valid, missing, dataQuality, qualityScore };
 }
 
 // NEW: Infer player position from name/context
@@ -1207,6 +1252,8 @@ async function fetchTeamStats(
     const validation = validateTeamStats(stats);
     stats.stats_complete = validation.valid;
     stats.missing_fields = validation.missing;
+    stats.data_quality = validation.dataQuality;
+    stats.quality_score = validation.qualityScore;
 
   } catch (error) {
     console.error(`Error fetching stats for ${teamName}:`, error);
@@ -1484,11 +1531,19 @@ All ${allResults.length} events had missing data. Cannot make reliable recommend
   Injuries (Starters): ${startersMissing.length > 0 ? startersMissing.map(i => `${i.player} [${i.position}]`).join(', ') : 'None'}
   Injuries (Rotation): ${rotationMissing.length > 0 ? rotationMissing.map(i => `${i.player} [${i.position}]`).join(', ') : 'None'}
   Missing by Position: DEF: ${stats.missing_by_position?.DEF || 0}, MID: ${stats.missing_by_position?.MID || 0}, FWD: ${stats.missing_by_position?.FWD || 0}
+  📊 Data Quality: ${stats.data_quality?.toUpperCase() || 'N/A'} (${stats.quality_score || 0}%)${stats.missing_fields?.length ? ` | Missing: ${stats.missing_fields.join(', ')}` : ''}
   ${stats.qualitative_tags?.length ? `Tags: ${stats.qualitative_tags.join(', ')}` : ''}`;
   };
 
   const steamMoves = match.odds.filter(o => o.steam_move);
   const sharpBooks = match.odds.filter(o => o.is_sharp_book);
+  
+  // Calculate combined data quality and stake modifier
+  const homeQuality = match.home_team_stats.quality_score || 0;
+  const awayQuality = match.away_team_stats.quality_score || 0;
+  const combinedQuality = Math.round((homeQuality + awayQuality) / 2);
+  const stakeModifier = combinedQuality >= 85 ? '100%' : combinedQuality >= 70 ? '75%' : combinedQuality >= 55 ? '50%' : '25%';
+  const qualityWarning = combinedQuality < 70 ? `⚠️ REDUCED STAKE RECOMMENDED: ${stakeModifier} of calculated Kelly due to data gaps` : '';
 
   return `
 ================================================================
@@ -1497,6 +1552,8 @@ EVENT ${idx + 1}: ${match.match}
 Sport: ${match.sport.toUpperCase()} | League: ${match.league} (ID: ${match.league_id})
 Kickoff: ${formattedDate} AEDT
 Rating Differential: ${(match.home_team_stats.team_rating || 1500) - (match.away_team_stats.team_rating || 1500)} (positive favors home)
+Data Quality: ${combinedQuality}% | Stake Modifier: ${stakeModifier}
+${qualityWarning}
 ${match.match_contextual_tags?.length ? `Match Tags: ${match.match_contextual_tags.join(', ')}` : ''}
 
 --- TEAM STATS ---
@@ -1546,12 +1603,19 @@ CONTEXTUAL FACTORS (apply as probability nudges):
 - Fatigue mismatch: Adjust fresh team +3-5%
 - Injury crisis: Reduce affected team probability -5-10%
 
+DATA QUALITY STAKE ADJUSTMENT (apply AFTER calculating Kelly):
+- Data Quality ≥85%: Use 100% of calculated stake
+- Data Quality 70-84%: Use 75% of calculated stake  
+- Data Quality 55-69%: Use 50% of calculated stake (thin edges not trustworthy)
+- Data Quality <55%: Use 25% or NO-BET (too many missing features)
+
 CORRELATION RULES:
 - Maximum 2 bets per league per window
 - Maximum 3 bets in same 2-hour kickoff cluster
 - Apply -5 correlation penalty if violated
 
 Only recommend bets with Bet Score ≥70 and positive expected value.
+Apply stake modifiers shown for each event based on data quality.
 ========================================================
 END OF DATA EXPORT
 ========================================================
