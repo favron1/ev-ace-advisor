@@ -321,11 +321,33 @@ END OF DATA EXPORT
 ========================================================
 `;
 
+    // Generate summary for quick reference
+    const leagues = [...new Set(scrapedResults.map(m => m.league))];
+    const summary = `${scrapedResults.length} matches across ${leagues.length} leagues: ${leagues.join(', ')}`;
+
+    // Save to scrape_history table
+    const { error: saveError } = await supabase
+      .from('scrape_history')
+      .insert({
+        sports,
+        leagues,
+        window_hours,
+        matches_count: scrapedResults.length,
+        summary,
+        formatted_data: formattedOutput,
+        raw_data: scrapedResults
+      });
+
+    if (saveError) {
+      console.error('Failed to save scrape history:', saveError);
+    }
+
     return new Response(
       JSON.stringify({
         matches_scraped: scrapedResults.length,
         formatted_data: formattedOutput,
-        raw_data: scrapedResults
+        raw_data: scrapedResults,
+        summary
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
