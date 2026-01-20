@@ -216,6 +216,37 @@ export default function FindBets() {
     });
   };
 
+  const getKickoffDisplay = (startTime: string) => {
+    if (!startTime) return { time: 'TBC', countdown: null };
+    
+    const kickoff = new Date(startTime);
+    const now = new Date();
+    const diffMs = kickoff.getTime() - now.getTime();
+    const diffHours = diffMs / (1000 * 60 * 60);
+    const diffMins = Math.floor(diffMs / (1000 * 60));
+    
+    const formattedTime = kickoff.toLocaleString('en-AU', {
+      timeZone: 'Australia/Sydney',
+      day: '2-digit',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    
+    if (diffHours < 0) {
+      return { time: formattedTime, countdown: 'LIVE' };
+    } else if (diffHours < 2) {
+      const hours = Math.floor(diffMins / 60);
+      const mins = diffMins % 60;
+      return { 
+        time: formattedTime, 
+        countdown: hours > 0 ? `${hours}h ${mins}m` : `${mins}m`
+      };
+    }
+    
+    return { time: formattedTime, countdown: null };
+  };
+
   const getBetScoreBadge = (score: number) => {
     if (score >= 85) return <Badge className="bg-profit text-white">{score}</Badge>;
     if (score >= 75) return <Badge className="bg-warning text-black">{score}</Badge>;
@@ -463,7 +494,8 @@ export default function FindBets() {
                     <Table>
                       <TableHeader>
                         <TableRow>
-                          <TableHead>Event</TableHead>
+                          <TableHead>Head to Head</TableHead>
+                          <TableHead>Kickoff</TableHead>
                           <TableHead>Selection</TableHead>
                           <TableHead className="text-center">Odds</TableHead>
                           <TableHead className="text-center">Confidence</TableHead>
@@ -474,40 +506,58 @@ export default function FindBets() {
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {results.recommended_bets.map((bet, idx) => (
-                          <TableRow key={idx} className={bet.confidence === 'high' ? 'bg-profit/5' : ''}>
-                            <TableCell>
-                              <div>
-                                <p className="font-medium text-sm">{bet.selection_label.split(' to ')[0] || bet.selection}</p>
-                                <p className="text-xs text-muted-foreground">{bet.league}</p>
-                                <p className="text-xs text-muted-foreground">{bet.bookmaker}</p>
-                              </div>
-                            </TableCell>
-                            <TableCell>
-                              <p className="font-medium">{bet.selection_label}</p>
-                            </TableCell>
-                            <TableCell className="text-center">
-                              <span className="font-mono font-bold">{bet.odds_decimal.toFixed(2)}</span>
-                            </TableCell>
-                            <TableCell className="text-center">
-                              {getConfidenceBadge(bet.confidence || 'low')}
-                            </TableCell>
-                            <TableCell className="text-center">
-                              {getBetScoreBadge(bet.bet_score)}
-                            </TableCell>
-                            <TableCell className="text-center">
-                              {getEdgeBadge(bet.edge)}
-                            </TableCell>
-                            <TableCell className="text-center">
-                              <span className="font-mono font-bold">{bet.recommended_stake_units.toFixed(1)}u</span>
-                            </TableCell>
-                            <TableCell>
-                              <p className="text-sm text-muted-foreground max-w-xs truncate">
-                                {bet.rationale}
-                              </p>
-                            </TableCell>
-                          </TableRow>
-                        ))}
+                        {results.recommended_bets.map((bet, idx) => {
+                          const kickoff = getKickoffDisplay(bet.start_time || '');
+                          return (
+                            <TableRow key={idx} className={bet.confidence === 'high' ? 'bg-profit/5' : ''}>
+                              <TableCell>
+                                <div>
+                                  <p className="font-medium text-sm">{bet.event_name || bet.selection_label.split(' to ')[0] || bet.selection}</p>
+                                  <p className="text-xs text-muted-foreground">{bet.league}</p>
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <div className="flex flex-col gap-1">
+                                  <span className="text-sm">{kickoff.time}</span>
+                                  {kickoff.countdown && (
+                                    <Badge 
+                                      variant={kickoff.countdown === 'LIVE' ? 'destructive' : 'secondary'}
+                                      className={kickoff.countdown === 'LIVE' ? 'animate-pulse w-fit' : 'w-fit'}
+                                    >
+                                      {kickoff.countdown === 'LIVE' ? '🔴 LIVE' : `⏱️ ${kickoff.countdown}`}
+                                    </Badge>
+                                  )}
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <div>
+                                  <p className="font-medium">{bet.selection_label}</p>
+                                  <p className="text-xs text-muted-foreground">{bet.bookmaker}</p>
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-center">
+                                <span className="font-mono font-bold">{bet.odds_decimal.toFixed(2)}</span>
+                              </TableCell>
+                              <TableCell className="text-center">
+                                {getConfidenceBadge(bet.confidence || 'low')}
+                              </TableCell>
+                              <TableCell className="text-center">
+                                {getBetScoreBadge(bet.bet_score)}
+                              </TableCell>
+                              <TableCell className="text-center">
+                                {getEdgeBadge(bet.edge)}
+                              </TableCell>
+                              <TableCell className="text-center">
+                                <span className="font-mono font-bold">{bet.recommended_stake_units.toFixed(1)}u</span>
+                              </TableCell>
+                              <TableCell>
+                                <p className="text-sm text-muted-foreground max-w-xs truncate" title={bet.rationale}>
+                                  {bet.rationale}
+                                </p>
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
                       </TableBody>
                     </Table>
                   </div>
