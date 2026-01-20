@@ -467,14 +467,26 @@ serve(async (req) => {
 
     console.log('STEP 4: Perplexity analysis complete');
 
-    // STEP 5: Validate and enforce limits (no longer filtering by bet_score since we always want bets)
+    // STEP 5: Validate and enforce limits - ONLY Bet Score >= 70 pass through
+    const MIN_BET_SCORE = 70;
     const maxDailyUnits = bankroll_units * max_daily_exposure_pct;
     const maxPerEventUnits = bankroll_units * max_per_event_exposure_pct;
     
     let totalStake = 0;
     const validatedBets: RecommendedBet[] = [];
+    const rejectedBets: { selection: string; bet_score: number; reason: string }[] = [];
 
     for (const bet of modelResponse.recommended_bets || []) {
+      // STRICT FILTER: Only bets with score >= 70 pass
+      if ((bet.bet_score || 0) < MIN_BET_SCORE) {
+        rejectedBets.push({ 
+          selection: bet.selection_label || bet.selection, 
+          bet_score: bet.bet_score || 0, 
+          reason: `Bet Score ${bet.bet_score} < ${MIN_BET_SCORE}` 
+        });
+        continue;
+      }
+      
       const cappedStake = Math.min(bet.recommended_stake_units || 0.5, maxPerEventUnits);
       if (totalStake + cappedStake > maxDailyUnits) continue;
       if (validatedBets.length >= max_bets) break;
@@ -491,6 +503,8 @@ serve(async (req) => {
         confidence: bet.confidence || (bet.bet_score >= 80 ? 'high' : bet.bet_score >= 65 ? 'medium' : 'low')
       });
     }
+
+    console.log(`STEP 5: ${rejectedBets.length} bets rejected (score < ${MIN_BET_SCORE}), ${validatedBets.length} passed`);
 
     console.log(`STEP 5: Validated ${validatedBets.length} bets`);
 
@@ -528,6 +542,7 @@ serve(async (req) => {
     return new Response(
       JSON.stringify({
         recommended_bets: validatedBets,
+        rejected_bets: rejectedBets,
         portfolio_summary: {
           total_stake_units: totalStake,
           bankroll_units,
@@ -536,7 +551,10 @@ serve(async (req) => {
         },
         events_analyzed: events.length,
         matches_scraped: Object.keys(scrapedData).length,
-        reason: validatedBets.length === 0 ? (modelResponse.reason || 'No bets met the 70+ bet score threshold') : undefined,
+        min_bet_score: MIN_BET_SCORE,
+        reason: validatedBets.length === 0 
+          ? `No bets met the ${MIN_BET_SCORE}+ bet score threshold. ${rejectedBets.length} bets were rejected.` 
+          : undefined,
         timestamp: new Date().toISOString()
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
