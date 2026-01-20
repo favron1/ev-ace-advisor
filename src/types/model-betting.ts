@@ -29,6 +29,8 @@ export interface RecommendedBet {
   market_id: string;
   sport: string;
   league: string;
+  event_name: string;
+  start_time: string;
   selection: string;
   selection_label: string;
   odds_decimal: number;

@@ -21,6 +21,8 @@ interface RecommendedBet {
   market_id: string;
   sport: string;
   league: string;
+  event_name: string;
+  start_time: string;
   selection: string;
   selection_label: string;
   odds_decimal: number;
@@ -429,9 +431,14 @@ serve(async (req) => {
       if (totalStake + cappedStake > maxDailyUnits) continue;
       if (validatedBets.length >= max_bets) break;
       
+      // Find event to get event_name and start_time
+      const event = events.find(e => e.id === bet.event_id);
+      
       totalStake += cappedStake;
       validatedBets.push({ 
         ...bet, 
+        event_name: event ? `${event.home_team} vs ${event.away_team}` : bet.selection_label,
+        start_time: event?.start_time_aedt || '',
         recommended_stake_units: cappedStake,
         confidence: bet.confidence || (bet.bet_score >= 80 ? 'high' : bet.bet_score >= 65 ? 'medium' : 'low')
       });
