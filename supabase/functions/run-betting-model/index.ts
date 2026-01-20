@@ -119,11 +119,11 @@ function buildTennisBetsFromOdds(
     const h2h = (event._raw_markets || []).filter((m: any) => m.market_type === 'h2h');
     if (h2h.length < 2) continue;
 
-    const selections = Array.from(new Set(h2h.map((m: any) => m.selection)));
+    const selections: string[] = Array.from(new Set(h2h.map((m: any) => String(m.selection))));
     if (selections.length !== 2) continue;
-    const [p1, p2] = selections;
+    const [p1, p2] = selections as [string, string];
 
-    const oddsFor = (name: string) => h2h
+    const oddsFor = (name: string): number[] => h2h
       .filter((m: any) => m.selection === name)
       .map((m: any) => Number(m.odds_decimal))
       .filter((o: number) => Number.isFinite(o) && o > 1.001);
@@ -132,8 +132,8 @@ function buildTennisBetsFromOdds(
     const o2 = oddsFor(p2);
     if (o1.length === 0 || o2.length === 0) continue;
 
-    const avgImplied1 = o1.reduce((s, o) => s + 1 / o, 0) / o1.length;
-    const avgImplied2 = o2.reduce((s, o) => s + 1 / o, 0) / o2.length;
+    const avgImplied1 = o1.reduce((s: number, o: number) => s + 1 / o, 0) / o1.length;
+    const avgImplied2 = o2.reduce((s: number, o: number) => s + 1 / o, 0) / o2.length;
     const sum = avgImplied1 + avgImplied2;
     if (sum <= 0) continue;
 
@@ -148,7 +148,7 @@ function buildTennisBetsFromOdds(
     const best2 = bestFor(p2);
     if (!best1 || !best2) continue;
 
-    const consider = [
+    const consider: { sel: string; fairP: number; best: any }[] = [
       { sel: p1, fairP: fairP1, best: best1 },
       { sel: p2, fairP: fairP2, best: best2 },
     ];
