@@ -42,13 +42,20 @@ interface MatchData {
   data_layers: ScrapedLayer[];
 }
 
-// Search with domain filtering for quality stats sources
-async function scrapeWithDomains(
+// Firecrawl search helper (keep it lightweight to avoid timeouts)
+async function firecrawlSearch(
   firecrawlApiKey: string,
   query: string,
-  domains: string[],
-  limit: number = 3
+  {
+    limit = 1,
+    tbs = 'qdr:w',
+    maxChars = 900,
+    timeoutMs = 8000,
+  }: { limit?: number; tbs?: string; maxChars?: number; timeoutMs?: number } = {}
 ): Promise<Array<{ title: string; url: string; content: string }>> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
     const response = await fetch('https://api.firecrawl.dev/v1/search', {
       method: 'POST',
@@ -59,9 +66,10 @@ async function scrapeWithDomains(
       body: JSON.stringify({
         query,
         limit,
-        tbs: 'qdr:w', // Last week
+        tbs,
         scrapeOptions: { formats: ['markdown'] }
       }),
+      signal: controller.signal,
     });
 
     if (!response.ok) {
@@ -73,32 +81,26 @@ async function scrapeWithDomains(
     return data.data?.map((result: any) => ({
       title: result.title || '',
       url: result.url || '',
-      content: result.markdown?.substring(0, 2000) || result.description || ''
+      content: result.markdown?.substring(0, maxChars) || result.description || ''
     })) || [];
   } catch (error) {
-    console.error(`Error scraping:`, error);
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('Error scraping:', msg);
     return [];
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
-// Scrape team-specific stats
+// Scrape team-specific stats (single query per team for speed)
 async function scrapeTeamStats(
   firecrawlApiKey: string,
   team: string,
   league: string
-): Promise<{ form: ScrapedLayer; stats: ScrapedLayer }> {
-  // Form and recent results
-  const formQuery = `"${team}" ${league} last 5 matches results form WDLWL 2024-25`;
-  const formSources = await scrapeWithDomains(firecrawlApiKey, formQuery, [], 2);
-  
-  // xG and advanced stats
-  const statsQuery = `"${team}" xG expected goals goals scored conceded statistics 2024-25`;
-  const statsSources = await scrapeWithDomains(firecrawlApiKey, statsQuery, [], 2);
-
-  return {
-    form: { layer: `${team} FORM`, sources: formSources },
-    stats: { layer: `${team} STATS`, sources: statsSources }
-  };
+): Promise<ScrapedLayer> {
+  const query = `"${team}" ${league} stats xG goals for against last 5 form table position`;
+  const sources = await firecrawlSearch(firecrawlApiKey, query, { limit: 1, tbs: 'qdr:m', maxChars: 900, timeoutMs: 8000 });
+  return { layer: `${team} TEAM STATS`, sources };
 }
 
 // Calculate days since last match
@@ -125,7 +127,7 @@ serve(async (req) => {
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
     
-    const { sports = ['soccer'], window_hours = 72 } = await req.json();
+    const { sports = ['soccer'], window_hours = 72, max_events = 2 } = await req.json();
 
     // Query upcoming events
     const now = new Date();
@@ -139,7 +141,7 @@ serve(async (req) => {
       .gte('start_time_utc', now.toISOString())
       .lte('start_time_utc', windowEnd.toISOString())
       .order('start_time_utc', { ascending: true })
-      .limit(10); // Limit to avoid API rate limits
+      .limit(Math.max(1, Math.min(max_events, 10)));
 
     if (eventsError) throw new Error(eventsError.message);
     if (!events || events.length === 0) {
@@ -149,95 +151,64 @@ serve(async (req) => {
       );
     }
 
-    console.log(`Found ${events.length} events to scrape`);
+    console.log(`Found ${events.length} events to scrape (max_events=${max_events})`);
 
-    const scrapedResults: MatchData[] = [];
+    const scrapedResults = await Promise.all(
+      events.map(async (event) => {
+        const matchKey = `${event.home_team} vs ${event.away_team}`;
+        console.log(`Scraping fast export: ${matchKey}`);
 
-    for (const event of events) {
-      const matchKey = `${event.home_team} vs ${event.away_team}`;
-      console.log(`Scraping structured stats: ${matchKey}`);
+        // Best odds (dedup by market_type+selection)
+        const oddsArray: MatchData['odds'] = [];
+        const processedSelections = new Set<string>();
 
-      // Get best odds for this event
-      const oddsArray: MatchData['odds'] = [];
-      const processedSelections = new Set<string>();
-      
-      for (const market of event.markets || []) {
-        const selectionKey = `${market.market_type}_${market.selection}`;
-        const odds = parseFloat(market.odds_decimal);
-        
-        if (!processedSelections.has(selectionKey)) {
-          processedSelections.add(selectionKey);
-          oddsArray.push({
-            market: market.market_type,
-            selection: market.selection,
-            odds,
-            implied_probability: (1 / odds * 100).toFixed(1) + '%',
-            bookmaker: market.bookmaker
-          });
+        for (const market of event.markets || []) {
+          const selectionKey = `${market.market_type}_${market.selection}`;
+          const odds = parseFloat(market.odds_decimal);
+          if (!processedSelections.has(selectionKey)) {
+            processedSelections.add(selectionKey);
+            oddsArray.push({
+              market: market.market_type,
+              selection: market.selection,
+              odds,
+              implied_probability: (1 / odds * 100).toFixed(1) + '%',
+              bookmaker: market.bookmaker
+            });
+          }
         }
-      }
 
-      // Parallel scraping for each team and match context
-      const [
-        homeTeamData,
-        awayTeamData,
-        injuriesData,
-        h2hData,
-        newsData
-      ] = await Promise.all([
-        // Home team stats
-        scrapeTeamStats(firecrawlApiKey, event.home_team, event.league),
-        // Away team stats
-        scrapeTeamStats(firecrawlApiKey, event.away_team, event.league),
-        // Injuries & suspensions
-        scrapeWithDomains(
-          firecrawlApiKey,
-          `"${event.home_team}" OR "${event.away_team}" injuries suspensions team news lineup ${event.league}`,
-          [],
-          3
-        ),
-        // Head to head
-        scrapeWithDomains(
-          firecrawlApiKey,
-          `"${event.home_team}" vs "${event.away_team}" head to head record history recent meetings`,
-          [],
-          2
-        ),
-        // Latest news & transfers affecting XI
-        scrapeWithDomains(
-          firecrawlApiKey,
-          `"${event.home_team}" OR "${event.away_team}" transfer news starting eleven squad changes ${event.league}`,
-          [],
-          2
-        )
-      ]);
+        // Keep scraping minimal: 1 query per team + 1 injuries/news query
+        const [homeTeamLayer, awayTeamLayer, injuriesNews] = await Promise.all([
+          scrapeTeamStats(firecrawlApiKey, event.home_team, event.league),
+          scrapeTeamStats(firecrawlApiKey, event.away_team, event.league),
+          firecrawlSearch(
+            firecrawlApiKey,
+            `"${event.home_team}" OR "${event.away_team}" injuries suspensions lineup confirmed transfer`,
+            { limit: 1, tbs: 'qdr:w', maxChars: 900, timeoutMs: 8000 }
+          )
+        ]);
 
-      // Build structured data layers
-      const dataLayers: ScrapedLayer[] = [
-        homeTeamData.form,
-        homeTeamData.stats,
-        awayTeamData.form,
-        awayTeamData.stats,
-        { layer: 'INJURIES & SUSPENSIONS', sources: injuriesData },
-        { layer: 'HEAD TO HEAD', sources: h2hData },
-        { layer: 'TRANSFERS & NEWS', sources: newsData }
-      ];
+        const dataLayers: ScrapedLayer[] = [
+          homeTeamLayer,
+          awayTeamLayer,
+          { layer: 'INJURIES / LINEUP / TRANSFERS', sources: injuriesNews }
+        ];
 
-      // Initialize team stats structures
-      const homeTeamStats: TeamStats = { team: event.home_team };
-      const awayTeamStats: TeamStats = { team: event.away_team };
+        const homeTeamStats: TeamStats = { team: event.home_team };
+        const awayTeamStats: TeamStats = { team: event.away_team };
 
-      scrapedResults.push({
-        match: matchKey,
-        sport: event.sport,
-        league: event.league,
-        start_time: event.start_time_aedt,
-        home_team_stats: homeTeamStats,
-        away_team_stats: awayTeamStats,
-        odds: oddsArray,
-        data_layers: dataLayers
-      });
-    }
+        return {
+          match: matchKey,
+          sport: event.sport,
+          league: event.league,
+          start_time: event.start_time_aedt,
+          home_team_stats: homeTeamStats,
+          away_team_stats: awayTeamStats,
+          odds: oddsArray,
+          data_layers: dataLayers
+        } as MatchData;
+      })
+    );
 
     // Format as institutional-grade output for Perplexity
     const timestamp = new Date().toLocaleString('en-AU', { timeZone: 'Australia/Sydney' });
