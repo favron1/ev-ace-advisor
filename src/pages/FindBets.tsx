@@ -141,23 +141,15 @@ export default function FindBets() {
   };
 
   const scrapeData = async () => {
-    if (selectedSports.length === 0) {
-      toast({
-        title: "Select Sports",
-        description: "Please select at least one sport",
-        variant: "destructive",
-      });
-      return;
-    }
-
+    // Perplexity export is always Soccer for the next 72 hours (across all leagues)
     setScraping(true);
     setCopied(false);
     try {
       const { data, error } = await supabase.functions.invoke('scrape-match-data', {
         body: {
-          sports: selectedSports,
-          window_hours: windowHours
-        }
+          sports: ['soccer'],
+          window_hours: 72,
+        },
       });
 
       if (error) throw error;
@@ -187,6 +179,7 @@ export default function FindBets() {
       setScraping(false);
     }
   };
+
 
   const copyToClipboard = async () => {
     try {
