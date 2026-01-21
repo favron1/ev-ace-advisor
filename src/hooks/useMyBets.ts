@@ -377,6 +377,7 @@ export function useMyBets() {
         .from('user_bets')
         .update({
           odds: recheckData.odds_decimal,
+          bookmaker: recheckData.bookmaker,
           model_probability: recheckData.model_probability,
           implied_probability: recheckData.implied_probability,
           edge: recheckData.edge,
