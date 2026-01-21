@@ -304,20 +304,13 @@ serve(async (req) => {
       );
     }
 
-    // Event hasn't started yet - do the normal recheck for updated odds/analysis
-    if (!perplexityApiKey) {
-      return new Response(
-        JSON.stringify({ 
-          message: 'Cannot recheck - API not configured',
-          updated_bet: null
-        }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
+    // Event hasn't started yet - recheck only updates ODDS from current market
+    // We preserve the original model values (bet_score, edge, confidence) from the calibrated model
+    // The recheck should NOT regenerate the analysis - that would be inconsistent with the original recommendation
+    
     // Get current odds if we have event data
-    let currentOdds = 2.0; // default
-    let currentImpliedProb = 0.5;
+    let currentOdds: number | null = null;
+    let currentImpliedProb: number | null = null;
     let bookmaker = 'Unknown';
 
     if (event?.markets) {
@@ -336,102 +329,32 @@ serve(async (req) => {
       }
     }
 
-    // Send to Perplexity for updated analysis
-    console.log('Getting updated analysis from Perplexity...');
+    // If we found updated odds, return them - but DO NOT change model values
+    if (currentOdds !== null) {
+      console.log('=== RECHECK BET COMPLETE - Odds Updated ===');
+      console.log('New odds:', currentOdds, 'from', bookmaker);
 
-    const systemPrompt = `You are a sports betting analyst. Analyze the latest data for a single bet and provide an updated assessment.
-
-Return ONLY valid JSON with this structure:
-{
-  "model_probability": number (0-1, your estimated true probability),
-  "edge": number (model_probability - implied_probability),
-  "bet_score": number (50-100),
-  "confidence": "high" | "medium" | "low",
-  "rationale": "string (updated reasoning based on latest data)"
-}`;
-
-    const userPrompt = `EVENT: ${homeTeam} vs ${awayTeam}
-LEAGUE: ${league || 'Unknown'}
-SELECTION: ${selection}
-CURRENT ODDS: ${currentOdds.toFixed(2)}
-IMPLIED PROBABILITY: ${(currentImpliedProb * 100).toFixed(1)}%
-
-Analyze this bet and provide updated probability estimates based on any recent news, injuries, or form changes.`;
-
-    const perplexityResponse = await fetch('https://api.perplexity.ai/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${perplexityApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'sonar-pro',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        temperature: 0.1,
-        max_tokens: 1000
-      }),
-    });
-
-    if (!perplexityResponse.ok) {
-      throw new Error('Perplexity API error');
+      return new Response(
+        JSON.stringify({
+          updated_odds: {
+            odds_decimal: currentOdds,
+            implied_probability: currentImpliedProb,
+            bookmaker,
+          },
+          message: `Odds updated: ${currentOdds.toFixed(2)} @ ${bookmaker}`
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
     }
 
-    const perplexityData = await perplexityResponse.json();
-    const content = perplexityData.choices?.[0]?.message?.content;
-
-    if (!content) {
-      throw new Error('No content in Perplexity response');
-    }
-
-    // Parse JSON from response
-    let jsonContent = content.trim();
-    const jsonMatch = jsonContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-    if (jsonMatch) {
-      jsonContent = jsonMatch[1];
-    }
-    const jsonStart = jsonContent.indexOf('{');
-    const jsonEnd = jsonContent.lastIndexOf('}');
-    if (jsonStart !== -1 && jsonEnd !== -1) {
-      jsonContent = jsonContent.substring(jsonStart, jsonEnd + 1);
-    }
-
-    const analysis = JSON.parse(jsonContent.trim());
-
-    // Calculate recommended stake (25% Kelly)
-    const edge = analysis.edge || (analysis.model_probability - currentImpliedProb);
-    const kellyStake = edge > 0 ? (0.25 * edge / (currentOdds - 1)) : 0.25;
-    const stakeMultiplier = analysis.confidence === 'high' ? 1 : analysis.confidence === 'medium' ? 0.75 : 0.5;
-    const recommendedStake = Math.min(Math.max(kellyStake * stakeMultiplier, 0.25), 1.5);
-
-    const updatedBet = {
-      event_id,
-      market_id: input.market_id || '',
-      sport: 'soccer',
-      league: league || '',
-      event_name: `${homeTeam} vs ${awayTeam}`,
-      start_time: eventStartTime?.toISOString() || '',
-      selection,
-      selection_label: selection,
-      odds_decimal: currentOdds,
-      bookmaker,
-      model_probability: analysis.model_probability,
-      implied_probability: currentImpliedProb,
-      edge: edge,
-      bet_score: analysis.bet_score,
-      confidence: analysis.confidence,
-      recommended_stake_units: recommendedStake,
-      rationale: analysis.rationale,
-    };
-
-    console.log('=== RECHECK BET COMPLETE ===');
+    // No odds update available - just confirm the bet is still valid
+    console.log('=== RECHECK BET COMPLETE - No Updates ===');
+    console.log('Could not find updated odds, keeping original values');
 
     return new Response(
       JSON.stringify({
-        updated_bet: updatedBet,
-        message: 'Bet rechecked successfully'
+        updated_odds: null,
+        message: 'No updated odds found - original values preserved'
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
