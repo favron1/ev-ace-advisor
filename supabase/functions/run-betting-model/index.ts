@@ -1032,12 +1032,16 @@ Return JSON:
 }`;
 
   console.log('Sending calibrated data to Perplexity (v3.0)...');
+  console.log('Perplexity key present:', !!perplexityApiKey, 'length:', (perplexityApiKey || '').length);
 
   const response = await fetch('https://api.perplexity.ai/chat/completions', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${perplexityApiKey}`,
       'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      // Some API gateways are stricter without a UA and may respond with HTML.
+      'User-Agent': 'LovableCloud/1.0 (run-betting-model)',
     },
     body: JSON.stringify({
       model: 'sonar-pro',
