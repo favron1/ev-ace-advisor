@@ -528,20 +528,53 @@ serve(async (req) => {
       
       // Find the outcome that matches our selection
       let matchedOutcome: OutcomeData | null = null;
-      const selLower = selection.toLowerCase();
+      const selLower = selection.toLowerCase().trim();
+      
+      // First: Handle "home"/"away" selection by mapping to team names
+      const homeTeamLower = homeTeam.toLowerCase();
+      const awayTeamLower = awayTeam.toLowerCase();
+      
+      let targetTeamName = '';
+      if (selLower === 'home' || selLower.includes('home') || selLower.includes('to win') && selLower.includes(homeTeamLower.split(' ')[0])) {
+        targetTeamName = homeTeam;
+        console.log(`Selection "${selection}" mapped to home team: ${homeTeam}`);
+      } else if (selLower === 'away' || selLower.includes('away')) {
+        targetTeamName = awayTeam;
+        console.log(`Selection "${selection}" mapped to away team: ${awayTeam}`);
+      } else if (selLower === 'draw' || selLower === 'x') {
+        targetTeamName = 'Draw';
+        console.log(`Selection "${selection}" mapped to Draw`);
+      }
       
       for (const outcome of outcomes) {
         const outcomeLower = outcome.name.toLowerCase();
-        if (outcomeLower === selLower || 
-            selLower.includes(outcomeLower.split(' ')[0]) ||
-            outcomeLower.includes(selLower.split(' ')[0])) {
-          matchedOutcome = outcome;
-          break;
+        
+        // If we mapped to a target team, match against it
+        if (targetTeamName) {
+          const targetLower = targetTeamName.toLowerCase();
+          if (outcomeLower === targetLower ||
+              outcomeLower.includes(targetLower.split(' ')[0]) ||
+              targetLower.includes(outcomeLower.split(' ')[0])) {
+            matchedOutcome = outcome;
+            console.log(`Matched outcome "${outcome.name}" for target "${targetTeamName}"`);
+            break;
+          }
+        } else {
+          // Direct match on selection (for player names in tennis, etc)
+          if (outcomeLower === selLower || 
+              selLower.includes(outcomeLower.split(' ')[0]) ||
+              outcomeLower.includes(selLower.split(' ')[0]) ||
+              // Also try matching on last name for tennis
+              selLower.split(' ').pop() === outcomeLower.split(' ').pop()) {
+            matchedOutcome = outcome;
+            console.log(`Direct matched outcome "${outcome.name}" for selection "${selection}"`);
+            break;
+          }
         }
       }
 
       if (!matchedOutcome) {
-        console.log('Could not match selection to outcome:', selection);
+        console.log('Could not match selection to outcome:', selection, 'Outcomes:', outcomes.map(o => o.name));
         return new Response(
           JSON.stringify({
             updated_bet: null,
