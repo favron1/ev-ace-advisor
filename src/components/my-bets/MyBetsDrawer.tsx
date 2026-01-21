@@ -231,9 +231,14 @@ export function MyBetsDrawer({
                               </div>
                             )}
                             
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
                               <Badge variant="secondary">{bet.selection_label}</Badge>
                               <span className="font-mono font-bold">{bet.odds_decimal?.toFixed(2)}</span>
+                              {bet.bookmaker && (
+                                <Badge variant="outline" className="text-xs bg-muted">
+                                  @ {bet.bookmaker}
+                                </Badge>
+                              )}
                             </div>
 
                             <div className="flex items-center gap-2 text-xs">
