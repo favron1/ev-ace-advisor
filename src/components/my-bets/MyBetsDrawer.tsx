@@ -90,25 +90,17 @@ export function MyBetsDrawer({
         }
       }
 
-      // Check for updated odds only (no model value changes)
-      if (data.updated_odds) {
-        // Only update odds-related fields, preserve model values
-        const partialUpdate: Partial<RecommendedBet> = {
-          odds_decimal: data.updated_odds.odds_decimal,
-          implied_probability: data.updated_odds.implied_probability,
-          bookmaker: data.updated_odds.bookmaker,
-          // Recalculate edge based on new implied probability and existing model probability
-          edge: bet.model_probability - data.updated_odds.implied_probability,
-        };
-        onUpdateFromRecheck(bet.id, { ...bet, ...partialUpdate } as RecommendedBet);
+      // Check for full updated bet (same de-vig logic as original model)
+      if (data.updated_bet) {
+        onUpdateFromRecheck(bet.id, data.updated_bet);
         toast({
-          title: 'Odds Updated',
-          description: `New odds: ${data.updated_odds.odds_decimal.toFixed(2)} @ ${data.updated_odds.bookmaker}`,
+          title: 'Bet Rechecked',
+          description: `${data.updated_bet.odds_decimal.toFixed(2)} @ ${data.updated_bet.bookmaker}, Edge: ${(data.updated_bet.edge * 100).toFixed(1)}%, Score: ${data.updated_bet.bet_score}`,
         });
       } else {
         toast({
           title: 'No Updates',
-          description: data.message || 'Original values preserved',
+          description: data.message || 'Could not fetch updated odds',
         });
       }
     } catch (error) {
