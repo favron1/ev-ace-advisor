@@ -6,37 +6,53 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// ============= CALIBRATION CONSTANTS (v3.0) =============
-// Logistic regression coefficients derived from historical match outcome analysis
-// These dampen the overconfident probability mapping from raw ratings/xG
+// ============= CALIBRATION CONSTANTS (v4.0) =============
+// Enhanced with proper 3-way logistic draw model and xG-driven O/U
+// References: Poisson goal models (Dixon-Coles 1997), logistic regression calibration
 
 const SOCCER_CALIBRATION = {
-  // Logistic regression intercept (base home win probability)
-  INTERCEPT: 0.0, // Start neutral, let factors determine
+  // === 3-WAY LOGISTIC COEFFICIENTS ===
+  // Multinomial logistic regression for H/D/A with draw as pivot
   
-  // Rating differential coefficient (per 100 points = ~3% shift)
-  RATING_COEF: 0.03, // Conservative: 200-point gap = ~6% edge, not 15%
+  // Home win logit: β0 + β1*rating_diff + β2*npxg_diff + β3*home_adv
+  HOME_INTERCEPT: -0.15, // Slight underdog bias (calibrated to ~45% baseline)
+  HOME_RATING_COEF: 0.025, // Per 100 rating points → ~2.5% logit shift
+  HOME_NPXG_COEF: 0.08, // Per 0.5 npxG diff → ~4% logit shift
+  HOME_ADVANTAGE: 0.12, // Logit home boost (~3% probability)
   
-  // npxG differential coefficient (per 0.5 npxG = ~2% shift)
-  NPXG_COEF: 0.04,
+  // Away win logit: β0 + β1*rating_diff + β2*npxg_diff
+  AWAY_INTERCEPT: -0.25, // Lower baseline (away disadvantage)
+  AWAY_RATING_COEF: -0.025, // Inverse of home (rating helps away when positive)
+  AWAY_NPXG_COEF: -0.08, // Inverse (better away npxg → higher away prob)
   
-  // Home advantage baseline (empirical: ~3-5% in modern football)
-  HOME_ADVANTAGE: 0.04,
+  // Draw probability parameters (Ordered logistic style)
+  // Draws peak when teams are evenly matched; decay with mismatch
+  DRAW_BASE: 0.26, // Base draw probability for evenly matched teams
+  DRAW_DECAY: 0.0008, // Decay per unit of |rating_diff| (mismatches have fewer draws)
+  DRAW_NPXG_DECAY: 0.03, // Decay per unit of |npxg_diff|
+  DRAW_MIN: 0.18, // Floor (even huge mismatches have some draw chance)
+  DRAW_MAX: 0.32, // Ceiling (draws rarely exceed 32%)
   
-  // Maximum probability cap (prevents 70%+ predictions)
-  MAX_PROB: 0.65,
-  MIN_PROB: 0.20,
+  // Probability bounds
+  MAX_PROB: 0.68,
+  MIN_PROB: 0.18,
   
-  // Draw probability floor (prevents unrealistically low draw odds)
-  DRAW_FLOOR: 0.22,
+  // Sharp book blending
+  SHARP_WEIGHT: 0.35, // 35% weight to sharp book implied prob
   
-  // Sharp book implied probability weight (trust sharp lines)
-  SHARP_WEIGHT: 0.40, // 40% weight to sharp book implied prob
+  // === xG-DRIVEN OVER/UNDER MODEL ===
+  // Poisson with attack/defense xG decomposition
+  XG_HOME_ATTACK_WEIGHT: 0.55, // Weight home attacking xG
+  XG_HOME_DEFEND_WEIGHT: 0.45, // Weight home defensive xG
+  XG_AWAY_ATTACK_WEIGHT: 0.50, // Weight away attacking xG (road penalty)
+  XG_AWAY_DEFEND_WEIGHT: 0.50, // Weight away defensive xG
+  XG_REGRESSION: 0.25, // Regress xG to league mean (reduce variance)
+  LEAGUE_AVG_GOALS: 2.75, // Average total goals per match (Tier 1 leagues)
   
   // Adjustment caps per factor
-  FATIGUE_MAX: 0.03,
-  INJURY_MAX: 0.05,
-  FORM_MAX: 0.04,
+  FATIGUE_MAX: 0.025,
+  INJURY_MAX: 0.04,
+  FORM_MAX: 0.03,
 };
 
 // ============= BASKETBALL CALIBRATION CONSTANTS =============
@@ -647,12 +663,20 @@ function calibrateProbabilities(
 ): CalibratedProbabilities {
   const cfg = CALIBRATION_CONFIG;
   
-  // Extract key metrics
+  // === Extract key metrics ===
   const ratingDiff = (homeStats?.team_rating || 1500) - (awayStats?.team_rating || 1500);
-  const homeNpxg = homeStats?.npxg_for_last_5 ?? homeStats?.xg_for_last_5 ?? 0;
-  const awayNpxg = awayStats?.npxg_for_last_5 ?? awayStats?.xg_for_last_5 ?? 0;
-  const npxgDiff = (homeNpxg - (homeStats?.npxg_against_last_5 || 0)) - 
-                   (awayNpxg - (awayStats?.npxg_against_last_5 || 0));
+  
+  // xG metrics with fallbacks
+  const homeXgFor = homeStats?.xg_for_last_5 ?? homeStats?.home_xg_for ?? 1.3;
+  const homeXgAgainst = homeStats?.xg_against_last_5 ?? homeStats?.home_xg_against ?? 1.1;
+  const awayXgFor = awayStats?.xg_for_last_5 ?? awayStats?.away_xg_for ?? 1.1;
+  const awayXgAgainst = awayStats?.xg_against_last_5 ?? awayStats?.away_xg_against ?? 1.2;
+  
+  // npxG differential (non-penalty xG preferred)
+  const homeNpxg = homeStats?.npxg_for_last_5 ?? homeXgFor;
+  const awayNpxg = awayStats?.npxg_for_last_5 ?? awayXgFor;
+  const npxgDiff = (homeNpxg - (homeStats?.npxg_against_last_5 ?? homeXgAgainst)) - 
+                   (awayNpxg - (awayStats?.npxg_against_last_5 ?? awayXgAgainst));
   
   // Get sharp book implied probabilities if available
   const sharpH2H = markets.find((m: any) => 
@@ -660,27 +684,60 @@ function calibrateProbabilities(
   );
   const sharpImpliedHome = sharpH2H ? 1 / sharpH2H.odds_decimal : null;
   
-  // Base calculation using logistic-style model
-  // P(home) = sigmoid(intercept + β1*rating_diff/100 + β2*npxg_diff + home_advantage)
-  const logit = cfg.INTERCEPT + 
-                (ratingDiff / 100) * cfg.RATING_COEF + 
-                npxgDiff * cfg.NPXG_COEF + 
-                cfg.HOME_ADVANTAGE;
+  // ============= 3-WAY LOGISTIC MODEL (v4.0) =============
+  // Multinomial logistic regression: P(outcome) = exp(logit) / sum(exp(logits))
   
-  // Sigmoid function for probability
-  let rawHomeProb = 1 / (1 + Math.exp(-logit * 3)); // Scale factor for sensitivity
+  // Home win logit
+  const homeLogit = cfg.HOME_INTERCEPT + 
+                    (ratingDiff / 100) * cfg.HOME_RATING_COEF + 
+                    npxgDiff * cfg.HOME_NPXG_COEF + 
+                    cfg.HOME_ADVANTAGE;
+  
+  // Away win logit
+  const awayLogit = cfg.AWAY_INTERCEPT + 
+                    (ratingDiff / 100) * cfg.AWAY_RATING_COEF + 
+                    npxgDiff * cfg.AWAY_NPXG_COEF;
+  
+  // Draw logit (reference category = 0, but we model draw explicitly)
+  // Draw probability peaks when teams are similar, decays with mismatch
+  const ratingGap = Math.abs(ratingDiff);
+  const npxgGap = Math.abs(npxgDiff);
+  const drawProb = Math.max(cfg.DRAW_MIN, Math.min(cfg.DRAW_MAX,
+    cfg.DRAW_BASE - (ratingGap * cfg.DRAW_DECAY) - (npxgGap * cfg.DRAW_NPXG_DECAY)
+  ));
+  
+  // Softmax for home/away (draw handled separately)
+  const expHome = Math.exp(homeLogit);
+  const expAway = Math.exp(awayLogit);
+  const expSum = expHome + expAway;
+  
+  // Allocate remaining probability after draw
+  const remainingProb = 1 - drawProb;
+  let rawHomeProb = (expHome / expSum) * remainingProb;
+  let rawAwayProb = (expAway / expSum) * remainingProb;
   
   // Apply fatigue adjustments (capped)
   const homeFatigue = (homeStats?.matches_last_7_days || 0) > 2;
   const awayFatigue = (awayStats?.matches_last_7_days || 0) > 2;
-  if (homeFatigue && !awayFatigue) rawHomeProb -= cfg.FATIGUE_MAX;
-  if (awayFatigue && !homeFatigue) rawHomeProb += cfg.FATIGUE_MAX;
+  if (homeFatigue && !awayFatigue) {
+    rawHomeProb -= cfg.FATIGUE_MAX;
+    rawAwayProb += cfg.FATIGUE_MAX * 0.7; // Some goes to draw
+  }
+  if (awayFatigue && !homeFatigue) {
+    rawAwayProb -= cfg.FATIGUE_MAX;
+    rawHomeProb += cfg.FATIGUE_MAX * 0.7;
+  }
   
   // Apply injury adjustments (capped)
-  const homeMissing = homeStats?.missing_by_position?.DEF + homeStats?.missing_by_position?.MID + homeStats?.missing_by_position?.FWD || 0;
-  const awayMissing = awayStats?.missing_by_position?.DEF + awayStats?.missing_by_position?.MID + awayStats?.missing_by_position?.FWD || 0;
-  const injuryImpact = Math.min(cfg.INJURY_MAX, (awayMissing - homeMissing) * 0.015);
+  const homeMissing = (homeStats?.missing_by_position?.DEF || 0) + 
+                      (homeStats?.missing_by_position?.MID || 0) + 
+                      (homeStats?.missing_by_position?.FWD || 0);
+  const awayMissing = (awayStats?.missing_by_position?.DEF || 0) + 
+                      (awayStats?.missing_by_position?.MID || 0) + 
+                      (awayStats?.missing_by_position?.FWD || 0);
+  const injuryImpact = Math.min(cfg.INJURY_MAX, (awayMissing - homeMissing) * 0.012);
   rawHomeProb += injuryImpact;
+  rawAwayProb -= injuryImpact * 0.7;
   
   // Blend with sharp book implied probability (trust the market)
   let calibratedHomeProb = rawHomeProb;
@@ -690,42 +747,59 @@ function calibrateProbabilities(
   
   // Clamp to realistic bounds
   calibratedHomeProb = Math.max(cfg.MIN_PROB, Math.min(cfg.MAX_PROB, calibratedHomeProb));
-  
-  // Calculate draw probability (constrained)
-  // Empirically, draws are 25-28% for evenly matched teams, lower for mismatches
-  const ratingGap = Math.abs(ratingDiff);
-  let drawProb = cfg.DRAW_FLOOR + Math.max(0, 0.08 - ratingGap * 0.0003);
-  drawProb = Math.min(0.30, Math.max(0.18, drawProb));
-  
-  // Away win is residual
-  let awayWinProb = 1 - calibratedHomeProb - drawProb;
-  awayWinProb = Math.max(cfg.MIN_PROB, Math.min(cfg.MAX_PROB, awayWinProb));
+  let calibratedAwayProb = Math.max(cfg.MIN_PROB, Math.min(cfg.MAX_PROB, rawAwayProb));
+  let calibratedDrawProb = drawProb;
   
   // Normalize to sum to 1
-  const total = calibratedHomeProb + drawProb + awayWinProb;
+  const total = calibratedHomeProb + calibratedDrawProb + calibratedAwayProb;
   const homeWin = calibratedHomeProb / total;
-  const draw = drawProb / total;
-  const awayWin = awayWinProb / total;
+  const draw = calibratedDrawProb / total;
+  const awayWin = calibratedAwayProb / total;
   
-  // Over/Under 2.5 based on combined xG
-  const combinedXg = (homeStats?.xg_for_last_5 || 1.2) + (awayStats?.xg_for_last_5 || 1.0);
-  const avgGoalsExpected = combinedXg / 5; // Per game average
-  // Simple Poisson approximation: P(total > 2.5) ≈ 1 - P(0) - P(1) - P(2)
-  const lambda = avgGoalsExpected * 2; // Both teams
-  const poisson0 = Math.exp(-lambda);
-  const poisson1 = lambda * poisson0;
-  const poisson2 = (lambda * lambda / 2) * poisson0;
-  const over25 = Math.max(0.30, Math.min(0.70, 1 - poisson0 - poisson1 - poisson2));
+  // ============= xG-DRIVEN OVER/UNDER MODEL (Poisson) =============
+  // Team-specific attack/defense xG with regression to mean
+  
+  // Home team expected goals: blend of home attack xG and away concede xG
+  const homeExpGoals = (
+    cfg.XG_HOME_ATTACK_WEIGHT * (homeXgFor / 5) + 
+    cfg.XG_HOME_DEFEND_WEIGHT * (awayXgAgainst / 5)
+  );
+  
+  // Away team expected goals: blend of away attack xG and home concede xG
+  const awayExpGoals = (
+    cfg.XG_AWAY_ATTACK_WEIGHT * (awayXgFor / 5) + 
+    cfg.XG_AWAY_DEFEND_WEIGHT * (homeXgAgainst / 5)
+  );
+  
+  // Regress to league average to reduce variance
+  const regressedHomeGoals = (1 - cfg.XG_REGRESSION) * homeExpGoals + cfg.XG_REGRESSION * (cfg.LEAGUE_AVG_GOALS / 2);
+  const regressedAwayGoals = (1 - cfg.XG_REGRESSION) * awayExpGoals + cfg.XG_REGRESSION * (cfg.LEAGUE_AVG_GOALS / 2);
+  
+  // Total expected goals (lambda for Poisson)
+  const totalLambda = regressedHomeGoals + regressedAwayGoals;
+  
+  // Poisson calculation: P(X=k) = (λ^k * e^-λ) / k!
+  const poissonProb = (lambda: number, k: number): number => {
+    let factorial = 1;
+    for (let i = 2; i <= k; i++) factorial *= i;
+    return Math.pow(lambda, k) * Math.exp(-lambda) / factorial;
+  };
+  
+  // P(total > 2.5) = 1 - P(0) - P(1) - P(2)
+  const pUnder25 = poissonProb(totalLambda, 0) + poissonProb(totalLambda, 1) + poissonProb(totalLambda, 2);
+  const over25 = Math.max(0.28, Math.min(0.72, 1 - pUnder25));
   const under25 = 1 - over25;
   
-  // BTTS based on scoring/conceding patterns
-  const homeScoresProb = Math.min(0.85, (homeStats?.goals_scored_last_5 || 5) / 5 * 0.7);
-  const awayScoresProb = Math.min(0.85, (awayStats?.goals_scored_last_5 || 4) / 5 * 0.65);
-  const bttsYes = Math.max(0.35, Math.min(0.70, homeScoresProb * awayScoresProb * 1.1));
+  // ============= BTTS MODEL (Independent Poisson) =============
+  // P(BTTS Yes) = P(Home scores ≥1) × P(Away scores ≥1)
+  const pHomeScores = 1 - Math.exp(-regressedHomeGoals); // 1 - P(home=0)
+  const pAwayScores = 1 - Math.exp(-regressedAwayGoals); // 1 - P(away=0)
+  const bttsYes = Math.max(0.32, Math.min(0.72, pHomeScores * pAwayScores));
   const bttsNo = 1 - bttsYes;
   
-  const rationale = `Calibrated: rating_diff=${ratingDiff.toFixed(0)}, npxg_diff=${npxgDiff.toFixed(2)}, ` +
-    `sharp_implied=${sharpImpliedHome?.toFixed(3) || 'N/A'}, model_home=${homeWin.toFixed(3)}`;
+  const rationale = `v4.0 3-way logistic: rating_diff=${ratingDiff.toFixed(0)}, npxg_diff=${npxgDiff.toFixed(2)}, ` +
+    `draw_model=${draw.toFixed(3)}, xG_total=${totalLambda.toFixed(2)}, ` +
+    `sharp_implied=${sharpImpliedHome?.toFixed(3) || 'N/A'}, H/D/A=${homeWin.toFixed(3)}/${draw.toFixed(3)}/${awayWin.toFixed(3)}`;
   
   return { homeWin, draw, awayWin, over25, under25, bttsYes, bttsNo, rationale };
 }
