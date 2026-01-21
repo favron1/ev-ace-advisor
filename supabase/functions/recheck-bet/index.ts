@@ -22,6 +22,9 @@ interface RecheckInput {
   sport?: string;
   start_time?: string;
   original_model_probability?: number;
+  original_bet_score?: number;
+  original_confidence?: 'high' | 'medium' | 'low';
+  original_stake_units?: number;
 }
 
 interface MatchResult {
@@ -143,10 +146,13 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
     
     const input: RecheckInput = await req.json();
-    const { event_id, selection, event_name, league, sport, start_time } = input;
+    const { 
+      event_id, selection, event_name, league, sport, start_time,
+      original_model_probability, original_bet_score, original_confidence, original_stake_units
+    } = input;
 
     console.log('=== RECHECK BET START ===');
-    console.log('Input:', { event_id, selection, event_name, league, sport, start_time });
+    console.log('Input:', { event_id, selection, event_name, league, sport, start_time, original_model_probability });
 
     // First try to use start_time from input (passed from frontend)
     let event = null;
@@ -598,32 +604,43 @@ serve(async (req) => {
       const bestOdds = matchedOutcome.bestOdds;
       const bestBookmaker = matchedOutcome.bestBookmaker;
       const impliedProb = 1 / bestOdds;
-      const fairProb = fairData.fairProb;
-      const fairOdds = fairData.fairOdds;
       
-      // Edge = (best odds / fair odds - 1) as percentage (same formula)
-      const edge = ((bestOdds / fairOdds) - 1) * 100;
+      // CRITICAL: Use original model probability if available (from calibrated AI model)
+      // Only fall back to de-vigged fair probability if no original was passed
+      const hasOriginalModelData = original_model_probability && original_model_probability > 0;
+      const modelProb = hasOriginalModelData ? original_model_probability : fairData.fairProb;
+      
+      // Edge = model probability - implied probability (as percentage)
+      const edge = (modelProb - impliedProb) * 100;
+      
       const hasSharp = matchedOutcome.sharpOdds.length > 0;
       const bookCount = matchedOutcome.bookmakers.length;
       
-      // Calculate confidence and bet score using SAME LOGIC
-      const confidence = determineConfidence(edge, bookCount, bestOdds, hasSharp);
-      const betScore = calculateBetScore(edge, confidence, bookCount);
-      
-      // Calculate Kelly stake
-      const kellyStake = calculateFractionalKelly(fairProb, bestOdds);
+      // If we have original values, preserve them. Otherwise calculate fresh.
+      const confidence = hasOriginalModelData && original_confidence 
+        ? original_confidence 
+        : determineConfidence(edge, bookCount, bestOdds, hasSharp);
+        
+      const betScore = hasOriginalModelData && original_bet_score 
+        ? original_bet_score 
+        : calculateBetScore(edge, confidence, bookCount);
+        
+      const kellyStake = hasOriginalModelData && original_stake_units 
+        ? original_stake_units 
+        : calculateFractionalKelly(modelProb, bestOdds);
 
       console.log('=== RECHECK COMPLETE ===');
       console.log({
         selection: matchedOutcome.name,
         bestOdds,
         bestBookmaker,
-        fairOdds: fairOdds.toFixed(2),
-        fairProb: (fairProb * 100).toFixed(1) + '%',
+        modelProb: (modelProb * 100).toFixed(1) + '%',
+        impliedProb: (impliedProb * 100).toFixed(1) + '%',
         edge: edge.toFixed(1) + '%',
         confidence,
         betScore,
-        kellyStake: kellyStake.toFixed(2) + 'u'
+        kellyStake: kellyStake.toFixed(2) + 'u',
+        usedOriginalModel: hasOriginalModelData
       });
 
       const updatedBet = {
@@ -637,13 +654,15 @@ serve(async (req) => {
         selection_label: matchedOutcome.name,
         odds_decimal: bestOdds,
         bookmaker: bestBookmaker,
-        model_probability: fairProb,
+        model_probability: modelProb,
         implied_probability: impliedProb,
         edge: edge / 100,  // Store as decimal
         bet_score: betScore,
         confidence,
         recommended_stake_units: kellyStake,
-        rationale: `Rechecked: Fair ${(fairProb * 100).toFixed(0)}% vs Implied ${(impliedProb * 100).toFixed(0)}%. ${hasSharp ? 'Sharp line used.' : ''} ${bookCount} books.`,
+        rationale: hasOriginalModelData 
+          ? `Updated odds: Model ${(modelProb * 100).toFixed(0)}% vs Market ${(impliedProb * 100).toFixed(0)}%. ${bookCount} books.`
+          : `Rechecked: Fair ${(modelProb * 100).toFixed(0)}% vs Implied ${(impliedProb * 100).toFixed(0)}%. ${hasSharp ? 'Sharp line used.' : ''} ${bookCount} books.`,
       };
 
       return new Response(

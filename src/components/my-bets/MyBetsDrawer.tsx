@@ -68,6 +68,12 @@ export function MyBetsDrawer({
           market_id: bet.market_id,
           event_name: bet.event_name,
           league: bet.league,
+          sport: bet.sport,
+          start_time: bet.start_time,
+          original_model_probability: bet.model_probability,
+          original_bet_score: bet.bet_score,
+          original_confidence: bet.confidence,
+          original_stake_units: bet.recommended_stake_units,
         },
         headers: session ? {
           Authorization: `Bearer ${session.access_token}`
