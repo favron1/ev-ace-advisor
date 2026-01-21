@@ -38,11 +38,23 @@ export function MyBetsDrawer({
 }: MyBetsDrawerProps) {
   const { toast } = useToast();
   const [checkingBetId, setCheckingBetId] = useState<string | null>(null);
+  const [checkingAllResults, setCheckingAllResults] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
   const { findMatchForBet, loading: scoresLoading, fetchLiveScores: refreshScores } = useLiveScores(true, 30000);
 
   const trackingBets = bets.filter(b => b.status === 'tracking');
   const settledBets = bets.filter(b => ['won', 'lost', 'void'].includes(b.status));
+  
+  // Find bets that are likely finished (started 2+ hours ago)
+  const getFinishedBets = () => {
+    const now = new Date();
+    const twoHoursMs = 2 * 60 * 60 * 1000;
+    return trackingBets.filter(bet => {
+      if (!bet.start_time) return false;
+      const startTime = new Date(bet.start_time);
+      return now.getTime() - startTime.getTime() > twoHoursMs;
+    });
+  };
 
   const recheckBet = async (bet: MyBet) => {
     setCheckingBetId(bet.id);
@@ -100,6 +112,72 @@ export function MyBetsDrawer({
       });
     } finally {
       setCheckingBetId(null);
+    }
+  };
+
+  const checkAllResults = async () => {
+    const finishedBets = getFinishedBets();
+    if (finishedBets.length === 0) {
+      toast({
+        title: 'No finished bets',
+        description: 'No bets have started 2+ hours ago yet',
+      });
+      return;
+    }
+
+    setCheckingAllResults(true);
+    let wonCount = 0;
+    let lostCount = 0;
+    let checkedCount = 0;
+
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+
+      for (const bet of finishedBets) {
+        try {
+          const { data, error } = await supabase.functions.invoke('recheck-bet', {
+            body: {
+              event_id: bet.event_id,
+              selection: bet.selection,
+              market_id: bet.market_id,
+              event_name: bet.event_name,
+              league: bet.league,
+            },
+            headers: session ? {
+              Authorization: `Bearer ${session.access_token}`
+            } : undefined
+          });
+
+          if (error) continue;
+
+          if (data.result) {
+            const { status } = data.result;
+            if (status === 'won' || status === 'lost' || status === 'void') {
+              onSetStatus(bet.id, status);
+              checkedCount++;
+              if (status === 'won') wonCount++;
+              if (status === 'lost') lostCount++;
+            }
+          }
+        } catch {
+          // Skip failed bets
+        }
+      }
+
+      if (checkedCount > 0) {
+        toast({
+          title: `Results checked: ${checkedCount} bets`,
+          description: `${wonCount} won, ${lostCount} lost`,
+          variant: wonCount > lostCount ? 'default' : 'destructive',
+        });
+      } else {
+        toast({
+          title: 'No results available',
+          description: 'Matches may still be in progress',
+        });
+      }
+    } finally {
+      setCheckingAllResults(false);
     }
   };
 
@@ -199,6 +277,22 @@ export function MyBetsDrawer({
                       <h3 className="text-sm font-medium text-muted-foreground">
                         Tracking ({trackingBets.length})
                       </h3>
+                      {getFinishedBets().length > 0 && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={checkAllResults}
+                          disabled={checkingAllResults}
+                          className="gap-1"
+                        >
+                          {checkingAllResults ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <RefreshCw className="h-3 w-3" />
+                          )}
+                          Check All ({getFinishedBets().length})
+                        </Button>
+                      )}
                     </div>
                     {trackingBets.map(bet => {
                       const kickoff = getKickoffDisplay(bet.start_time);
