@@ -18,6 +18,8 @@ import { MyBet } from '@/types/my-bets';
 import { RecommendedBet } from '@/types/model-betting';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
+import { useLiveScores } from '@/hooks/useLiveScores';
+import { LiveScoreBadge } from './LiveScoreBadge';
 
 interface MyBetsDrawerProps {
   bets: MyBet[];
@@ -37,6 +39,7 @@ export function MyBetsDrawer({
   const { toast } = useToast();
   const [checkingBetId, setCheckingBetId] = useState<string | null>(null);
   const [isOpen, setIsOpen] = useState(false);
+  const { findMatchForBet, loading: scoresLoading, fetchLiveScores: refreshScores } = useLiveScores(true, 30000);
 
   const trackingBets = bets.filter(b => b.status === 'tracking');
   const settledBets = bets.filter(b => ['won', 'lost', 'void'].includes(b.status));
@@ -199,8 +202,11 @@ export function MyBetsDrawer({
                     </div>
                     {trackingBets.map(bet => {
                       const kickoff = getKickoffDisplay(bet.start_time);
+                      const liveMatch = findMatchForBet(bet.event_name);
+                      const isLive = liveMatch?.status === 'live';
+                      
                       return (
-                        <Card key={bet.id} className={kickoff.urgent ? 'border-warning' : ''}>
+                        <Card key={bet.id} className={isLive ? 'border-profit bg-profit/5' : kickoff.urgent ? 'border-warning' : ''}>
                           <CardContent className="p-4 space-y-3">
                             <div className="flex items-start justify-between gap-2">
                               <div className="flex-1 min-w-0">
@@ -210,6 +216,21 @@ export function MyBetsDrawer({
                               {getStatusBadge(bet.status)}
                             </div>
                             
+                            {/* Live Score Display */}
+                            {liveMatch && (liveMatch.status === 'live' || liveMatch.status === 'completed') && (
+                              <div className="bg-muted/50 rounded-lg p-2 border">
+                                <div className="flex items-center justify-between">
+                                  <div className="flex-1 text-center">
+                                    <p className="text-xs text-muted-foreground truncate">{liveMatch.homeTeam}</p>
+                                  </div>
+                                  <LiveScoreBadge match={liveMatch} />
+                                  <div className="flex-1 text-center">
+                                    <p className="text-xs text-muted-foreground truncate">{liveMatch.awayTeam}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                            
                             <div className="flex items-center gap-2">
                               <Badge variant="secondary">{bet.selection_label}</Badge>
                               <span className="font-mono font-bold">{bet.odds_decimal?.toFixed(2)}</span>
@@ -217,7 +238,7 @@ export function MyBetsDrawer({
 
                             <div className="flex items-center gap-2 text-xs">
                               <span className="text-muted-foreground">{kickoff.time}</span>
-                              {kickoff.countdown && (
+                              {!liveMatch?.status && kickoff.countdown && (
                                 <Badge 
                                   variant={kickoff.countdown === 'LIVE' ? 'destructive' : 'secondary'}
                                   className={kickoff.countdown === 'LIVE' ? 'animate-pulse' : ''}
