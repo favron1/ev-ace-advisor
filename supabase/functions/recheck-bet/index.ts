@@ -6,6 +6,13 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+// Sharp bookmakers - same as analyze-value-bets
+const SHARP_BOOKS = ['pinnacle', 'pinnacle_us', 'betfair_ex_uk', 'matchbook', 'sbobet'];
+
+// League tiers for edge thresholds (same as original model)
+const TIER_1_LEAGUES = ['soccer_epl', 'soccer_spain_la_liga', 'soccer_germany_bundesliga', 'soccer_italy_serie_a', 'soccer_france_ligue_one'];
+const TIER_2_LEAGUES = ['soccer_netherlands_eredivisie', 'soccer_portugal_primeira_liga', 'soccer_belgium_first_div'];
+
 interface RecheckInput {
   event_id: string;
   selection: string;
@@ -14,6 +21,7 @@ interface RecheckInput {
   league?: string;
   sport?: string;
   start_time?: string;
+  original_model_probability?: number;
 }
 
 interface MatchResult {
@@ -21,6 +29,104 @@ interface MatchResult {
   actual_score?: string;
   home_score?: number;
   away_score?: number;
+}
+
+interface OutcomeData {
+  name: string;
+  odds: number[];
+  sharpOdds: number[];
+  bookmakers: string[];
+  bestOdds: number;
+  bestBookmaker: string;
+}
+
+// De-vig odds to get fair probabilities (same logic as analyze-value-bets)
+function deVigOdds(outcomes: OutcomeData[]): Map<string, { fairProb: number; fairOdds: number }> {
+  const result = new Map<string, { fairProb: number; fairOdds: number }>();
+  
+  let oddsToUse: { name: string; odds: number }[] = [];
+  const hasSharpForAll = outcomes.every(o => o.sharpOdds.length > 0);
+  
+  if (hasSharpForAll) {
+    oddsToUse = outcomes.map(o => ({
+      name: o.name,
+      odds: o.sharpOdds.reduce((a, b) => a + b, 0) / o.sharpOdds.length
+    }));
+  } else {
+    oddsToUse = outcomes.map(o => {
+      if (o.odds.length === 0) return { name: o.name, odds: 0 };
+      const mean = o.odds.reduce((a, b) => a + b, 0) / o.odds.length;
+      const stdDev = Math.sqrt(o.odds.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / o.odds.length);
+      const filtered = o.odds.filter(odd => Math.abs(odd - mean) <= 2 * stdDev);
+      return {
+        name: o.name,
+        odds: filtered.length > 0 ? filtered.reduce((a, b) => a + b, 0) / filtered.length : mean
+      };
+    });
+  }
+  
+  const rawProbs = oddsToUse.map(o => ({
+    name: o.name,
+    rawProb: o.odds > 0 ? 1 / o.odds : 0
+  }));
+  
+  const overround = rawProbs.reduce((sum, p) => sum + p.rawProb, 0);
+  if (overround === 0) return result;
+  
+  for (const p of rawProbs) {
+    const fairProb = p.rawProb / overround;
+    const fairOdds = fairProb > 0 ? 1 / fairProb : 0;
+    result.set(p.name, { fairProb, fairOdds });
+  }
+  
+  return result;
+}
+
+// Calculate fractional Kelly stake with caps (same as original)
+function calculateFractionalKelly(fairProb: number, bestOdds: number): number {
+  const p = fairProb;
+  const q = 1 - p;
+  const b = bestOdds - 1;
+  
+  if (b <= 0) return 0;
+  const kellyFull = (b * p - q) / b;
+  if (kellyFull <= 0) return 0;
+  
+  const kellyFraction = kellyFull * 0.25;
+  const stakePercent = kellyFraction * 100;
+  
+  if (stakePercent < 0.25) return 0.25;
+  return Math.min(stakePercent, 1.5);
+}
+
+// Determine confidence based on edge (same logic as original)
+function determineConfidence(edge: number, bookCount: number, bestOdds: number, hasSharp: boolean): 'high' | 'medium' | 'low' {
+  const hasGoodLiquidity = bookCount >= 4;
+  const hasGreatLiquidity = bookCount >= 6;
+  const inOptimalOddsRange = bestOdds >= 1.5 && bestOdds <= 6.0;
+  
+  if (edge >= 12) return 'high';
+  if (edge >= 8) return (hasSharp || hasGoodLiquidity || inOptimalOddsRange) ? 'high' : 'medium';
+  if (edge >= 5) {
+    if (hasSharp && hasGreatLiquidity && inOptimalOddsRange) return 'high';
+    return 'medium';
+  }
+  if (edge >= 3) return (hasSharp || hasGoodLiquidity) ? 'medium' : 'low';
+  return 'low';
+}
+
+// Calculate bet score (same formula as original model)
+function calculateBetScore(edge: number, confidence: 'high' | 'medium' | 'low', bookCount: number): number {
+  // Base score from edge (edge of 10% = 70 base score)
+  const baseScore = Math.min(50 + (edge * 3), 85);
+  
+  // Confidence bonus
+  const confidenceBonus = confidence === 'high' ? 10 : confidence === 'medium' ? 5 : 0;
+  
+  // Liquidity bonus (more books = more reliable)
+  const liquidityBonus = Math.min(bookCount, 5);
+  
+  return Math.round(Math.min(baseScore + confidenceBonus + liquidityBonus, 100));
 }
 
 serve(async (req) => {
@@ -304,60 +410,227 @@ serve(async (req) => {
       );
     }
 
-    // Event hasn't started yet - recheck only updates ODDS from current market
-    // We preserve the original model values (bet_score, edge, confidence) from the calibrated model
-    // The recheck should NOT regenerate the analysis - that would be inconsistent with the original recommendation
+    // ============= EVENT HASN'T STARTED - FETCH FRESH ODDS FROM THE-ODDS-API =============
+    // Use the SAME logic as the original model to calculate fair probability, edge, bet score
     
-    // Get current odds if we have event data
-    let currentOdds: number | null = null;
-    let currentImpliedProb: number | null = null;
-    let bookmaker = 'Unknown';
-
-    if (event?.markets) {
-      const relevantMarkets = event.markets.filter(
-        (m: any) => m.selection === selection
-      );
-
-      if (relevantMarkets.length > 0) {
-        const bestMarket = relevantMarkets.reduce((best: any, current: any) => {
-          return parseFloat(current.odds_decimal) > parseFloat(best.odds_decimal) ? current : best;
-        }, relevantMarkets[0]);
-
-        currentOdds = parseFloat(bestMarket.odds_decimal);
-        currentImpliedProb = 1 / currentOdds;
-        bookmaker = bestMarket.bookmaker;
-      }
-    }
-
-    // If we found updated odds, return them - but DO NOT change model values
-    if (currentOdds !== null) {
-      console.log('=== RECHECK BET COMPLETE - Odds Updated ===');
-      console.log('New odds:', currentOdds, 'from', bookmaker);
-
+    if (!oddsApiKey) {
       return new Response(
-        JSON.stringify({
-          updated_odds: {
-            odds_decimal: currentOdds,
-            implied_probability: currentImpliedProb,
-            bookmaker,
-          },
-          message: `Odds updated: ${currentOdds.toFixed(2)} @ ${bookmaker}`
+        JSON.stringify({ 
+          message: 'Cannot recheck - odds API not configured',
+          updated_bet: null
         }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    // No odds update available - just confirm the bet is still valid
-    console.log('=== RECHECK BET COMPLETE - No Updates ===');
-    console.log('Could not find updated odds, keeping original values');
+    console.log('Event not started, fetching fresh odds from the-odds-api...');
 
-    return new Response(
-      JSON.stringify({
-        updated_odds: null,
-        message: 'No updated odds found - original values preserved'
-      }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    );
+    // Map league to sport key
+    const leagueToSportKey: Record<string, string> = {
+      'EPL': 'soccer_epl',
+      'La Liga': 'soccer_spain_la_liga',
+      'Serie A': 'soccer_italy_serie_a',
+      'Bundesliga': 'soccer_germany_bundesliga',
+      'Ligue 1': 'soccer_france_ligue_one',
+      'A-League': 'soccer_australia_aleague',
+      'MLS': 'soccer_usa_mls',
+      'Primera División - Argentina': 'soccer_argentina_primera_division',
+      'Argentina Primera': 'soccer_argentina_primera_division',
+      'Eredivisie': 'soccer_netherlands_eredivisie',
+      'Primeira Liga': 'soccer_portugal_primeira_liga',
+    };
+
+    let sportKey = leagueToSportKey[league || ''] || 'soccer_epl';
+    console.log('Using sport key:', sportKey, 'for league:', league);
+
+    try {
+      // Fetch current odds for this sport
+      const oddsUrl = `https://api.the-odds-api.com/v4/sports/${sportKey}/odds/?apiKey=${oddsApiKey}&regions=au,uk,eu&markets=h2h&oddsFormat=decimal`;
+      const oddsRes = await fetch(oddsUrl);
+      
+      if (!oddsRes.ok) {
+        console.error('Odds API error:', await oddsRes.text());
+        throw new Error('Failed to fetch odds');
+      }
+
+      const events = await oddsRes.json();
+      console.log(`Fetched ${events.length} events for ${sportKey}`);
+
+      // Find matching event
+      const matchingEvent = events.find((e: any) => {
+        const homeMatch = e.home_team.toLowerCase().includes(homeTeam.toLowerCase().split(' ')[0]) ||
+                         homeTeam.toLowerCase().includes(e.home_team.toLowerCase().split(' ')[0]);
+        const awayMatch = e.away_team.toLowerCase().includes(awayTeam.toLowerCase().split(' ')[0]) ||
+                         awayTeam.toLowerCase().includes(e.away_team.toLowerCase().split(' ')[0]);
+        return homeMatch && awayMatch;
+      });
+
+      if (!matchingEvent) {
+        console.log('No matching event found in odds API');
+        return new Response(
+          JSON.stringify({
+            updated_bet: null,
+            message: 'Event not found in current odds - may have started or finished'
+          }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      console.log('Found matching event:', matchingEvent.home_team, 'vs', matchingEvent.away_team);
+
+      // Extract outcome data (same logic as analyze-value-bets)
+      const outcomeMap = new Map<string, OutcomeData>();
+      
+      for (const bm of matchingEvent.bookmakers || []) {
+        const market = bm.markets?.find((m: any) => m.key === 'h2h');
+        if (!market) continue;
+        
+        for (const outcome of market.outcomes || []) {
+          const existing: OutcomeData = outcomeMap.get(outcome.name) || {
+            name: outcome.name,
+            odds: [] as number[],
+            sharpOdds: [] as number[],
+            bookmakers: [] as string[],
+            bestOdds: 0,
+            bestBookmaker: ''
+          };
+          
+          (existing.odds as number[]).push(outcome.price);
+          (existing.bookmakers as string[]).push(bm.key);
+          
+          if (SHARP_BOOKS.includes(bm.key)) {
+            (existing.sharpOdds as number[]).push(outcome.price);
+          }
+          
+          if (outcome.price > existing.bestOdds) {
+            existing.bestOdds = outcome.price;
+            existing.bestBookmaker = bm.title || bm.key;
+          }
+          
+          outcomeMap.set(outcome.name, existing);
+        }
+      }
+
+      const outcomes = Array.from(outcomeMap.values());
+      
+      if (outcomes.length === 0) {
+        return new Response(
+          JSON.stringify({
+            updated_bet: null,
+            message: 'No odds available for this event'
+          }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // De-vig to get fair probabilities (SAME LOGIC AS ORIGINAL MODEL)
+      const fairProbabilities = deVigOdds(outcomes);
+      
+      // Find the outcome that matches our selection
+      let matchedOutcome: OutcomeData | null = null;
+      const selLower = selection.toLowerCase();
+      
+      for (const outcome of outcomes) {
+        const outcomeLower = outcome.name.toLowerCase();
+        if (outcomeLower === selLower || 
+            selLower.includes(outcomeLower.split(' ')[0]) ||
+            outcomeLower.includes(selLower.split(' ')[0])) {
+          matchedOutcome = outcome;
+          break;
+        }
+      }
+
+      if (!matchedOutcome) {
+        console.log('Could not match selection to outcome:', selection);
+        return new Response(
+          JSON.stringify({
+            updated_bet: null,
+            message: `Selection "${selection}" not found in current market`
+          }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const fairData = fairProbabilities.get(matchedOutcome.name);
+      if (!fairData) {
+        return new Response(
+          JSON.stringify({
+            updated_bet: null,
+            message: 'Could not calculate fair probability'
+          }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const bestOdds = matchedOutcome.bestOdds;
+      const bestBookmaker = matchedOutcome.bestBookmaker;
+      const impliedProb = 1 / bestOdds;
+      const fairProb = fairData.fairProb;
+      const fairOdds = fairData.fairOdds;
+      
+      // Edge = (best odds / fair odds - 1) as percentage (same formula)
+      const edge = ((bestOdds / fairOdds) - 1) * 100;
+      const hasSharp = matchedOutcome.sharpOdds.length > 0;
+      const bookCount = matchedOutcome.bookmakers.length;
+      
+      // Calculate confidence and bet score using SAME LOGIC
+      const confidence = determineConfidence(edge, bookCount, bestOdds, hasSharp);
+      const betScore = calculateBetScore(edge, confidence, bookCount);
+      
+      // Calculate Kelly stake
+      const kellyStake = calculateFractionalKelly(fairProb, bestOdds);
+
+      console.log('=== RECHECK COMPLETE ===');
+      console.log({
+        selection: matchedOutcome.name,
+        bestOdds,
+        bestBookmaker,
+        fairOdds: fairOdds.toFixed(2),
+        fairProb: (fairProb * 100).toFixed(1) + '%',
+        edge: edge.toFixed(1) + '%',
+        confidence,
+        betScore,
+        kellyStake: kellyStake.toFixed(2) + 'u'
+      });
+
+      const updatedBet = {
+        event_id: matchingEvent.id,
+        market_id: input.market_id || '',
+        sport: detectedSport,
+        league: league || '',
+        event_name: `${matchingEvent.home_team} vs ${matchingEvent.away_team}`,
+        start_time: matchingEvent.commence_time,
+        selection: matchedOutcome.name,
+        selection_label: matchedOutcome.name,
+        odds_decimal: bestOdds,
+        bookmaker: bestBookmaker,
+        model_probability: fairProb,
+        implied_probability: impliedProb,
+        edge: edge / 100,  // Store as decimal
+        bet_score: betScore,
+        confidence,
+        recommended_stake_units: kellyStake,
+        rationale: `Rechecked: Fair ${(fairProb * 100).toFixed(0)}% vs Implied ${(impliedProb * 100).toFixed(0)}%. ${hasSharp ? 'Sharp line used.' : ''} ${bookCount} books.`,
+      };
+
+      return new Response(
+        JSON.stringify({
+          updated_bet: updatedBet,
+          message: `Updated: ${bestOdds.toFixed(2)} @ ${bestBookmaker}, Edge ${edge.toFixed(1)}%, Score ${betScore}`
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+
+    } catch (oddsError) {
+      console.error('Error fetching fresh odds:', oddsError);
+      return new Response(
+        JSON.stringify({
+          updated_bet: null,
+          message: 'Could not fetch updated odds'
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
 
   } catch (error) {
     console.error('Error in recheck-bet:', error);
