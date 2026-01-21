@@ -46,7 +46,7 @@ serve(async (req) => {
       throw new Error('ODDS_API_KEY not configured');
     }
 
-    // Expanded sport coverage
+    // Expanded sport coverage - using correct API sport keys
     const sportConfigs = [
       // Soccer
       { key: 'soccer_epl', sport: 'soccer' as const },
@@ -54,9 +54,9 @@ serve(async (req) => {
       { key: 'soccer_germany_bundesliga', sport: 'soccer' as const },
       { key: 'soccer_italy_serie_a', sport: 'soccer' as const },
       { key: 'soccer_france_ligue_one', sport: 'soccer' as const },
-      // Tennis - Grand Slams
-      { key: 'tennis_atp_aus_open', sport: 'tennis' as const },
-      { key: 'tennis_wta_aus_open', sport: 'tennis' as const },
+      // Tennis - Grand Slams (correct keys with _singles suffix for AUS Open)
+      { key: 'tennis_atp_aus_open_singles', sport: 'tennis' as const },
+      { key: 'tennis_wta_aus_open_singles', sport: 'tennis' as const },
       { key: 'tennis_atp_french_open', sport: 'tennis' as const },
       { key: 'tennis_wta_french_open', sport: 'tennis' as const },
       { key: 'tennis_atp_wimbledon', sport: 'tennis' as const },
@@ -132,11 +132,11 @@ serve(async (req) => {
             // Format league name
             let leagueName = match.sport_title;
             if (config.sport === 'tennis') {
-              // Clean up tennis league names
+              // Clean up tennis league names (handle _singles suffix keys)
               if (config.key.includes('aus_open')) leagueName = 'Australian Open';
               else if (config.key.includes('french_open')) leagueName = 'French Open';
               else if (config.key.includes('wimbledon')) leagueName = 'Wimbledon';
-              else if (config.key.includes('us_open')) leagueName = 'US Open';
+              else if (config.key.includes('us_open') && !config.key.includes('aus')) leagueName = 'US Open';
               
               if (config.key.includes('wta')) leagueName = `WTA ${leagueName}`;
               else if (config.key.includes('atp')) leagueName = `ATP ${leagueName}`;
