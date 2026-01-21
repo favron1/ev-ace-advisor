@@ -12,6 +12,8 @@ interface RecheckInput {
   market_id?: string;
   event_name?: string;
   league?: string;
+  sport?: string;
+  start_time?: string;
 }
 
 interface MatchResult {
@@ -35,16 +37,17 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
     
     const input: RecheckInput = await req.json();
-    const { event_id, selection, event_name, league } = input;
+    const { event_id, selection, event_name, league, sport, start_time } = input;
 
     console.log('=== RECHECK BET START ===');
-    console.log('Input:', { event_id, selection, event_name, league });
+    console.log('Input:', { event_id, selection, event_name, league, sport, start_time });
 
-    // First try to get event from database
+    // First try to use start_time from input (passed from frontend)
     let event = null;
     let homeTeam = '';
     let awayTeam = '';
-    let eventStartTime: Date | null = null;
+    let eventStartTime: Date | null = start_time ? new Date(start_time) : null;
+    let detectedSport = sport || 'soccer';
 
     if (event_id && event_id !== event_name) {
       const { data: eventData } = await supabase
@@ -57,7 +60,10 @@ serve(async (req) => {
         event = eventData;
         homeTeam = event.home_team;
         awayTeam = event.away_team;
-        eventStartTime = new Date(event.start_time_utc);
+        if (!eventStartTime) {
+          eventStartTime = new Date(event.start_time_utc);
+        }
+        detectedSport = event.sport || detectedSport;
       }
     }
 
@@ -92,9 +98,11 @@ serve(async (req) => {
     // If event has likely finished, check for results via the-odds-api
     if (eventLikelyFinished && oddsApiKey) {
       console.log('Event likely finished, checking results...');
+      console.log('Detected sport:', detectedSport, 'League:', league);
       
       // Get completed scores from the-odds-api
       const leagueMap: Record<string, string> = {
+        // Soccer
         'EPL': 'soccer_epl',
         'La Liga': 'soccer_spain_la_liga',
         'Serie A': 'soccer_italy_serie_a',
@@ -103,9 +111,34 @@ serve(async (req) => {
         'A-League': 'soccer_australia_aleague',
         'MLS': 'soccer_usa_mls',
         'Argentina Primera': 'soccer_argentina_primera_division',
+        // Tennis
+        'ATP Australian Open': 'tennis_atp_aus_open_singles',
+        'WTA Australian Open': 'tennis_wta_aus_open_singles',
+        'ATP French Open': 'tennis_atp_french_open',
+        'WTA French Open': 'tennis_wta_french_open',
+        'ATP Wimbledon': 'tennis_atp_wimbledon',
+        'WTA Wimbledon': 'tennis_wta_wimbledon',
+        'ATP US Open': 'tennis_atp_us_open',
+        'WTA US Open': 'tennis_wta_us_open',
+        // Basketball
+        'NBA': 'basketball_nba',
+        'Euroleague': 'basketball_euroleague',
       };
 
-      const sportKey = league ? leagueMap[league] || 'soccer' : 'soccer';
+      // Determine sport key - try league map first, then fall back to sport-based default
+      let sportKey = leagueMap[league || ''];
+      if (!sportKey) {
+        if (detectedSport === 'tennis') {
+          // Default to ATP Australian Open for tennis if no specific league
+          sportKey = 'tennis_atp_aus_open_singles';
+        } else if (detectedSport === 'basketball') {
+          sportKey = 'basketball_nba';
+        } else {
+          sportKey = 'soccer_epl';
+        }
+      }
+
+      console.log('Using sport key:', sportKey);
       
       try {
         const scoresUrl = `https://api.the-odds-api.com/v4/sports/${sportKey}/scores/?apiKey=${oddsApiKey}&daysFrom=3`;
@@ -115,10 +148,34 @@ serve(async (req) => {
           const scores = await scoresRes.json();
           console.log(`Fetched ${scores.length} scores for ${sportKey}`);
 
-          // Find matching game
+          // Find matching game - improved matching for tennis (uses last names)
           const matchingGame = scores.find((game: any) => {
             if (!game.completed || !game.scores) return false;
             
+            // For tennis, match on last names since formatting varies
+            const isTennis = detectedSport === 'tennis' || sportKey.includes('tennis');
+            
+            if (isTennis) {
+              // Get last names for comparison
+              const gameHomeLastName = game.home_team.split(' ').pop()?.toLowerCase() || '';
+              const gameAwayLastName = game.away_team.split(' ').pop()?.toLowerCase() || '';
+              const ourHomeLastName = homeTeam.split(' ').pop()?.toLowerCase() || '';
+              const ourAwayLastName = awayTeam.split(' ').pop()?.toLowerCase() || '';
+              
+              // Check if last names match (in either order)
+              const matchFound = 
+                (gameHomeLastName === ourHomeLastName && gameAwayLastName === ourAwayLastName) ||
+                (gameHomeLastName === ourAwayLastName && gameAwayLastName === ourHomeLastName) ||
+                (gameHomeLastName.includes(ourHomeLastName) && gameAwayLastName.includes(ourAwayLastName)) ||
+                (ourHomeLastName.includes(gameHomeLastName) && ourAwayLastName.includes(gameAwayLastName));
+              
+              if (matchFound) {
+                console.log('Tennis match found:', { gameHomeLastName, gameAwayLastName, ourHomeLastName, ourAwayLastName });
+              }
+              return matchFound;
+            }
+            
+            // Soccer/basketball matching (existing logic)
             const homeMatch = game.home_team.toLowerCase().includes(homeTeam.toLowerCase().split(' ')[0]) ||
                              homeTeam.toLowerCase().includes(game.home_team.toLowerCase().split(' ')[0]);
             const awayMatch = game.away_team.toLowerCase().includes(awayTeam.toLowerCase().split(' ')[0]) ||
@@ -128,7 +185,7 @@ serve(async (req) => {
           });
 
           if (matchingGame) {
-            console.log('Found matching completed game:', matchingGame);
+            console.log('Found matching completed game:', JSON.stringify(matchingGame));
             
             const homeScore = matchingGame.scores.find((s: any) => s.name === matchingGame.home_team)?.score;
             const awayScore = matchingGame.scores.find((s: any) => s.name === matchingGame.away_team)?.score;
@@ -137,44 +194,77 @@ serve(async (req) => {
               const hScore = parseInt(homeScore);
               const aScore = parseInt(awayScore);
               
-              // Determine actual outcome
+              // Determine actual winner (for tennis, this is set score)
               let actualWinner = 'Draw';
-              if (hScore > aScore) actualWinner = homeTeam;
-              else if (aScore > hScore) actualWinner = awayTeam;
+              let gameWinner = matchingGame.home_team;
+              if (hScore > aScore) {
+                actualWinner = homeTeam;
+                gameWinner = matchingGame.home_team;
+              } else if (aScore > hScore) {
+                actualWinner = awayTeam;
+                gameWinner = matchingGame.away_team;
+              }
+
+              console.log('Score analysis:', { hScore, aScore, actualWinner, gameWinner, selection });
               
               // Check if our selection won
               let result: MatchResult['status'] = 'pending';
               
               // Handle different selection formats
               const selLower = selection.toLowerCase();
-              const isHomeSelection = selLower.includes(homeTeam.toLowerCase().split(' ')[0]) || 
-                                     homeTeam.toLowerCase().includes(selLower.split(' ')[0]);
-              const isAwaySelection = selLower.includes(awayTeam.toLowerCase().split(' ')[0]) ||
-                                     awayTeam.toLowerCase().includes(selLower.split(' ')[0]);
-              const isDrawSelection = selLower === 'draw' || selLower === 'x';
               
-              if (isHomeSelection) {
-                result = actualWinner === homeTeam ? 'won' : 'lost';
-              } else if (isAwaySelection) {
-                result = actualWinner === awayTeam ? 'won' : 'lost';
-              } else if (isDrawSelection) {
-                result = hScore === aScore ? 'won' : 'lost';
-              } else if (selLower.includes('over') || selLower.includes('under')) {
-                // Handle over/under
-                const totalGoals = hScore + aScore;
-                const lineMatch = selection.match(/(\d+\.?\d*)/);
-                if (lineMatch) {
-                  const line = parseFloat(lineMatch[1]);
-                  if (selLower.includes('over')) {
-                    result = totalGoals > line ? 'won' : 'lost';
-                  } else {
-                    result = totalGoals < line ? 'won' : 'lost';
-                  }
+              // For tennis - match on last name
+              const isTennis = detectedSport === 'tennis' || sportKey.includes('tennis');
+              const selectionLastName = selection.split(' ').pop()?.toLowerCase() || '';
+              const gameWinnerLastName = gameWinner.split(' ').pop()?.toLowerCase() || '';
+              
+              if (isTennis) {
+                // Tennis: compare last names
+                const homeLastName = homeTeam.split(' ').pop()?.toLowerCase() || '';
+                const awayLastName = awayTeam.split(' ').pop()?.toLowerCase() || '';
+                
+                const selectedHome = selectionLastName === homeLastName || selLower.includes(homeLastName);
+                const selectedAway = selectionLastName === awayLastName || selLower.includes(awayLastName);
+                const winnerIsHome = gameWinnerLastName === matchingGame.home_team.split(' ').pop()?.toLowerCase();
+                
+                if (selectedHome) {
+                  result = winnerIsHome && hScore > aScore ? 'won' : 'lost';
+                } else if (selectedAway) {
+                  result = !winnerIsHome && aScore > hScore ? 'won' : 'lost';
                 }
-              } else if (selLower === 'btts yes' || selLower === 'both teams to score - yes') {
-                result = (hScore > 0 && aScore > 0) ? 'won' : 'lost';
-              } else if (selLower === 'btts no' || selLower === 'both teams to score - no') {
-                result = (hScore === 0 || aScore === 0) ? 'won' : 'lost';
+                
+                console.log('Tennis result:', { selectionLastName, gameWinnerLastName, selectedHome, selectedAway, winnerIsHome, result });
+              } else {
+                // Soccer/basketball logic
+                const isHomeSelection = selLower.includes(homeTeam.toLowerCase().split(' ')[0]) || 
+                                       homeTeam.toLowerCase().includes(selLower.split(' ')[0]);
+                const isAwaySelection = selLower.includes(awayTeam.toLowerCase().split(' ')[0]) ||
+                                       awayTeam.toLowerCase().includes(selLower.split(' ')[0]);
+                const isDrawSelection = selLower === 'draw' || selLower === 'x';
+                
+                if (isHomeSelection) {
+                  result = actualWinner === homeTeam ? 'won' : 'lost';
+                } else if (isAwaySelection) {
+                  result = actualWinner === awayTeam ? 'won' : 'lost';
+                } else if (isDrawSelection) {
+                  result = hScore === aScore ? 'won' : 'lost';
+                } else if (selLower.includes('over') || selLower.includes('under')) {
+                  // Handle over/under
+                  const totalGoals = hScore + aScore;
+                  const lineMatch = selection.match(/(\d+\.?\d*)/);
+                  if (lineMatch) {
+                    const line = parseFloat(lineMatch[1]);
+                    if (selLower.includes('over')) {
+                      result = totalGoals > line ? 'won' : 'lost';
+                    } else {
+                      result = totalGoals < line ? 'won' : 'lost';
+                    }
+                  }
+                } else if (selLower === 'btts yes' || selLower === 'both teams to score - yes') {
+                  result = (hScore > 0 && aScore > 0) ? 'won' : 'lost';
+                } else if (selLower === 'btts no' || selLower === 'both teams to score - no') {
+                  result = (hScore === 0 || aScore === 0) ? 'won' : 'lost';
+                }
               }
 
               console.log('Result determined:', { result, actualWinner, selection, hScore, aScore });
