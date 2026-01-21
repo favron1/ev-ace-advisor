@@ -475,9 +475,16 @@ export function BetSlipProvider({ children }: { children: ReactNode }) {
 
   const isInSlip = (id: string) => slipBets.some(b => b.id === id);
 
-  const draftBets = slipBets.filter(b => b.status === 'draft');
-  const placedBets = slipBets.filter(b => b.status === 'placed');
-  const settledBets = slipBets.filter(b => b.status === 'won' || b.status === 'lost');
+  // Sort by commenceTime (soonest first)
+  const sortByCommenceTime = (a: SlipBet, b: SlipBet) => {
+    const timeA = a.commenceTime ? new Date(a.commenceTime).getTime() : Infinity;
+    const timeB = b.commenceTime ? new Date(b.commenceTime).getTime() : Infinity;
+    return timeA - timeB;
+  };
+
+  const draftBets = slipBets.filter(b => b.status === 'draft').sort(sortByCommenceTime);
+  const placedBets = slipBets.filter(b => b.status === 'placed').sort(sortByCommenceTime);
+  const settledBets = slipBets.filter(b => b.status === 'won' || b.status === 'lost').sort(sortByCommenceTime);
   
   const totalStake = draftBets.reduce((sum, b) => sum + b.stake, 0);
   const potentialReturn = draftBets.reduce((sum, b) => sum + (b.stake * b.odds), 0);
