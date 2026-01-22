@@ -366,17 +366,30 @@ export function MyBetsDrawer({
                               </span>
                             </div>
 
-                            {bet.lastCheckedAt && (
-                              <p className="text-xs text-muted-foreground">
-                                Last checked: {new Date(bet.lastCheckedAt).toLocaleString('en-AU', {
-                                  timeZone: 'Australia/Sydney',
-                                  day: '2-digit',
-                                  month: 'short',
-                                  hour: '2-digit',
-                                  minute: '2-digit',
-                                })}
-                              </p>
-                            )}
+                            <div className="text-xs text-muted-foreground space-y-0.5">
+                              {bet.addedAt && (
+                                <p>
+                                  Updated: {new Date(bet.addedAt).toLocaleString('en-AU', {
+                                    timeZone: 'Australia/Sydney',
+                                    day: '2-digit',
+                                    month: 'short',
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                  })}
+                                </p>
+                              )}
+                              {bet.lastCheckedAt && (
+                                <p>
+                                  Last checked: {new Date(bet.lastCheckedAt).toLocaleString('en-AU', {
+                                    timeZone: 'Australia/Sydney',
+                                    day: '2-digit',
+                                    month: 'short',
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                  })}
+                                </p>
+                              )}
+                            </div>
 
                             <div className="flex items-center gap-2 pt-2 border-t">
                               <Button
@@ -426,7 +439,7 @@ export function MyBetsDrawer({
                     </div>
                     {settledBets.map(bet => (
                       <Card key={bet.id} className="opacity-75">
-                        <CardContent className="p-4">
+                        <CardContent className="p-4 space-y-2">
                           <div className="flex items-center justify-between">
                             <div className="flex-1 min-w-0">
                               <p className="font-medium text-sm truncate">{bet.event_name}</p>
@@ -434,6 +447,17 @@ export function MyBetsDrawer({
                             </div>
                             {getStatusBadge(bet.status)}
                           </div>
+                          {bet.addedAt && (
+                            <p className="text-xs text-muted-foreground">
+                              Updated: {new Date(bet.addedAt).toLocaleString('en-AU', {
+                                timeZone: 'Australia/Sydney',
+                                day: '2-digit',
+                                month: 'short',
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })}
+                            </p>
+                          )}
                         </CardContent>
                       </Card>
                     ))}
