@@ -12,7 +12,8 @@ import {
   CheckCircle2, 
   XCircle,
   Clock,
-  TrendingUp
+  TrendingUp,
+  Zap
 } from 'lucide-react';
 import { MyBet } from '@/types/my-bets';
 import { RecommendedBet } from '@/types/model-betting';
@@ -27,6 +28,7 @@ interface MyBetsDrawerProps {
   onUpdateFromRecheck: (id: string, data: RecommendedBet) => void;
   onSetStatus: (id: string, status: MyBet['status']) => void;
   onClearAll: () => void;
+  onRefresh?: () => void;
 }
 
 export function MyBetsDrawer({ 
@@ -34,7 +36,8 @@ export function MyBetsDrawer({
   onRemove, 
   onUpdateFromRecheck, 
   onSetStatus,
-  onClearAll 
+  onClearAll,
+  onRefresh
 }: MyBetsDrawerProps) {
   const { toast } = useToast();
   const [checkingBetId, setCheckingBetId] = useState<string | null>(null);
@@ -118,6 +121,51 @@ export function MyBetsDrawer({
       });
     } finally {
       setCheckingBetId(null);
+    }
+  };
+
+  // Use the backend check-results function for bulk settlement
+  const checkAllResultsViaBackend = async () => {
+    setCheckingAllResults(true);
+    
+    try {
+      const { data, error } = await supabase.functions.invoke('check-results');
+      
+      if (error) throw error;
+      
+      const totalUpdated = (data.updated || 0) + (data.userBetsUpdated || 0) + (data.valueBetsUpdated || 0);
+      
+      if (totalUpdated > 0) {
+        // Calculate wins and losses from results
+        const results = data.results || [];
+        const wonCount = results.filter((r: { status: string }) => r.status === 'won').length;
+        const lostCount = results.filter((r: { status: string }) => r.status === 'lost').length;
+        
+        toast({
+          title: `✅ ${totalUpdated} bets settled!`,
+          description: `${wonCount} won, ${lostCount} lost`,
+          variant: wonCount >= lostCount ? 'default' : 'destructive',
+        });
+        
+        // Refresh the bets list to show updated status
+        if (onRefresh) {
+          onRefresh();
+        }
+      } else {
+        toast({
+          title: 'No results available',
+          description: data.message || 'Matches may still be in progress',
+        });
+      }
+    } catch (error) {
+      console.error('Error checking results:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to check results',
+        variant: 'destructive',
+      });
+    } finally {
+      setCheckingAllResults(false);
     }
   };
 
@@ -268,7 +316,24 @@ export function MyBetsDrawer({
           </SheetTitle>
         </SheetHeader>
 
-        <div className="mt-4">
+        <div className="mt-4 space-y-4">
+          {/* Check All Results Button - Always visible when there are tracking bets */}
+          {trackingBets.length > 0 && (
+            <Button
+              onClick={checkAllResultsViaBackend}
+              disabled={checkingAllResults}
+              className="w-full gap-2 bg-primary hover:bg-primary/90"
+              size="lg"
+            >
+              {checkingAllResults ? (
+                <Loader2 className="h-5 w-5 animate-spin" />
+              ) : (
+                <Zap className="h-5 w-5" />
+              )}
+              Check All Results
+            </Button>
+          )}
+
           {bets.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground">
               <Star className="h-12 w-12 mx-auto mb-4 opacity-20" />
@@ -276,7 +341,7 @@ export function MyBetsDrawer({
               <p className="text-sm">Select bets from the results to track them</p>
             </div>
           ) : (
-            <ScrollArea className="h-[calc(100vh-180px)]">
+            <ScrollArea className="h-[calc(100vh-240px)]">
               <div className="space-y-3 pr-4">
                 {/* Tracking Bets Section */}
                 {trackingBets.length > 0 && (
@@ -436,31 +501,98 @@ export function MyBetsDrawer({
                       <h3 className="text-sm font-medium text-muted-foreground">
                         Settled ({settledBets.length})
                       </h3>
-                    </div>
-                    {settledBets.map(bet => (
-                      <Card key={bet.id} className="opacity-75">
-                        <CardContent className="p-4 space-y-2">
-                          <div className="flex items-center justify-between">
-                            <div className="flex-1 min-w-0">
-                              <p className="font-medium text-sm truncate">{bet.event_name}</p>
-                              <p className="text-xs text-muted-foreground">{bet.selection_label}</p>
-                            </div>
-                            {getStatusBadge(bet.status)}
-                          </div>
-                          {bet.addedAt && (
-                            <p className="text-xs text-muted-foreground">
-                              Updated: {new Date(bet.addedAt).toLocaleString('en-AU', {
-                                timeZone: 'Australia/Sydney',
-                                day: '2-digit',
-                                month: 'short',
-                                hour: '2-digit',
-                                minute: '2-digit',
-                              })}
+                      {/* P/L Summary */}
+                      {(() => {
+                        const totalPL = settledBets.reduce((sum, b) => {
+                          const stakeUnits = b.recommended_stake_units || 1;
+                          if (b.status === 'won') return sum + (stakeUnits * (b.odds_decimal - 1));
+                          if (b.status === 'lost') return sum - stakeUnits;
+                          return sum;
+                        }, 0);
+                        const wonCount = settledBets.filter(b => b.status === 'won').length;
+                        const lostCount = settledBets.filter(b => b.status === 'lost').length;
+                        return (
+                          <div className="text-right">
+                            <p className={`font-mono font-bold text-sm ${totalPL >= 0 ? 'text-profit' : 'text-loss'}`}>
+                              {totalPL >= 0 ? '+' : ''}{totalPL.toFixed(2)}u
                             </p>
-                          )}
-                        </CardContent>
-                      </Card>
-                    ))}
+                            <p className="text-xs text-muted-foreground">
+                              {wonCount}W / {lostCount}L
+                            </p>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                    {settledBets.map(bet => {
+                      const stakeUnits = bet.recommended_stake_units || 1;
+                      const profitLoss = bet.status === 'won' 
+                        ? stakeUnits * (bet.odds_decimal - 1) 
+                        : bet.status === 'lost' 
+                          ? -stakeUnits 
+                          : 0;
+                      
+                      return (
+                        <Card 
+                          key={bet.id} 
+                          className={
+                            bet.status === 'won' 
+                              ? 'border-profit/50 bg-profit/10' 
+                              : bet.status === 'lost' 
+                                ? 'border-loss/50 bg-loss/10'
+                                : ''
+                          }
+                        >
+                          <CardContent className="p-4 space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex-1 min-w-0">
+                                <p className="font-medium text-sm truncate">{bet.event_name}</p>
+                                <p className="text-xs text-muted-foreground">{bet.league}</p>
+                              </div>
+                              <div className="flex flex-col items-end gap-1">
+                                {getStatusBadge(bet.status)}
+                                <span className={`font-mono font-bold text-sm ${profitLoss >= 0 ? 'text-profit' : 'text-loss'}`}>
+                                  {profitLoss >= 0 ? '+' : ''}{profitLoss.toFixed(2)}u
+                                </span>
+                              </div>
+                            </div>
+                            
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <Badge variant="secondary">{bet.selection_label}</Badge>
+                              <span className="font-mono text-sm">@{bet.odds_decimal?.toFixed(2)}</span>
+                              {bet.bookmaker && (
+                                <Badge variant="outline" className="text-xs">
+                                  {bet.bookmaker}
+                                </Badge>
+                              )}
+                            </div>
+                            
+                            {bet.addedAt && (
+                              <p className="text-xs text-muted-foreground">
+                                Settled: {new Date(bet.addedAt).toLocaleString('en-AU', {
+                                  timeZone: 'Australia/Sydney',
+                                  day: '2-digit',
+                                  month: 'short',
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                })}
+                              </p>
+                            )}
+                            
+                            <div className="flex justify-end pt-2 border-t">
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => onRemove(bet.id)}
+                                className="text-muted-foreground hover:text-destructive"
+                              >
+                                <Trash2 className="h-3 w-3 mr-1" />
+                                Remove
+                              </Button>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      );
+                    })}
                   </>
                 )}
 
