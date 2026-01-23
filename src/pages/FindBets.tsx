@@ -450,6 +450,7 @@ export default function FindBets() {
               onUpdateFromRecheck={myBets.updateBetFromRecheck}
               onSetStatus={myBets.setStatus}
               onClearAll={myBets.clearAll}
+              onRefresh={myBets.refresh}
             />
             <Button
               variant="outline"
