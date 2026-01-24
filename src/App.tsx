@@ -10,6 +10,7 @@ import Auth from "./pages/Auth";
 import FindBets from "./pages/FindBets";
 import BetLog from "./pages/BetLog";
 import ScrapeHistory from "./pages/ScrapeHistory";
+import Analytics from "./pages/Analytics";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -21,6 +22,7 @@ function AppRoutes() {
       <Route path="/auth" element={<Auth />} />
       <Route path="/find-bets" element={<FindBets />} />
       <Route path="/bet-log" element={<BetLog />} />
+      <Route path="/analytics" element={<Analytics />} />
       <Route path="/scrape-history" element={<ScrapeHistory />} />
       {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
       <Route path="*" element={<NotFound />} />

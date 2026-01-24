@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Activity, Settings, Bell, LogOut, User, Receipt, Clock, Database } from "lucide-react";
+import { Activity, Settings, Bell, LogOut, User, Receipt, Clock, Database, BarChart3 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import { useNavigate, Link } from "react-router-dom";
@@ -105,6 +105,10 @@ export function Header() {
         <nav className="hidden md:flex items-center gap-6">
           <Link to="/" className="text-sm font-medium text-foreground hover:text-primary transition-colors">Find Bets</Link>
           <Link to="/bet-log" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">Bet Log</Link>
+          <Link to="/analytics" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1">
+            <BarChart3 className="h-3 w-3" />
+            Analytics
+          </Link>
           <Link to="/scrape-history" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1">
             <Database className="h-3 w-3" />
             Scrape History
