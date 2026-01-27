@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Loader2, Search, TrendingUp, Target, DollarSign, RefreshCw, FileText, Copy, Check, Star, Plus } from "lucide-react";
+import { Loader2, Search, TrendingUp, Target, DollarSign, RefreshCw, FileText, Copy, Check, Star, Plus, Trophy, Dog } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { RecommendedBet, BettingModelResponse } from "@/types/model-betting";
@@ -28,13 +28,31 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useMyBets } from "@/hooks/useMyBets";
 import { MyBetsDrawer } from "@/components/my-bets/MyBetsDrawer";
+import { useSport } from "@/contexts/SportContext";
 
-const SPORTS = [
+// Team sports for soccer mode
+const TEAM_SPORTS = [
   { id: 'soccer', label: 'Soccer', icon: '⚽' },
   { id: 'basketball', label: 'Basketball', icon: '🏀' },
   { id: 'afl', label: 'AFL', icon: '🏈' },
   { id: 'nrl', label: 'NRL', icon: '🏉' },
   { id: 'tennis', label: 'Tennis', icon: '🎾' },
+];
+
+// Racing types for racing mode
+const RACING_TYPES = [
+  { id: 'horse', label: 'Horse Racing', icon: Trophy },
+  { id: 'greyhound', label: 'Greyhound Racing', icon: Dog },
+];
+
+// Racing venues/regions
+const RACING_REGIONS = [
+  { id: 'aus', label: 'Australia', flag: '🇦🇺' },
+  { id: 'nz', label: 'New Zealand', flag: '🇳🇿' },
+  { id: 'uk', label: 'United Kingdom', flag: '🇬🇧' },
+  { id: 'ire', label: 'Ireland', flag: '🇮🇪' },
+  { id: 'usa', label: 'United States', flag: '🇺🇸' },
+  { id: 'hk', label: 'Hong Kong', flag: '🇭🇰' },
 ];
 
 // Tier 1: Big 5 European Leagues (best data coverage)
@@ -63,14 +81,23 @@ const TENNIS_LEAGUES = [
 
 export default function FindBets() {
   const { toast } = useToast();
+  const { sport } = useSport();
   const myBets = useMyBets();
   const [loading, setLoading] = useState(false);
   const [refreshingOdds, setRefreshingOdds] = useState(false);
+  
+  // Team sports state (soccer mode)
   const [selectedSports, setSelectedSports] = useState<string[]>(['soccer']);
   const [selectedLeagues, setSelectedLeagues] = useState<string[]>([
     'epl', 'laliga', 'bundesliga', 'seriea', 'ligue1', 'aleague', 'argentina'
   ]);
   const [selectedTennisLeagues, setSelectedTennisLeagues] = useState<string[]>(['grand_slams']);
+  
+  // Racing state (racing mode)
+  const [selectedRacingTypes, setSelectedRacingTypes] = useState<string[]>(['horse', 'greyhound']);
+  const [selectedRacingRegions, setSelectedRacingRegions] = useState<string[]>(['aus', 'nz', 'uk']);
+  
+  // Common state
   const [windowHours, setWindowHours] = useState(72);
   const [bankrollUnits, setBankrollUnits] = useState(100);
   const [maxBets, setMaxBets] = useState(10);
@@ -107,6 +134,22 @@ export default function FindBets() {
       prev.includes(league)
         ? prev.filter(l => l !== league)
         : [...prev, league]
+    );
+  };
+
+  const toggleRacingType = (type: string) => {
+    setSelectedRacingTypes(prev =>
+      prev.includes(type)
+        ? prev.filter(t => t !== type)
+        : [...prev, type]
+    );
+  };
+
+  const toggleRacingRegion = (region: string) => {
+    setSelectedRacingRegions(prev =>
+      prev.includes(region)
+        ? prev.filter(r => r !== region)
+        : [...prev, region]
     );
   };
 
@@ -476,98 +519,155 @@ export default function FindBets() {
               <CardDescription>Configure your betting model</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              {/* Sports Selection */}
-              <div className="space-y-3">
-                <Label>Sports</Label>
-                <div className="space-y-2">
-                  {SPORTS.map(sport => (
-                    <div key={sport.id} className="flex items-center space-x-2">
-                      <Checkbox
-                        id={sport.id}
-                        checked={selectedSports.includes(sport.id)}
-                        onCheckedChange={() => toggleSport(sport.id)}
-                      />
-                      <label 
-                        htmlFor={sport.id}
-                        className="text-sm cursor-pointer flex items-center gap-2"
-                      >
-                        <span>{sport.icon}</span>
-                        {sport.label}
-                      </label>
+              {/* Sports/Racing Type Selection - Conditional based on mode */}
+              {sport === 'soccer' ? (
+                <>
+                  {/* Team Sports Selection */}
+                  <div className="space-y-3">
+                    <Label>Sports</Label>
+                    <div className="space-y-2">
+                      {TEAM_SPORTS.map(teamSport => (
+                        <div key={teamSport.id} className="flex items-center space-x-2">
+                          <Checkbox
+                            id={teamSport.id}
+                            checked={selectedSports.includes(teamSport.id)}
+                            onCheckedChange={() => toggleSport(teamSport.id)}
+                          />
+                          <label 
+                            htmlFor={teamSport.id}
+                            className="text-sm cursor-pointer flex items-center gap-2"
+                          >
+                            <span>{teamSport.icon}</span>
+                            {teamSport.label}
+                          </label>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              </div>
+                  </div>
 
-              {/* League Selection */}
-              {selectedSports.includes('soccer') && (
-                <div className="space-y-3">
-                  <Label>Leagues (Soccer Tier 1)</Label>
-                  <div className="space-y-2">
-                    {TIER_1_LEAGUES.map(league => (
-                      <div key={league.id} className="flex items-center space-x-2">
-                        <Checkbox
-                          id={league.id}
-                          checked={selectedLeagues.includes(league.id)}
-                          onCheckedChange={() => toggleLeague(league.id)}
-                        />
-                        <label 
-                          htmlFor={league.id}
-                          className="text-sm cursor-pointer flex items-center gap-2"
-                        >
-                          <span>{league.flag}</span>
-                          {league.label}
-                        </label>
+                  {/* League Selection */}
+                  {selectedSports.includes('soccer') && (
+                    <div className="space-y-3">
+                      <Label>Leagues (Soccer Tier 1)</Label>
+                      <div className="space-y-2">
+                        {TIER_1_LEAGUES.map(league => (
+                          <div key={league.id} className="flex items-center space-x-2">
+                            <Checkbox
+                              id={league.id}
+                              checked={selectedLeagues.includes(league.id)}
+                              onCheckedChange={() => toggleLeague(league.id)}
+                            />
+                            <label 
+                              htmlFor={league.id}
+                              className="text-sm cursor-pointer flex items-center gap-2"
+                            >
+                              <span>{league.flag}</span>
+                              {league.label}
+                            </label>
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
-                  <Label className="mt-2">Leagues (Soccer Tier 2)</Label>
-                  <div className="space-y-2">
-                    {TIER_2_LEAGUES.map(league => (
-                      <div key={league.id} className="flex items-center space-x-2">
-                        <Checkbox
-                          id={league.id}
-                          checked={selectedLeagues.includes(league.id)}
-                          onCheckedChange={() => toggleLeague(league.id)}
-                        />
-                        <label 
-                          htmlFor={league.id}
-                          className="text-sm cursor-pointer flex items-center gap-2"
-                        >
-                          <span>{league.flag}</span>
-                          {league.label}
-                        </label>
+                      <Label className="mt-2">Leagues (Soccer Tier 2)</Label>
+                      <div className="space-y-2">
+                        {TIER_2_LEAGUES.map(league => (
+                          <div key={league.id} className="flex items-center space-x-2">
+                            <Checkbox
+                              id={league.id}
+                              checked={selectedLeagues.includes(league.id)}
+                              onCheckedChange={() => toggleLeague(league.id)}
+                            />
+                            <label 
+                              htmlFor={league.id}
+                              className="text-sm cursor-pointer flex items-center gap-2"
+                            >
+                              <span>{league.flag}</span>
+                              {league.label}
+                            </label>
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+                    </div>
+                  )}
 
-              {selectedSports.includes('tennis') && !selectedSports.includes('soccer') && (
-                <div className="space-y-3">
-                  <Label>Leagues (Tennis)</Label>
-                  <div className="space-y-2">
-                    {TENNIS_LEAGUES.map(league => (
-                      <div key={league.id} className="flex items-center space-x-2">
-                        <Checkbox
-                          id={`tennis_${league.id}`}
-                          checked={selectedTennisLeagues.includes(league.id)}
-                          onCheckedChange={() => toggleTennisLeague(league.id)}
-                        />
-                        <label
-                          htmlFor={`tennis_${league.id}`}
-                          className="text-sm cursor-pointer flex items-center gap-2"
-                        >
-                          <span>{league.flag}</span>
-                          {league.label}
-                        </label>
+                  {selectedSports.includes('tennis') && !selectedSports.includes('soccer') && (
+                    <div className="space-y-3">
+                      <Label>Leagues (Tennis)</Label>
+                      <div className="space-y-2">
+                        {TENNIS_LEAGUES.map(league => (
+                          <div key={league.id} className="flex items-center space-x-2">
+                            <Checkbox
+                              id={`tennis_${league.id}`}
+                              checked={selectedTennisLeagues.includes(league.id)}
+                              onCheckedChange={() => toggleTennisLeague(league.id)}
+                            />
+                            <label
+                              htmlFor={`tennis_${league.id}`}
+                              className="text-sm cursor-pointer flex items-center gap-2"
+                            >
+                              <span>{league.flag}</span>
+                              {league.label}
+                            </label>
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                      <p className="text-xs text-muted-foreground">
+                        Tennis league filtering is being wired into the model; odds refresh already pulls tennis events.
+                      </p>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  {/* Racing Type Selection */}
+                  <div className="space-y-3">
+                    <Label>Racing Type</Label>
+                    <div className="space-y-2">
+                      {RACING_TYPES.map(type => (
+                        <div key={type.id} className="flex items-center space-x-2">
+                          <Checkbox
+                            id={`racing_${type.id}`}
+                            checked={selectedRacingTypes.includes(type.id)}
+                            onCheckedChange={() => toggleRacingType(type.id)}
+                          />
+                          <label 
+                            htmlFor={`racing_${type.id}`}
+                            className="text-sm cursor-pointer flex items-center gap-2"
+                          >
+                            <type.icon className="h-4 w-4" />
+                            {type.label}
+                          </label>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                  <p className="text-xs text-muted-foreground">
-                    Tennis league filtering is being wired into the model; odds refresh already pulls tennis events.
+
+                  {/* Racing Regions */}
+                  <div className="space-y-3">
+                    <Label>Regions</Label>
+                    <div className="space-y-2">
+                      {RACING_REGIONS.map(region => (
+                        <div key={region.id} className="flex items-center space-x-2">
+                          <Checkbox
+                            id={`region_${region.id}`}
+                            checked={selectedRacingRegions.includes(region.id)}
+                            onCheckedChange={() => toggleRacingRegion(region.id)}
+                          />
+                          <label 
+                            htmlFor={`region_${region.id}`}
+                            className="text-sm cursor-pointer flex items-center gap-2"
+                          >
+                            <span>{region.flag}</span>
+                            {region.label}
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <p className="text-xs text-muted-foreground border-l-2 border-primary/30 pl-3 py-1">
+                    Racing model coming soon. Select your preferred racing types and regions for when the feature launches.
                   </p>
-                </div>
+                </>
               )}
 
               {/* Time Window */}
