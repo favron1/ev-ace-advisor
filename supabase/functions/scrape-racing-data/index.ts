@@ -331,7 +331,7 @@ serve(async (req) => {
           track_condition: race.trackCondition,
           field_size: race.runners.length,
           status: 'upcoming',
-        }, { onConflict: 'sport,track,race_number', ignoreDuplicates: false })
+        }, { onConflict: 'sport,track,race_number,start_time_utc', ignoreDuplicates: false })
         .select()
         .single();
 
