@@ -29,3 +29,12 @@ verify_jwt = false
 
 [functions.run-betting-model]
 verify_jwt = false
+
+[functions.racing-engine]
+verify_jwt = false
+
+[functions.fetch-racing-odds]
+verify_jwt = false
+
+[functions.run-racing-model]
+verify_jwt = false
