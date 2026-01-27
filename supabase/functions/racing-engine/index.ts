@@ -794,16 +794,541 @@ interface OddsApiEvent {
   }[];
 }
 
+// =====================================================
+// TAB AUSTRALIA API TYPES
+// =====================================================
+
+interface TABRunner {
+  runnerNumber: number;
+  runnerName: string;
+  barrierNumber?: number;
+  boxNumber?: number;
+  jockeyName?: string;
+  trainerName?: string;
+  handicapWeight?: number;
+  last5Starts?: string;
+  scratched: boolean;
+  fixedOdds?: {
+    returnWin?: number;
+    returnPlace?: number;
+  };
+}
+
+interface TABRace {
+  raceNumber: number;
+  raceName: string;
+  raceDistance: number;
+  raceStartTime: string;
+  raceStatus: string;
+  runners: TABRunner[];
+}
+
+interface TABMeeting {
+  meetingName: string;
+  location: string;
+  meetingDate: string;
+  raceType: string;
+  railPosition?: string;
+  trackCondition?: string;
+  weather?: string;
+  races: TABRace[];
+}
+
+async function fetchFromTAB(
+  racingTypes: string[],
+  hoursAhead: number
+): Promise<{ meetings: TABMeeting[]; source: string }> {
+  const meetings: TABMeeting[] = [];
+  
+  // Try multiple reliable public endpoints
+  const endpoints = [
+    // Punters.com.au API (public, reliable for AU racing)
+    { url: 'https://www.punters.com.au/api/web/races/form-guide/?date=today', name: 'punters' },
+    // Sportsbet public odds feed  
+    { url: 'https://www.sportsbet.com.au/apigw/sportsbook-racing/Sportsbook/Racing/NextToGo?count=50', name: 'sportsbet' },
+    // Bet365 AU racing feed
+    { url: 'https://www.bet365.com.au/SportsBook.API/web?lid=1&zid=0&pd=%23AC%23B1%23&cid=97&cpd=%23AC%23B1%23C1%23D13%23F2%23', name: 'bet365' },
+  ];
+  
+  for (const { url, name } of endpoints) {
+    try {
+      console.log(`[Racing Engine] Trying ${name}: ${url}`);
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      
+      const response = await fetch(url, {
+        headers: {
+          'Accept': 'application/json, text/plain, */*',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Origin': `https://www.${name}.com.au`,
+          'Referer': `https://www.${name}.com.au/`,
+        },
+        signal: controller.signal,
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        console.log(`[Racing Engine] ${name} returned ${response.status}`);
+        continue;
+      }
+      
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('json')) {
+        console.log(`[Racing Engine] ${name} returned non-JSON: ${contentType}`);
+        continue;
+      }
+      
+      const data = await response.json();
+      console.log(`[Racing Engine] Got response from ${name}`);
+      
+      // Process based on source format
+      if (name === 'punters' && data.races) {
+        const result = processPuntersRaces(data.races, racingTypes, hoursAhead);
+        if (result.meetings.length > 0) return result;
+      }
+      
+      if (name === 'sportsbet' && (data.races || data.events)) {
+        const result = processSportsbetRaces(data.races || data.events, racingTypes, hoursAhead);
+        if (result.meetings.length > 0) return result;
+      }
+      
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'Unknown error';
+      console.error(`[Racing Engine] Error fetching ${name}: ${errMsg}`);
+    }
+  }
+  
+  console.log(`[Racing Engine] All API endpoints failed, will use fallback`);
+  return { meetings: [], source: 'api_error' };
+}
+
+function processPuntersRaces(races: any[], racingTypes: string[], hoursAhead: number): { meetings: TABMeeting[]; source: string } {
+  const meetingsMap = new Map<string, TABMeeting>();
+  const cutoffTime = new Date(Date.now() + hoursAhead * 60 * 60 * 1000);
+  const now = new Date();
+  
+  for (const race of races) {
+    try {
+      const startTime = new Date(race.start_time || race.startTime);
+      if (startTime <= now || startTime > cutoffTime) continue;
+      
+      const isHorse = race.race_type === 'R' || race.type === 'thoroughbred' || race.meetingType === 'T';
+      const isGreyhound = race.race_type === 'G' || race.type === 'greyhound' || race.meetingType === 'G';
+      
+      if (!racingTypes.includes('horse') && isHorse) continue;
+      if (!racingTypes.includes('greyhound') && isGreyhound) continue;
+      if (!isHorse && !isGreyhound) continue;
+      
+      const trackName = race.track_name || race.meeting_name || race.venue || 'Unknown';
+      
+      if (!meetingsMap.has(trackName)) {
+        meetingsMap.set(trackName, {
+          meetingName: trackName,
+          location: trackName,
+          meetingDate: new Date().toISOString().split('T')[0],
+          raceType: isHorse ? 'horse' : 'greyhound',
+          trackCondition: race.track_condition || race.going,
+          weather: race.weather,
+          races: [],
+        });
+      }
+      
+      const meeting = meetingsMap.get(trackName)!;
+      meeting.races.push({
+        raceNumber: race.race_number || race.number,
+        raceName: race.race_name || race.name || `Race ${race.race_number}`,
+        raceDistance: race.distance || (isHorse ? 1400 : 400),
+        raceStartTime: race.start_time || race.startTime,
+        raceStatus: 'Open',
+        runners: (race.runners || race.horses || []).filter((r: any) => !r.scratched).map((runner: any) => ({
+          runnerNumber: runner.number || runner.runner_number,
+          runnerName: runner.name || runner.horse_name || runner.runner_name,
+          barrierNumber: runner.barrier || runner.barrier_number,
+          jockeyName: runner.jockey || runner.jockey_name,
+          trainerName: runner.trainer || runner.trainer_name,
+          handicapWeight: runner.weight,
+          last5Starts: runner.form || runner.recent_form,
+          scratched: false,
+          fixedOdds: { returnWin: runner.win_odds || runner.fixed_odds?.win || runner.price },
+        })),
+      });
+    } catch (err) {
+      console.error(`[Racing Engine] Error processing race:`, err);
+    }
+  }
+  
+  return { meetings: Array.from(meetingsMap.values()), source: 'punters' };
+}
+
+function processSportsbetRaces(races: any[], racingTypes: string[], hoursAhead: number): { meetings: TABMeeting[]; source: string } {
+  const meetingsMap = new Map<string, TABMeeting>();
+  const cutoffTime = new Date(Date.now() + hoursAhead * 60 * 60 * 1000);
+  const now = new Date();
+  
+  for (const race of races) {
+    try {
+      const startTime = new Date(race.advertisedStartTime || race.startTime);
+      if (startTime <= now || startTime > cutoffTime) continue;
+      
+      const isHorse = race.meetingTypeCode === 'R';
+      const isGreyhound = race.meetingTypeCode === 'G';
+      
+      if (!racingTypes.includes('horse') && isHorse) continue;
+      if (!racingTypes.includes('greyhound') && isGreyhound) continue;
+      if (!isHorse && !isGreyhound) continue;
+      
+      const trackName = race.meetingName || race.venueName || 'Unknown';
+      
+      if (!meetingsMap.has(trackName)) {
+        meetingsMap.set(trackName, {
+          meetingName: trackName,
+          location: trackName,
+          meetingDate: new Date().toISOString().split('T')[0],
+          raceType: isHorse ? 'horse' : 'greyhound',
+          trackCondition: race.trackCondition,
+          races: [],
+        });
+      }
+      
+      const meeting = meetingsMap.get(trackName)!;
+      meeting.races.push({
+        raceNumber: race.raceNumber,
+        raceName: race.raceName || `Race ${race.raceNumber}`,
+        raceDistance: race.distance || (isHorse ? 1400 : 400),
+        raceStartTime: race.advertisedStartTime || race.startTime,
+        raceStatus: 'Open',
+        runners: (race.runners || race.selections || []).map((runner: any) => ({
+          runnerNumber: runner.runnerNumber || runner.number,
+          runnerName: runner.runnerName || runner.name,
+          barrierNumber: runner.barrier,
+          jockeyName: runner.jockeyName,
+          trainerName: runner.trainerName,
+          handicapWeight: runner.weight,
+          scratched: runner.scratched || false,
+          fixedOdds: { returnWin: runner.fixedOddsWin || runner.winPrice || runner.price },
+        })),
+      });
+    } catch (err) {
+      console.error(`[Racing Engine] Error processing sportsbet race:`, err);
+    }
+  }
+  
+  return { meetings: Array.from(meetingsMap.values()), source: 'sportsbet' };
+}
+
+function processRQMeetings(rawMeetings: any[], racingTypes: string[], hoursAhead: number): { meetings: TABMeeting[]; source: string } {
+  const meetings: TABMeeting[] = [];
+  const cutoffTime = new Date(Date.now() + hoursAhead * 60 * 60 * 1000);
+  const now = new Date();
+  
+  for (const meeting of rawMeetings) {
+    const isHorse = meeting.raceType === 'R' || meeting.meetingType === 'Thoroughbred';
+    const isGreyhound = meeting.raceType === 'G' || meeting.meetingType === 'Greyhound';
+    
+    if (!racingTypes.includes('horse') && isHorse) continue;
+    if (!racingTypes.includes('greyhound') && isGreyhound) continue;
+    if (!isHorse && !isGreyhound) continue;
+    
+    const filteredRaces = (meeting.races || []).filter((race: any) => {
+      if (!race.raceStartTime && !race.startTime) return false;
+      const startTime = new Date(race.raceStartTime || race.startTime);
+      return startTime > now && startTime <= cutoffTime;
+    });
+    
+    if (filteredRaces.length === 0) continue;
+    
+    meetings.push({
+      meetingName: meeting.meetingName || meeting.venueName || meeting.track,
+      location: meeting.location || meeting.venueName || meeting.meetingName,
+      meetingDate: meeting.meetingDate || new Date().toISOString().split('T')[0],
+      raceType: isHorse ? 'horse' : 'greyhound',
+      trackCondition: meeting.trackCondition,
+      weather: meeting.weather,
+      races: filteredRaces.map((race: any) => ({
+        raceNumber: race.raceNumber || race.number,
+        raceName: race.raceName || race.name || `Race ${race.raceNumber || race.number}`,
+        raceDistance: race.raceDistance || race.distance || (isHorse ? 1400 : 400),
+        raceStartTime: race.raceStartTime || race.startTime,
+        raceStatus: race.raceStatus || race.status || 'Open',
+        runners: (race.runners || []).filter((r: any) => !r.scratched).map((runner: any) => ({
+          runnerNumber: runner.runnerNumber || runner.number,
+          runnerName: runner.runnerName || runner.name,
+          barrierNumber: runner.barrierNumber || runner.barrier,
+          boxNumber: runner.boxNumber || runner.box,
+          jockeyName: runner.jockeyName || runner.jockey,
+          trainerName: runner.trainerName || runner.trainer,
+          handicapWeight: runner.handicapWeight || runner.weight,
+          last5Starts: runner.last5Starts || runner.form,
+          scratched: runner.scratched || false,
+          fixedOdds: runner.fixedOdds || { returnWin: runner.winOdds || runner.odds },
+        })),
+      })),
+    });
+  }
+  
+  return { meetings, source: 'racing_qld' };
+}
+
+function processNextToGoRaces(races: any[], racingTypes: string[], hoursAhead: number): { meetings: TABMeeting[]; source: string } {
+  const meetingsMap = new Map<string, TABMeeting>();
+  const cutoffTime = new Date(Date.now() + hoursAhead * 60 * 60 * 1000);
+  const now = new Date();
+  
+  for (const race of races) {
+    const startTime = new Date(race.raceStartTime || race.advertisedStart);
+    if (startTime <= now || startTime > cutoffTime) continue;
+    
+    const isHorse = race.raceType === 'R' || race.meetingType === 'Thoroughbred';
+    const isGreyhound = race.raceType === 'G' || race.meetingType === 'Greyhound';
+    
+    if (!racingTypes.includes('horse') && isHorse) continue;
+    if (!racingTypes.includes('greyhound') && isGreyhound) continue;
+    if (!isHorse && !isGreyhound) continue;
+    
+    const trackName = race.meetingName || race.venueName || 'Unknown';
+    
+    if (!meetingsMap.has(trackName)) {
+      meetingsMap.set(trackName, {
+        meetingName: trackName,
+        location: trackName,
+        meetingDate: new Date().toISOString().split('T')[0],
+        raceType: isHorse ? 'horse' : 'greyhound',
+        trackCondition: race.trackCondition,
+        weather: race.weather,
+        races: [],
+      });
+    }
+    
+    const meeting = meetingsMap.get(trackName)!;
+    meeting.races.push({
+      raceNumber: race.raceNumber,
+      raceName: race.raceName || `Race ${race.raceNumber}`,
+      raceDistance: race.raceDistance || (isHorse ? 1400 : 400),
+      raceStartTime: race.raceStartTime || race.advertisedStart,
+      raceStatus: 'Open',
+      runners: (race.runners || []).filter((r: any) => !r.scratched).map((runner: any) => ({
+        runnerNumber: runner.runnerNumber,
+        runnerName: runner.runnerName,
+        barrierNumber: runner.barrierNumber,
+        boxNumber: runner.boxNumber,
+        jockeyName: runner.jockeyName,
+        trainerName: runner.trainerName,
+        handicapWeight: runner.handicapWeight,
+        last5Starts: runner.last5Starts,
+        scratched: false,
+        fixedOdds: runner.fixedOdds,
+      })),
+    });
+  }
+  
+  return { meetings: Array.from(meetingsMap.values()), source: 'tab_ntg' };
+}
+
+async function fetchFromTABLegacy(
+  racingTypes: string[],
+  hoursAhead: number
+): Promise<{ meetings: TABMeeting[]; source: string }> {
+  const meetings: TABMeeting[] = [];
+  
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const tabUrl = `https://api.tab.com.au/v1/tab-info-service/racing/dates/${today}/meetings?jurisdiction=NSW`;
+    
+    console.log(`[Racing Engine] Fetching from TAB API: ${tabUrl}`);
+    
+    const response = await fetch(tabUrl, {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (compatible; RacingEngine/2.0)',
+      }
+    });
+    
+    if (!response.ok) {
+      console.log(`[Racing Engine] TAB API returned ${response.status}`);
+      return { meetings: [], source: 'tab_error' };
+    }
+    
+    const data = await response.json();
+    const rawMeetings = data.meetings || [];
+    
+    console.log(`[Racing Engine] TAB returned ${rawMeetings.length} meetings`);
+    
+    const cutoffTime = new Date(Date.now() + hoursAhead * 60 * 60 * 1000);
+    const now = new Date();
+    
+    for (const meeting of rawMeetings) {
+      const isHorse = meeting.raceType === 'R';
+      const isGreyhound = meeting.raceType === 'G';
+      
+      if (!racingTypes.includes('horse') && isHorse) continue;
+      if (!racingTypes.includes('greyhound') && isGreyhound) continue;
+      if (!isHorse && !isGreyhound) continue;
+      
+      const filteredRaces = (meeting.races || []).filter((race: any) => {
+        if (!race.raceStartTime) return false;
+        const startTime = new Date(race.raceStartTime);
+        return startTime > now && startTime <= cutoffTime && race.raceStatus !== 'Closed';
+      });
+      
+      if (filteredRaces.length === 0) continue;
+      
+      meetings.push({
+        meetingName: meeting.meetingName,
+        location: meeting.location || meeting.meetingName,
+        meetingDate: meeting.meetingDate,
+        raceType: isHorse ? 'horse' : 'greyhound',
+        railPosition: meeting.railPosition,
+        trackCondition: meeting.trackCondition,
+        weather: meeting.weather,
+        races: filteredRaces.map((race: any) => ({
+          raceNumber: race.raceNumber,
+          raceName: race.raceName || `Race ${race.raceNumber}`,
+          raceDistance: race.raceDistance || (isHorse ? 1400 : 400),
+          raceStartTime: race.raceStartTime,
+          raceStatus: race.raceStatus,
+          runners: (race.runners || []).filter((r: any) => !r.scratched).map((runner: any) => ({
+            runnerNumber: runner.runnerNumber,
+            runnerName: runner.runnerName,
+            barrierNumber: runner.barrierNumber,
+            boxNumber: runner.boxNumber,
+            jockeyName: runner.jockeyName,
+            trainerName: runner.trainerName,
+            handicapWeight: runner.handicapWeight,
+            last5Starts: runner.last5Starts,
+            scratched: runner.scratched || false,
+            fixedOdds: runner.fixedOdds,
+          })),
+        })),
+      });
+    }
+    
+    return { meetings, source: 'tab_api' };
+  } catch (error) {
+    console.error(`[Racing Engine] TAB API error:`, error);
+    return { meetings: [], source: 'tab_error' };
+  }
+}
+
 async function fetchLiveRacingData(
   supabase: any,
   racingTypes: string[],
   regions: string[],
   hoursAhead: number
 ): Promise<{ races: any[]; dataSource: 'live' | 'demo' | 'none'; eventsProcessed: number }> {
+  
+  // Try TAB API first (primary source for AU racing)
+  if (regions.includes('aus') || regions.includes('au')) {
+    console.log(`[Racing Engine] Trying TAB Australia API...`);
+    const { meetings, source } = await fetchFromTAB(racingTypes, hoursAhead);
+    
+    if (meetings.length > 0) {
+      console.log(`[Racing Engine] Got ${meetings.length} meetings from TAB!`);
+      
+      const allRaces: any[] = [];
+      let eventsProcessed = 0;
+      
+      for (const meeting of meetings) {
+        for (const race of meeting.races) {
+          const sport = meeting.raceType === 'horse' ? 'horse' : 'greyhound';
+          
+          const { data: raceEvent, error: eventError } = await supabase
+            .from("racing_events")
+            .upsert({
+              sport,
+              track: meeting.meetingName,
+              track_country: 'AU',
+              race_number: race.raceNumber,
+              race_name: race.raceName,
+              distance_m: race.raceDistance,
+              start_time_utc: race.raceStartTime,
+              start_time_local: race.raceStartTime,
+              status: "upcoming",
+              field_size: race.runners.length,
+              track_condition: meeting.trackCondition,
+              weather: meeting.weather,
+              rail_position: meeting.railPosition,
+            }, { onConflict: "sport,track,race_number,start_time_utc" })
+            .select()
+            .single();
+
+          if (eventError) {
+            console.error(`[Racing Engine] Error upserting event:`, eventError.message);
+            continue;
+          }
+
+          eventsProcessed++;
+
+          for (const runner of race.runners) {
+            const { data: runnerData, error: runnerError } = await supabase
+              .from("racing_runners")
+              .upsert({
+                event_id: raceEvent.id,
+                runner_number: runner.runnerNumber,
+                runner_name: runner.runnerName,
+                barrier_box: runner.barrierNumber || runner.boxNumber || runner.runnerNumber,
+                jockey_name: runner.jockeyName,
+                trainer_name: runner.trainerName,
+                weight_kg: runner.handicapWeight,
+                recent_form: runner.last5Starts ? runner.last5Starts.split('').slice(0, 5) : [],
+                scratched: runner.scratched,
+              }, { onConflict: "event_id,runner_number" })
+              .select()
+              .single();
+
+            if (runnerError) {
+              console.error(`[Racing Engine] Error upserting runner:`, runnerError.message);
+              continue;
+            }
+
+            if (runner.fixedOdds?.returnWin && runner.fixedOdds.returnWin > 1) {
+              await supabase
+                .from("racing_markets")
+                .upsert({
+                  event_id: raceEvent.id,
+                  runner_id: runnerData.id,
+                  bookmaker: 'TAB',
+                  market_type: 'win',
+                  odds_decimal: runner.fixedOdds.returnWin,
+                  implied_probability: 1 / runner.fixedOdds.returnWin,
+                  is_best_odds: true,
+                }, { onConflict: "event_id,runner_id,bookmaker,market_type" });
+            }
+          }
+
+          allRaces.push({
+            id: raceEvent.id,
+            sport,
+            track: meeting.meetingName,
+            raceNumber: race.raceNumber,
+            distance: race.raceDistance,
+            startTime: race.raceStartTime,
+            trackCondition: meeting.trackCondition,
+            runners: race.runners.map((r: TABRunner) => ({
+              id: `${raceEvent.id}-${r.runnerNumber}`,
+              runnerNumber: r.runnerNumber,
+              runnerName: r.runnerName,
+              barrier: r.barrierNumber || r.boxNumber || r.runnerNumber,
+              bestOdds: r.fixedOdds?.returnWin || 0,
+              bestBookmaker: 'TAB',
+              jockey: r.jockeyName,
+              trainer: r.trainerName,
+              recentForm: r.last5Starts ? r.last5Starts.split('').slice(0, 5) : [],
+            })),
+          });
+        }
+      }
+      
+      return { races: allRaces, dataSource: 'live', eventsProcessed };
+    }
+  }
+  
+  // Fallback to The Odds API for non-AU regions
   const ODDS_API_KEY = Deno.env.get("ODDS_API_KEY");
   
   if (!ODDS_API_KEY) {
-    console.log(`[Racing Engine] ODDS_API_KEY not configured - will use demo data`);
+    console.log(`[Racing Engine] No API keys configured - will use demo data`);
     return { races: [], dataSource: 'none', eventsProcessed: 0 };
   }
 
