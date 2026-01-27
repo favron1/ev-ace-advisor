@@ -381,6 +381,518 @@ export type Database = {
         }
         Relationships: []
       }
+      racing_bets: {
+        Row: {
+          angles_at_bet: string[] | null
+          bookmaker: string
+          closing_odds: number | null
+          clv: number | null
+          confidence_at_bet: number | null
+          created_at: string
+          edge_at_bet: number | null
+          event_id: string
+          id: string
+          market_type: string
+          model_probability: number | null
+          odds_taken: number
+          placed_at: string
+          prediction_id: string | null
+          profit_loss_units: number | null
+          runner_id: string
+          settled_at: string | null
+          stake_units: number
+          status: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          angles_at_bet?: string[] | null
+          bookmaker: string
+          closing_odds?: number | null
+          clv?: number | null
+          confidence_at_bet?: number | null
+          created_at?: string
+          edge_at_bet?: number | null
+          event_id: string
+          id?: string
+          market_type?: string
+          model_probability?: number | null
+          odds_taken: number
+          placed_at?: string
+          prediction_id?: string | null
+          profit_loss_units?: number | null
+          runner_id: string
+          settled_at?: string | null
+          stake_units: number
+          status?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          angles_at_bet?: string[] | null
+          bookmaker?: string
+          closing_odds?: number | null
+          clv?: number | null
+          confidence_at_bet?: number | null
+          created_at?: string
+          edge_at_bet?: number | null
+          event_id?: string
+          id?: string
+          market_type?: string
+          model_probability?: number | null
+          odds_taken?: number
+          placed_at?: string
+          prediction_id?: string | null
+          profit_loss_units?: number | null
+          runner_id?: string
+          settled_at?: string | null
+          stake_units?: number
+          status?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "racing_bets_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "racing_events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "racing_bets_prediction_id_fkey"
+            columns: ["prediction_id"]
+            isOneToOne: false
+            referencedRelation: "racing_model_predictions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "racing_bets_runner_id_fkey"
+            columns: ["runner_id"]
+            isOneToOne: false
+            referencedRelation: "racing_runners"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      racing_events: {
+        Row: {
+          created_at: string
+          distance_m: number
+          external_id: string | null
+          field_size: number | null
+          id: string
+          race_name: string | null
+          race_number: number
+          race_type: string | null
+          rail_position: string | null
+          raw_payload: Json | null
+          sport: string
+          start_time_local: string
+          start_time_utc: string
+          status: string
+          total_prize_money: number | null
+          track: string
+          track_condition: string | null
+          track_country: string
+          track_state: string | null
+          updated_at: string
+          weather: string | null
+        }
+        Insert: {
+          created_at?: string
+          distance_m: number
+          external_id?: string | null
+          field_size?: number | null
+          id?: string
+          race_name?: string | null
+          race_number: number
+          race_type?: string | null
+          rail_position?: string | null
+          raw_payload?: Json | null
+          sport: string
+          start_time_local: string
+          start_time_utc: string
+          status?: string
+          total_prize_money?: number | null
+          track: string
+          track_condition?: string | null
+          track_country: string
+          track_state?: string | null
+          updated_at?: string
+          weather?: string | null
+        }
+        Update: {
+          created_at?: string
+          distance_m?: number
+          external_id?: string | null
+          field_size?: number | null
+          id?: string
+          race_name?: string | null
+          race_number?: number
+          race_type?: string | null
+          rail_position?: string | null
+          raw_payload?: Json | null
+          sport?: string
+          start_time_local?: string
+          start_time_utc?: string
+          status?: string
+          total_prize_money?: number | null
+          track?: string
+          track_condition?: string | null
+          track_country?: string
+          track_state?: string | null
+          updated_at?: string
+          weather?: string | null
+        }
+        Relationships: []
+      }
+      racing_markets: {
+        Row: {
+          bookmaker: string
+          captured_at: string
+          event_id: string
+          id: string
+          implied_probability: number | null
+          is_best_odds: boolean | null
+          market_type: string
+          odds_decimal: number
+          runner_id: string
+        }
+        Insert: {
+          bookmaker: string
+          captured_at?: string
+          event_id: string
+          id?: string
+          implied_probability?: number | null
+          is_best_odds?: boolean | null
+          market_type?: string
+          odds_decimal: number
+          runner_id: string
+        }
+        Update: {
+          bookmaker?: string
+          captured_at?: string
+          event_id?: string
+          id?: string
+          implied_probability?: number | null
+          is_best_odds?: boolean | null
+          market_type?: string
+          odds_decimal?: number
+          runner_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "racing_markets_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "racing_events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "racing_markets_runner_id_fkey"
+            columns: ["runner_id"]
+            isOneToOne: false
+            referencedRelation: "racing_runners"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      racing_model_predictions: {
+        Row: {
+          angle_details: Json | null
+          angles_triggered: string[] | null
+          best_odds_at_prediction: number | null
+          confidence_score: number
+          edge_pct: number | null
+          event_id: string
+          expected_value: number | null
+          id: string
+          implied_prob_market: number | null
+          is_recommended: boolean
+          model_probability: number
+          model_version: string
+          predicted_at: string
+          reasoning: string | null
+          recommended_stake_pct: number | null
+          runner_id: string
+        }
+        Insert: {
+          angle_details?: Json | null
+          angles_triggered?: string[] | null
+          best_odds_at_prediction?: number | null
+          confidence_score: number
+          edge_pct?: number | null
+          event_id: string
+          expected_value?: number | null
+          id?: string
+          implied_prob_market?: number | null
+          is_recommended?: boolean
+          model_probability: number
+          model_version: string
+          predicted_at?: string
+          reasoning?: string | null
+          recommended_stake_pct?: number | null
+          runner_id: string
+        }
+        Update: {
+          angle_details?: Json | null
+          angles_triggered?: string[] | null
+          best_odds_at_prediction?: number | null
+          confidence_score?: number
+          edge_pct?: number | null
+          event_id?: string
+          expected_value?: number | null
+          id?: string
+          implied_prob_market?: number | null
+          is_recommended?: boolean
+          model_probability?: number
+          model_version?: string
+          predicted_at?: string
+          reasoning?: string | null
+          recommended_stake_pct?: number | null
+          runner_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "racing_model_predictions_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "racing_events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "racing_model_predictions_runner_id_fkey"
+            columns: ["runner_id"]
+            isOneToOne: false
+            referencedRelation: "racing_runners"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      racing_odds_snapshots: {
+        Row: {
+          captured_at: string
+          id: string
+          market_id: string
+          odds_decimal: number
+        }
+        Insert: {
+          captured_at?: string
+          id?: string
+          market_id: string
+          odds_decimal: number
+        }
+        Update: {
+          captured_at?: string
+          id?: string
+          market_id?: string
+          odds_decimal?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "racing_odds_snapshots_market_id_fkey"
+            columns: ["market_id"]
+            isOneToOne: false
+            referencedRelation: "racing_markets"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      racing_runners: {
+        Row: {
+          avg_400m_time: number | null
+          avg_800m_time: number | null
+          barrier_box: number
+          career_places: number | null
+          career_starts: number | null
+          career_wins: number | null
+          class_level: string | null
+          created_at: string
+          dam: string | null
+          distance_starts: number | null
+          distance_wins: number | null
+          early_speed_rating: number | null
+          event_id: string
+          finish_margin: number | null
+          finish_position: number | null
+          form_comment: string | null
+          id: string
+          jockey_claim: number | null
+          jockey_name: string | null
+          last_starts_days: number | null
+          official_rating: number | null
+          raw_payload: Json | null
+          recent_form: string[] | null
+          result_time: number | null
+          run_style: string | null
+          runner_name: string
+          runner_number: number
+          scratched: boolean
+          scratched_reason: string | null
+          sire: string | null
+          speed_rating: number | null
+          track_starts: number | null
+          track_wins: number | null
+          trainer_name: string | null
+          updated_at: string
+          weight_kg: number | null
+        }
+        Insert: {
+          avg_400m_time?: number | null
+          avg_800m_time?: number | null
+          barrier_box: number
+          career_places?: number | null
+          career_starts?: number | null
+          career_wins?: number | null
+          class_level?: string | null
+          created_at?: string
+          dam?: string | null
+          distance_starts?: number | null
+          distance_wins?: number | null
+          early_speed_rating?: number | null
+          event_id: string
+          finish_margin?: number | null
+          finish_position?: number | null
+          form_comment?: string | null
+          id?: string
+          jockey_claim?: number | null
+          jockey_name?: string | null
+          last_starts_days?: number | null
+          official_rating?: number | null
+          raw_payload?: Json | null
+          recent_form?: string[] | null
+          result_time?: number | null
+          run_style?: string | null
+          runner_name: string
+          runner_number: number
+          scratched?: boolean
+          scratched_reason?: string | null
+          sire?: string | null
+          speed_rating?: number | null
+          track_starts?: number | null
+          track_wins?: number | null
+          trainer_name?: string | null
+          updated_at?: string
+          weight_kg?: number | null
+        }
+        Update: {
+          avg_400m_time?: number | null
+          avg_800m_time?: number | null
+          barrier_box?: number
+          career_places?: number | null
+          career_starts?: number | null
+          career_wins?: number | null
+          class_level?: string | null
+          created_at?: string
+          dam?: string | null
+          distance_starts?: number | null
+          distance_wins?: number | null
+          early_speed_rating?: number | null
+          event_id?: string
+          finish_margin?: number | null
+          finish_position?: number | null
+          form_comment?: string | null
+          id?: string
+          jockey_claim?: number | null
+          jockey_name?: string | null
+          last_starts_days?: number | null
+          official_rating?: number | null
+          raw_payload?: Json | null
+          recent_form?: string[] | null
+          result_time?: number | null
+          run_style?: string | null
+          runner_name?: string
+          runner_number?: number
+          scratched?: boolean
+          scratched_reason?: string | null
+          sire?: string | null
+          speed_rating?: number | null
+          track_starts?: number | null
+          track_wins?: number | null
+          trainer_name?: string | null
+          updated_at?: string
+          weight_kg?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "racing_runners_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "racing_events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      racing_track_bias: {
+        Row: {
+          barrier_1_win_rate: number | null
+          barrier_2_win_rate: number | null
+          barrier_3_win_rate: number | null
+          barrier_4_win_rate: number | null
+          barrier_5_win_rate: number | null
+          barrier_6_win_rate: number | null
+          barrier_7_win_rate: number | null
+          barrier_8_win_rate: number | null
+          barrier_wide_win_rate: number | null
+          closer_win_rate: number | null
+          distance_range: string | null
+          id: string
+          last_updated: string
+          leader_win_rate: number | null
+          on_pace_win_rate: number | null
+          rail_position_advantage: string | null
+          sample_size: number
+          sport: string
+          track: string
+          track_condition: string | null
+        }
+        Insert: {
+          barrier_1_win_rate?: number | null
+          barrier_2_win_rate?: number | null
+          barrier_3_win_rate?: number | null
+          barrier_4_win_rate?: number | null
+          barrier_5_win_rate?: number | null
+          barrier_6_win_rate?: number | null
+          barrier_7_win_rate?: number | null
+          barrier_8_win_rate?: number | null
+          barrier_wide_win_rate?: number | null
+          closer_win_rate?: number | null
+          distance_range?: string | null
+          id?: string
+          last_updated?: string
+          leader_win_rate?: number | null
+          on_pace_win_rate?: number | null
+          rail_position_advantage?: string | null
+          sample_size?: number
+          sport: string
+          track: string
+          track_condition?: string | null
+        }
+        Update: {
+          barrier_1_win_rate?: number | null
+          barrier_2_win_rate?: number | null
+          barrier_3_win_rate?: number | null
+          barrier_4_win_rate?: number | null
+          barrier_5_win_rate?: number | null
+          barrier_6_win_rate?: number | null
+          barrier_7_win_rate?: number | null
+          barrier_8_win_rate?: number | null
+          barrier_wide_win_rate?: number | null
+          closer_win_rate?: number | null
+          distance_range?: string | null
+          id?: string
+          last_updated?: string
+          leader_win_rate?: number | null
+          on_pace_win_rate?: number | null
+          rail_position_advantage?: string | null
+          sample_size?: number
+          sport?: string
+          track?: string
+          track_condition?: string | null
+        }
+        Relationships: []
+      }
       scrape_history: {
         Row: {
           created_by: string | null

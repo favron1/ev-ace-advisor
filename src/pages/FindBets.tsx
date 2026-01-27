@@ -156,16 +156,34 @@ export default function FindBets() {
   const refreshOdds = async () => {
     setRefreshingOdds(true);
     try {
-      const { data, error } = await supabase.functions.invoke('fetch-odds-v3', {
-        body: { sports: selectedSports }
-      });
-      
-      if (error) throw error;
-      
-      toast({
-        title: "Odds Updated",
-        description: `Processed ${data.events_processed} events with ${data.markets_processed} markets`,
-      });
+      // Use different edge function based on sport mode
+      if (sport === 'racing') {
+        const { data, error } = await supabase.functions.invoke('fetch-racing-odds', {
+          body: { 
+            racing_types: selectedRacingTypes,
+            regions: selectedRacingRegions,
+            hours_ahead: windowHours
+          }
+        });
+        
+        if (error) throw error;
+        
+        toast({
+          title: "Racing Odds Updated",
+          description: `Processed ${data.events_processed} races with ${data.runners_processed} runners`,
+        });
+      } else {
+        const { data, error } = await supabase.functions.invoke('fetch-odds-v3', {
+          body: { sports: selectedSports }
+        });
+        
+        if (error) throw error;
+        
+        toast({
+          title: "Odds Updated",
+          description: `Processed ${data.events_processed} events with ${data.markets_processed} markets`,
+        });
+      }
     } catch (error) {
       console.error('Error refreshing odds:', error);
       toast({
@@ -179,48 +197,120 @@ export default function FindBets() {
   };
 
   const findBets = async () => {
-    if (selectedSports.length === 0) {
-      toast({
-        title: "Select Sports",
-        description: "Please select at least one sport",
-        variant: "destructive",
-      });
-      return;
+    // Validate based on mode
+    if (sport === 'racing') {
+      if (selectedRacingTypes.length === 0) {
+        toast({
+          title: "Select Racing Type",
+          description: "Please select at least one racing type (Horse or Greyhound)",
+          variant: "destructive",
+        });
+        return;
+      }
+    } else {
+      if (selectedSports.length === 0) {
+        toast({
+          title: "Select Sports",
+          description: "Please select at least one sport",
+          variant: "destructive",
+        });
+        return;
+      }
     }
 
     setLoading(true);
     try {
       const { data: { session } } = await supabase.auth.getSession();
       
-      const { data, error } = await supabase.functions.invoke('run-betting-model', {
-        body: {
-          sports: selectedSports,
-          engine: 'team_sports',
-          window_hours: windowHours,
-          bankroll_units: bankrollUnits,
-          max_daily_exposure_pct: maxDailyExposure / 100,
-          max_per_event_exposure_pct: maxEventExposure / 100,
-          max_bets: maxBets
-        },
-        headers: session ? {
-          Authorization: `Bearer ${session.access_token}`
-        } : undefined
-      });
-
-      if (error) throw error;
-
-      setResults(data);
-      
-      if (data.recommended_bets?.length > 0) {
-        toast({
-          title: "Bets Found",
-          description: `Found ${data.recommended_bets.length} value bets from ${data.events_analyzed} events`,
+      // Use different edge function based on sport mode
+      if (sport === 'racing') {
+        const { data, error } = await supabase.functions.invoke('run-racing-model', {
+          body: {
+            racing_types: selectedRacingTypes,
+            regions: selectedRacingRegions,
+            hours_ahead: windowHours,
+            min_ev_threshold: 0.05,
+            min_confidence: 65,
+            bankroll_units: bankrollUnits
+          },
+          headers: session ? {
+            Authorization: `Bearer ${session.access_token}`
+          } : undefined
         });
+
+        if (error) throw error;
+
+        // Transform racing results to match expected format
+        setResults({
+          ...data,
+          events_analyzed: data.races_analyzed,
+          recommended_bets: data.recommended_bets?.map((bet: any) => ({
+            event_name: `${bet.track} R${bet.race_number}`,
+            event_id: bet.race_id,
+            sport: bet.sport,
+            league: bet.track,
+            start_time: bet.start_time,
+            selection: `${bet.runner_name} (#${bet.runner_number})`,
+            market: bet.market_type,
+            odds: bet.odds,
+            bookmaker: bet.bookmaker,
+            model_probability: bet.model_probability,
+            implied_probability: bet.implied_probability,
+            edge: bet.edge,
+            bet_score: bet.bet_score,
+            stake_units: bet.stake_units,
+            confidence: bet.confidence >= 75 ? 'high' : bet.confidence >= 60 ? 'medium' : 'low',
+            rationale: bet.reasoning,
+            // Racing-specific fields
+            barrier_box: bet.barrier_box,
+            jockey: bet.jockey,
+            trainer: bet.trainer,
+            angles: bet.angles,
+          })) || []
+        });
+        
+        if (data.recommended_bets?.length > 0) {
+          toast({
+            title: "Racing Bets Found",
+            description: `Found ${data.recommended_bets.length} value bets from ${data.races_analyzed} races`,
+          });
+        } else {
+          toast({
+            title: "No Racing Bets Found",
+            description: "No bets met the criteria. Try adjusting filters or wait for more races.",
+          });
+        }
       } else {
-        toast({
-          title: "No Bets Found",
-          description: data.reason || "No bets met the criteria",
+        const { data, error } = await supabase.functions.invoke('run-betting-model', {
+          body: {
+            sports: selectedSports,
+            engine: 'team_sports',
+            window_hours: windowHours,
+            bankroll_units: bankrollUnits,
+            max_daily_exposure_pct: maxDailyExposure / 100,
+            max_per_event_exposure_pct: maxEventExposure / 100,
+            max_bets: maxBets
+          },
+          headers: session ? {
+            Authorization: `Bearer ${session.access_token}`
+          } : undefined
         });
+
+        if (error) throw error;
+
+        setResults(data);
+        
+        if (data.recommended_bets?.length > 0) {
+          toast({
+            title: "Bets Found",
+            description: `Found ${data.recommended_bets.length} value bets from ${data.events_analyzed} events`,
+          });
+        } else {
+          toast({
+            title: "No Bets Found",
+            description: data.reason || "No bets met the criteria",
+          });
+        }
       }
     } catch (error) {
       console.error('Error finding bets:', error);
@@ -483,8 +573,14 @@ export default function FindBets() {
       <main className="container mx-auto px-4 py-8">
         <div className="flex items-center justify-between mb-8">
           <div>
-            <h1 className="text-3xl font-bold text-foreground">Find Best Bets</h1>
-            <p className="text-muted-foreground">AI-powered value bet detection</p>
+            <h1 className="text-3xl font-bold text-foreground">
+              {sport === 'racing' ? 'Find Racing Bets' : 'Find Best Bets'}
+            </h1>
+            <p className="text-muted-foreground">
+              {sport === 'racing' 
+                ? 'Professional racing intelligence engine' 
+                : 'AI-powered value bet detection'}
+            </p>
           </div>
           <div className="flex items-center gap-2">
             <MyBetsDrawer
@@ -515,8 +611,12 @@ export default function FindBets() {
           {/* Filters Panel */}
           <Card className="lg:col-span-1">
             <CardHeader>
-              <CardTitle>Parameters</CardTitle>
-              <CardDescription>Configure your betting model</CardDescription>
+              <CardTitle>{sport === 'racing' ? 'Racing Parameters' : 'Parameters'}</CardTitle>
+              <CardDescription>
+                {sport === 'racing' 
+                  ? 'Configure horse & greyhound racing model' 
+                  : 'Configure your betting model'}
+              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               {/* Sports/Racing Type Selection - Conditional based on mode */}
@@ -695,58 +795,63 @@ export default function FindBets() {
                 />
               </div>
 
-              {/* Max Bets */}
-              <div className="space-y-2">
-                <Label htmlFor="maxBets">Max Bets</Label>
-                <Input
-                  id="maxBets"
-                  type="number"
-                  value={maxBets}
-                  onChange={(e) => setMaxBets(parseInt(e.target.value) || 10)}
-                  min={1}
-                  max={50}
-                />
-              </div>
+              {/* Sports-specific controls - hide in racing mode */}
+              {sport === 'soccer' && (
+                <>
+                  {/* Max Bets */}
+                  <div className="space-y-2">
+                    <Label htmlFor="maxBets">Max Bets</Label>
+                    <Input
+                      id="maxBets"
+                      type="number"
+                      value={maxBets}
+                      onChange={(e) => setMaxBets(parseInt(e.target.value) || 10)}
+                      min={1}
+                      max={50}
+                    />
+                  </div>
 
-              {/* Daily Exposure */}
-              <div className="space-y-2">
-                <Label htmlFor="dailyExp">Max Daily Exposure (%)</Label>
-                <Input
-                  id="dailyExp"
-                  type="number"
-                  value={maxDailyExposure}
-                  onChange={(e) => setMaxDailyExposure(parseInt(e.target.value) || 10)}
-                  min={1}
-                  max={50}
-                />
-              </div>
+                  {/* Daily Exposure */}
+                  <div className="space-y-2">
+                    <Label htmlFor="dailyExp">Max Daily Exposure (%)</Label>
+                    <Input
+                      id="dailyExp"
+                      type="number"
+                      value={maxDailyExposure}
+                      onChange={(e) => setMaxDailyExposure(parseInt(e.target.value) || 10)}
+                      min={1}
+                      max={50}
+                    />
+                  </div>
 
-              {/* Event Exposure */}
-              <div className="space-y-2">
-                <Label htmlFor="eventExp">Max Event Exposure (%)</Label>
-                <Input
-                  id="eventExp"
-                  type="number"
-                  value={maxEventExposure}
-                  onChange={(e) => setMaxEventExposure(parseInt(e.target.value) || 3)}
-                  min={1}
-                  max={20}
-                />
-              </div>
+                  {/* Event Exposure */}
+                  <div className="space-y-2">
+                    <Label htmlFor="eventExp">Max Event Exposure (%)</Label>
+                    <Input
+                      id="eventExp"
+                      type="number"
+                      value={maxEventExposure}
+                      onChange={(e) => setMaxEventExposure(parseInt(e.target.value) || 3)}
+                      min={1}
+                      max={20}
+                    />
+                  </div>
 
-              {/* Max Matches for Scraping */}
-              <div className="space-y-2">
-                <Label htmlFor="maxMatches">Max Matches to Analyze</Label>
-                <Input
-                  id="maxMatches"
-                  type="number"
-                  value={maxMatches}
-                  onChange={(e) => setMaxMatches(parseInt(e.target.value) || 15)}
-                  min={1}
-                  max={30}
-                />
-                <p className="text-xs text-muted-foreground">~8 API calls per match</p>
-              </div>
+                  {/* Max Matches for Scraping */}
+                  <div className="space-y-2">
+                    <Label htmlFor="maxMatches">Max Matches to Analyze</Label>
+                    <Input
+                      id="maxMatches"
+                      type="number"
+                      value={maxMatches}
+                      onChange={(e) => setMaxMatches(parseInt(e.target.value) || 15)}
+                      min={1}
+                      max={30}
+                    />
+                    <p className="text-xs text-muted-foreground">~8 API calls per match</p>
+                  </div>
+                </>
+              )}
 
               <Button 
                 onClick={findBets} 
@@ -758,22 +863,25 @@ export default function FindBets() {
                 ) : (
                   <Search className="h-4 w-4" />
                 )}
-                Find Best Bets
+                {sport === 'racing' ? 'Find Racing Bets' : 'Find Best Bets'}
               </Button>
 
-              <Button 
-                onClick={scrapeData} 
-                disabled={scraping}
-                variant="outline"
-                className="w-full gap-2"
-              >
-                {scraping ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <FileText className="h-4 w-4" />
-                )}
-                Scrape Data Only
-              </Button>
+              {/* Scrape button - only for sports mode */}
+              {sport === 'soccer' && (
+                <Button 
+                  onClick={scrapeData} 
+                  disabled={scraping}
+                  variant="outline"
+                  className="w-full gap-2"
+                >
+                  {scraping ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <FileText className="h-4 w-4" />
+                  )}
+                  Scrape Data Only
+                </Button>
+              )}
             </CardContent>
           </Card>
 
