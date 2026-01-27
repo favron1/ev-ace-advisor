@@ -21,20 +21,43 @@ const TIER_1_LEAGUES = [
 
 const TIER_2_LEAGUES = [
   'a-league', 'australia a-league', 'australian a-league',
-  'primera division', 'argentina primera', 'argentine primera',
-  'belgian pro league', 'belgium first division',
-  'primeira liga', 'portuguese primeira',
+  'primera division', 'argentina primera', 'argentine primera', 'primera división',
+  'belgian pro league', 'belgium first division', 'jupiler',
+  'primeira liga', 'portuguese primeira', 'liga portugal',
   'eredivisie', 'dutch eredivisie',
   'scottish premiership',
   'ucl', 'champions league', 'uefa champions league',
   'uel', 'europa league', 'uefa europa league',
-  'brazil serie a', 'brasileirao'
+  'brazil serie a', 'brasileirao', 'série a', 'brazil série',
+  'mls', 'major league soccer'
 ];
 
 function getLeagueTier(league: string): 1 | 2 | 3 {
-  const normalized = league.toLowerCase().trim();
-  if (TIER_1_LEAGUES.some(t => normalized.includes(t))) return 1;
-  if (TIER_2_LEAGUES.some(t => normalized.includes(t))) return 2;
+  const normalized = league.toLowerCase().trim()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, ''); // Remove accents
+  
+  // Check Tier 1 first (more specific matches)
+  if (TIER_1_LEAGUES.some(t => normalized.includes(t.normalize('NFD').replace(/[\u0300-\u036f]/g, '')))) {
+    // Exclude "Brazil Série A" from matching "Serie A" (Italian)
+    if (normalized.includes('brazil') || normalized.includes('brasil')) {
+      // This is Brazilian league, not Italian
+    } else {
+      return 1;
+    }
+  }
+  
+  // Check Tier 2
+  if (TIER_2_LEAGUES.some(t => normalized.includes(t.normalize('NFD').replace(/[\u0300-\u036f]/g, '')))) return 2;
+  
+  // Specific country-based detection for common Tier 2
+  if (normalized.includes('argentina') || normalized.includes('argentine')) return 2;
+  if (normalized.includes('brazil') || normalized.includes('brasil')) return 2;
+  if (normalized.includes('australia')) return 2;
+  if (normalized.includes('portugal')) return 2;
+  if (normalized.includes('belgium') || normalized.includes('belgian')) return 2;
+  if (normalized.includes('netherlands') || normalized.includes('dutch')) return 2;
+  if (normalized.includes('scotland') || normalized.includes('scottish')) return 2;
+  
   return 3;
 }
 
@@ -690,14 +713,26 @@ function analyzeSoccerBetsLocal(
       modelProb: number,
       marketFilter: (m: any) => boolean
     ) => {
-      const market = markets.find(marketFilter);
-      if (!market) return;
+      // Find ALL matching markets and pick the BEST odds (highest value)
+      const matchingMarkets = markets.filter(marketFilter);
+      if (matchingMarkets.length === 0) return;
+
+      // Sort by odds descending (highest odds = best for bettor)
+      matchingMarkets.sort((a: any, b: any) => parseFloat(b.odds_decimal) - parseFloat(a.odds_decimal));
+      const market = matchingMarkets[0]; // Best odds available
 
       const offered = parseFloat(market.odds_decimal);
       if (!offered || offered <= 1) return;
 
       const implied = 1 / offered;
       const edge = modelProb - implied;
+
+      // For debugging, also check what sharp odds were
+      const sharpMarket = matchingMarkets.find((m: any) => 
+        m.bookmaker?.toLowerCase().includes('pinnacle') || 
+        m.bookmaker?.toLowerCase().includes('betfair')
+      );
+      const sharpImplied = sharpMarket ? 1 / parseFloat(sharpMarket.odds_decimal) : implied;
 
       if (edge < MIN_EDGE) {
         rejected.push({
@@ -758,25 +793,35 @@ function analyzeSoccerBetsLocal(
       });
     };
 
-    // 1X2 Markets
+    // 1X2 Markets - match by team name (selections use actual team names, not "home"/"away")
+    const homeTeamLower = event.home_team?.toLowerCase() || '';
+    const awayTeamLower = event.away_team?.toLowerCase() || '';
+    
     analyzeSelection('home', `${event.home_team} to Win`, calibrated.homeWin,
-      (m) => m.type === 'moneyline' && m.selection?.toLowerCase().includes('home'));
+      (m: any) => (m.type === 'moneyline' || m.market_type === 'h2h') && 
+        (m.selection?.toLowerCase().includes(homeTeamLower) || 
+         (m.selection?.toLowerCase().includes('home') && !m.selection?.toLowerCase().includes('draw'))));
+    
     analyzeSelection('away', `${event.away_team} to Win`, calibrated.awayWin,
-      (m) => m.type === 'moneyline' && m.selection?.toLowerCase().includes('away'));
+      (m: any) => (m.type === 'moneyline' || m.market_type === 'h2h') && 
+        (m.selection?.toLowerCase().includes(awayTeamLower) || 
+         (m.selection?.toLowerCase().includes('away') && !m.selection?.toLowerCase().includes('draw'))));
+    
     analyzeSelection('draw', 'Draw', calibrated.draw,
-      (m) => m.type === 'moneyline' && m.selection?.toLowerCase().includes('draw'));
+      (m: any) => (m.type === 'moneyline' || m.market_type === 'h2h') && 
+        m.selection?.toLowerCase() === 'draw');
 
     // Over/Under 2.5
     analyzeSelection('over', 'Over 2.5 Goals', calibrated.over25,
-      (m) => m.selection?.toLowerCase().includes('over') && m.selection?.includes('2.5'));
+      (m: any) => m.market_type === 'totals' && m.selection?.toLowerCase().includes('over'));
     analyzeSelection('under', 'Under 2.5 Goals', calibrated.under25,
-      (m) => m.selection?.toLowerCase().includes('under') && m.selection?.includes('2.5'));
+      (m: any) => m.market_type === 'totals' && m.selection?.toLowerCase().includes('under'));
 
-    // BTTS
+    // BTTS (if available in data)
     analyzeSelection('btts_yes', 'BTTS Yes', calibrated.bttsYes,
-      (m) => m.selection?.toLowerCase().includes('btts') && m.selection?.toLowerCase().includes('yes'));
+      (m: any) => m.selection?.toLowerCase().includes('btts') && m.selection?.toLowerCase().includes('yes'));
     analyzeSelection('btts_no', 'BTTS No', calibrated.bttsNo,
-      (m) => m.selection?.toLowerCase().includes('btts') && m.selection?.toLowerCase().includes('no'));
+      (m: any) => m.selection?.toLowerCase().includes('btts') && m.selection?.toLowerCase().includes('no'));
   }
 
   // Sort by bet score descending
