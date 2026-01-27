@@ -381,8 +381,63 @@ export type Database = {
         }
         Relationships: []
       }
+      racing_angle_performance: {
+        Row: {
+          angle_name: string
+          bets_placed: number
+          calculated_at: string
+          current_weight: number
+          hit_rate: number | null
+          id: string
+          model_version: string
+          period_end: string
+          period_start: string
+          profit_units: number
+          roi: number | null
+          sport: string
+          suggested_weight: number | null
+          times_triggered: number
+          wins: number
+        }
+        Insert: {
+          angle_name: string
+          bets_placed?: number
+          calculated_at?: string
+          current_weight?: number
+          hit_rate?: number | null
+          id?: string
+          model_version: string
+          period_end: string
+          period_start: string
+          profit_units?: number
+          roi?: number | null
+          sport: string
+          suggested_weight?: number | null
+          times_triggered?: number
+          wins?: number
+        }
+        Update: {
+          angle_name?: string
+          bets_placed?: number
+          calculated_at?: string
+          current_weight?: number
+          hit_rate?: number | null
+          id?: string
+          model_version?: string
+          period_end?: string
+          period_start?: string
+          profit_units?: number
+          roi?: number | null
+          sport?: string
+          suggested_weight?: number | null
+          times_triggered?: number
+          wins?: number
+        }
+        Relationships: []
+      }
       racing_bets: {
         Row: {
+          actual_result: string | null
           angles_at_bet: string[] | null
           bookmaker: string
           closing_odds: number | null
@@ -390,10 +445,13 @@ export type Database = {
           confidence_at_bet: number | null
           created_at: string
           edge_at_bet: number | null
+          ev_at_bet: number | null
           event_id: string
+          finish_position: number | null
           id: string
           market_type: string
           model_probability: number | null
+          model_version: string | null
           odds_taken: number
           placed_at: string
           prediction_id: string | null
@@ -406,6 +464,7 @@ export type Database = {
           user_id: string
         }
         Insert: {
+          actual_result?: string | null
           angles_at_bet?: string[] | null
           bookmaker: string
           closing_odds?: number | null
@@ -413,10 +472,13 @@ export type Database = {
           confidence_at_bet?: number | null
           created_at?: string
           edge_at_bet?: number | null
+          ev_at_bet?: number | null
           event_id: string
+          finish_position?: number | null
           id?: string
           market_type?: string
           model_probability?: number | null
+          model_version?: string | null
           odds_taken: number
           placed_at?: string
           prediction_id?: string | null
@@ -429,6 +491,7 @@ export type Database = {
           user_id: string
         }
         Update: {
+          actual_result?: string | null
           angles_at_bet?: string[] | null
           bookmaker?: string
           closing_odds?: number | null
@@ -436,10 +499,13 @@ export type Database = {
           confidence_at_bet?: number | null
           created_at?: string
           edge_at_bet?: number | null
+          ev_at_bet?: number | null
           event_id?: string
+          finish_position?: number | null
           id?: string
           market_type?: string
           model_probability?: number | null
+          model_version?: string | null
           odds_taken?: number
           placed_at?: string
           prediction_id?: string | null
@@ -598,6 +664,90 @@ export type Database = {
           },
         ]
       }
+      racing_model_performance: {
+        Row: {
+          avg_clv: number | null
+          avg_confidence: number | null
+          avg_edge: number | null
+          avg_ev: number | null
+          brier_score: number | null
+          by_angle: Json | null
+          by_confidence_band: Json | null
+          by_distance: Json | null
+          by_sport: Json | null
+          by_track: Json | null
+          calculated_at: string
+          engine_version: string
+          id: string
+          log_loss: number | null
+          losses: number
+          model_version: string
+          period_end: string
+          period_start: string
+          period_type: string
+          profit_units: number
+          roi: number | null
+          total_bets: number
+          voids: number
+          win_rate: number | null
+          wins: number
+        }
+        Insert: {
+          avg_clv?: number | null
+          avg_confidence?: number | null
+          avg_edge?: number | null
+          avg_ev?: number | null
+          brier_score?: number | null
+          by_angle?: Json | null
+          by_confidence_band?: Json | null
+          by_distance?: Json | null
+          by_sport?: Json | null
+          by_track?: Json | null
+          calculated_at?: string
+          engine_version: string
+          id?: string
+          log_loss?: number | null
+          losses?: number
+          model_version: string
+          period_end: string
+          period_start: string
+          period_type?: string
+          profit_units?: number
+          roi?: number | null
+          total_bets?: number
+          voids?: number
+          win_rate?: number | null
+          wins?: number
+        }
+        Update: {
+          avg_clv?: number | null
+          avg_confidence?: number | null
+          avg_edge?: number | null
+          avg_ev?: number | null
+          brier_score?: number | null
+          by_angle?: Json | null
+          by_confidence_band?: Json | null
+          by_distance?: Json | null
+          by_sport?: Json | null
+          by_track?: Json | null
+          calculated_at?: string
+          engine_version?: string
+          id?: string
+          log_loss?: number | null
+          losses?: number
+          model_version?: string
+          period_end?: string
+          period_start?: string
+          period_type?: string
+          profit_units?: number
+          roi?: number | null
+          total_bets?: number
+          voids?: number
+          win_rate?: number | null
+          wins?: number
+        }
+        Relationships: []
+      }
       racing_model_predictions: {
         Row: {
           angle_details: Json | null
@@ -605,6 +755,7 @@ export type Database = {
           best_odds_at_prediction: number | null
           confidence_score: number
           edge_pct: number | null
+          engine_version: string | null
           event_id: string
           expected_value: number | null
           id: string
@@ -623,6 +774,7 @@ export type Database = {
           best_odds_at_prediction?: number | null
           confidence_score: number
           edge_pct?: number | null
+          engine_version?: string | null
           event_id: string
           expected_value?: number | null
           id?: string
@@ -641,6 +793,7 @@ export type Database = {
           best_odds_at_prediction?: number | null
           confidence_score?: number
           edge_pct?: number | null
+          engine_version?: string | null
           event_id?: string
           expected_value?: number | null
           id?: string
