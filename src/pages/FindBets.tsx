@@ -168,10 +168,19 @@ export default function FindBets() {
         
         if (error) throw error;
         
-        toast({
-          title: "Racing Odds Updated",
-          description: `Processed ${data.events_processed} races with ${data.runners_processed} runners`,
-        });
+        if (data.events_processed === 0) {
+          toast({
+            title: "No Racing Data Available",
+            description: "The Odds API doesn't support racing markets. Consider integrating a dedicated racing data provider (Betfair, Punting Form, Racing.com API).",
+            variant: "destructive",
+            duration: 8000,
+          });
+        } else {
+          toast({
+            title: "Racing Odds Updated",
+            description: `Processed ${data.events_processed} races with ${data.runners_processed} runners`,
+          });
+        }
       } else {
         const { data, error } = await supabase.functions.invoke('fetch-odds-v3', {
           body: { sports: selectedSports }
@@ -275,9 +284,15 @@ export default function FindBets() {
             description: `Found ${data.recommended_bets.length} value bets from ${data.races_analyzed} races`,
           });
         } else {
+          // Check if it's a data source issue vs no value found
+          const noDataMessage = data.races_analyzed === 0 
+            ? "No racing data available. The Odds API doesn't currently support horse/greyhound racing markets. A dedicated racing data provider (e.g., Betfair API, Punting Form) is required."
+            : "No bets met the criteria. Try adjusting filters or wait for more races.";
+          
           toast({
             title: "No Racing Bets Found",
-            description: "No bets met the criteria. Try adjusting filters or wait for more races.",
+            description: noDataMessage,
+            duration: 8000,
           });
         }
       } else {
