@@ -1053,6 +1053,31 @@ serve(async (req) => {
 
     console.log(`[Racing Engine v2] Live fetch result: ${liveRaces.length} races (source: ${dataSource}, processed: ${eventsProcessed})`);
 
+    // STEP 1b: Also try web scraping for additional form data (if Firecrawl configured)
+    let scraperResult = null;
+    try {
+      const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY");
+      if (FIRECRAWL_API_KEY && regions.includes("aus")) {
+        console.log(`[Racing Engine v2] Calling scraper for additional AU racing data...`);
+        const scraperUrl = `${SUPABASE_URL}/functions/v1/scrape-racing-data`;
+        const scraperResponse = await fetch(scraperUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ racing_types: racingTypes, regions }),
+        });
+        
+        if (scraperResponse.ok) {
+          scraperResult = await scraperResponse.json();
+          console.log(`[Racing Engine v2] Scraper returned: ${scraperResult.races_stored || 0} races, ${scraperResult.runners_stored || 0} runners`);
+        }
+      }
+    } catch (scraperError) {
+      console.log(`[Racing Engine v2] Scraper call failed (non-critical): ${scraperError}`);
+    }
+
     // STEP 2: Use live data if available, otherwise fallback
     let racesToAnalyze = liveRaces;
     let isUsingDemoData = false;
