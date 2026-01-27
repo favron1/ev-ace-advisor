@@ -233,14 +233,16 @@ export default function FindBets() {
       
       // Use different edge function based on sport mode
       if (sport === 'racing') {
-        const { data, error } = await supabase.functions.invoke('run-racing-model', {
+        const { data, error } = await supabase.functions.invoke('racing-engine', {
           body: {
             racing_types: selectedRacingTypes,
             regions: selectedRacingRegions,
             hours_ahead: windowHours,
-            min_ev_threshold: 0.05,
-            min_confidence: 65,
-            bankroll_units: bankrollUnits
+            config: {
+              minEvThreshold: 0.05,
+              minConfidence: 65,
+            },
+            include_demo_data: true,
           },
           headers: session ? {
             Authorization: `Bearer ${session.access_token}`
@@ -249,32 +251,33 @@ export default function FindBets() {
 
         if (error) throw error;
 
-        // Transform racing results to match expected format
+        // Transform racing-engine results to match expected format
         setResults({
           ...data,
           events_analyzed: data.races_analyzed,
-          recommended_bets: data.recommended_bets?.map((bet: any) => ({
-            event_name: `${bet.track} R${bet.race_number}`,
-            event_id: bet.race_id,
-            sport: bet.sport,
-            league: bet.track,
-            start_time: bet.start_time,
-            selection: `${bet.runner_name} (#${bet.runner_number})`,
-            market: bet.market_type,
-            odds: bet.odds,
-            bookmaker: bet.bookmaker,
-            model_probability: bet.model_probability,
-            implied_probability: bet.implied_probability,
-            edge: bet.edge,
-            bet_score: bet.bet_score,
-            stake_units: bet.stake_units,
-            confidence: bet.confidence >= 75 ? 'high' : bet.confidence >= 60 ? 'medium' : 'low',
-            rationale: bet.reasoning,
+          recommended_bets: data.recommendations?.map((rec: any) => ({
+            event_name: `${rec.track} R${rec.raceNumber}`,
+            event_id: rec.raceId,
+            sport: rec.sport,
+            league: rec.track,
+            start_time: rec.startTime,
+            selection: `${rec.runnerName} (#${rec.runnerNumber})`,
+            market: 'Win',
+            odds: rec.bestOdds,
+            bookmaker: rec.bestBookmaker,
+            model_probability: rec.modelProbability,
+            implied_probability: rec.impliedProbability,
+            edge: rec.edge,
+            bet_score: rec.betScore,
+            stake_units: rec.stakeUnits,
+            confidence: rec.confidence >= 80 ? 'high' : rec.confidence >= 65 ? 'medium' : 'low',
+            rationale: rec.reasoning,
             // Racing-specific fields
-            barrier_box: bet.barrier_box,
-            jockey: bet.jockey,
-            trainer: bet.trainer,
-            angles: bet.angles,
+            barrier_box: rec.barrier,
+            jockey: undefined,
+            trainer: undefined,
+            angles: rec.angles,
+            isDemo: rec.isDemo,
           })) || []
         });
         
