@@ -130,8 +130,11 @@ export function useAutoPolling({
   const runWatchPollSafe = useCallback(async () => {
     if (isPollingRef.current) return;
     if (dailyUsagePercentRef.current > 90) {
-      console.log('Auto-polling paused: approaching daily limit');
-      return;
+      toast({
+        title: "⚠️ Approaching Daily API Limit",
+        description: "Usage is above 90%. Polling continues but monitor your quota.",
+        variant: "destructive",
+      });
     }
     if (isPausedRef.current) {
       console.log('Auto-polling paused: scanning is paused');
@@ -160,7 +163,6 @@ export function useAutoPolling({
   const runActivePollSafe = useCallback(async () => {
     if (isPollingRef.current) return;
     if (activeCountRef.current === 0 && !newsSpikeActiveRef.current) return;
-    if (dailyUsagePercentRef.current > 90) return;
     if (isPausedRef.current) return;
 
     isPollingRef.current = true;
