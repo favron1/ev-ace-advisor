@@ -351,6 +351,7 @@ export type Database = {
           daily_requests_used: number
           enabled_sports: string[] | null
           event_horizon_hours: number
+          focus_mode: string | null
           hold_window_minutes: number | null
           id: string
           last_request_reset: string | null
@@ -382,6 +383,7 @@ export type Database = {
           daily_requests_used?: number
           enabled_sports?: string[] | null
           event_horizon_hours?: number
+          focus_mode?: string | null
           hold_window_minutes?: number | null
           id?: string
           last_request_reset?: string | null
@@ -413,6 +415,7 @@ export type Database = {
           daily_requests_used?: number
           enabled_sports?: string[] | null
           event_horizon_hours?: number
+          focus_mode?: string | null
           hold_window_minutes?: number | null
           id?: string
           last_request_reset?: string | null
