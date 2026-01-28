@@ -1,4 +1,4 @@
-import { ArrowUp, ArrowDown, Clock, TrendingUp, X, Check } from 'lucide-react';
+import { ArrowUp, Clock, X, Check, Target } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -12,7 +12,6 @@ interface SignalCardProps {
 }
 
 export function SignalCard({ signal, onDismiss, onExecute }: SignalCardProps) {
-  const isYes = signal.side === 'YES';
   const urgencyColors = {
     low: 'bg-muted text-muted-foreground',
     normal: 'bg-blue-500/10 text-blue-500',
@@ -29,6 +28,9 @@ export function SignalCard({ signal, onDismiss, onExecute }: SignalCardProps) {
   const timeUntilExpiry = signal.expires_at 
     ? Math.max(0, Math.floor((new Date(signal.expires_at).getTime() - Date.now()) / 1000 / 60))
     : null;
+  
+  // Display the recommended outcome (team/player name) or fall back to event name
+  const betTarget = signal.recommended_outcome || signal.event_name;
 
   return (
     <Card className="group hover:border-primary/50 transition-all duration-200">
@@ -48,21 +50,21 @@ export function SignalCard({ signal, onDismiss, onExecute }: SignalCardProps) {
               )}
             </div>
             <h3 className="font-medium text-sm truncate mb-1">{signal.event_name}</h3>
-            <div className="flex items-center gap-2">
+            
+            {/* Clear bet recommendation */}
+            <div className="flex items-center gap-2 mb-2">
               <Badge 
-                variant={isYes ? 'default' : 'secondary'}
-                className={cn(
-                  'font-mono',
-                  isYes ? 'bg-green-500/20 text-green-500 hover:bg-green-500/30' : 'bg-red-500/20 text-red-500 hover:bg-red-500/30'
-                )}
+                className="bg-primary/20 text-primary hover:bg-primary/30 font-semibold"
               >
-                {isYes ? <ArrowUp className="h-3 w-3 mr-1" /> : <ArrowDown className="h-3 w-3 mr-1" />}
-                {signal.side}
+                <Target className="h-3 w-3 mr-1" />
+                BET: {betTarget}
               </Badge>
-              <span className="text-xs text-muted-foreground">
-                @ {(signal.polymarket_price * 100).toFixed(1)}¢
-              </span>
             </div>
+            
+            <p className="text-xs text-muted-foreground">
+              Back <span className="font-medium text-foreground">{betTarget}</span> to win
+              <span className="ml-1">• {(signal.bookmaker_probability * 100).toFixed(1)}% implied</span>
+            </p>
           </div>
 
           {/* Right: Metrics */}
@@ -81,9 +83,6 @@ export function SignalCard({ signal, onDismiss, onExecute }: SignalCardProps) {
               <span className={cn('font-mono font-semibold', confidenceColor)}>
                 {signal.confidence_score}
               </span>
-            </div>
-            <div className="text-xs text-muted-foreground">
-              Books: {(signal.bookmaker_probability * 100).toFixed(1)}%
             </div>
           </div>
         </div>
