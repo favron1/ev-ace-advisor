@@ -47,6 +47,14 @@ export interface SignalOpportunity {
   expires_at?: string;
   created_at: string;
   user_id?: string;
+  // Enhanced fields for true arbitrage detection
+  is_true_arbitrage?: boolean;
+  polymarket_match_confidence?: number;
+  polymarket_yes_price?: number;
+  polymarket_volume?: number;
+  polymarket_updated_at?: string;
+  bookmaker_prob_fair?: number;
+  signal_strength?: number;
 }
 
 export interface SignalFactors {

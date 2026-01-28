@@ -315,6 +315,7 @@ export type Database = {
       }
       signal_opportunities: {
         Row: {
+          bookmaker_prob_fair: number | null
           bookmaker_probability: number
           confidence_score: number
           created_at: string | null
@@ -326,14 +327,19 @@ export type Database = {
           polymarket_market_id: string | null
           polymarket_match_confidence: number | null
           polymarket_price: number
+          polymarket_updated_at: string | null
+          polymarket_volume: number | null
+          polymarket_yes_price: number | null
           recommended_outcome: string | null
           side: string
           signal_factors: Json | null
+          signal_strength: number | null
           status: string | null
           urgency: string | null
           user_id: string | null
         }
         Insert: {
+          bookmaker_prob_fair?: number | null
           bookmaker_probability: number
           confidence_score: number
           created_at?: string | null
@@ -345,14 +351,19 @@ export type Database = {
           polymarket_market_id?: string | null
           polymarket_match_confidence?: number | null
           polymarket_price: number
+          polymarket_updated_at?: string | null
+          polymarket_volume?: number | null
+          polymarket_yes_price?: number | null
           recommended_outcome?: string | null
           side: string
           signal_factors?: Json | null
+          signal_strength?: number | null
           status?: string | null
           urgency?: string | null
           user_id?: string | null
         }
         Update: {
+          bookmaker_prob_fair?: number | null
           bookmaker_probability?: number
           confidence_score?: number
           created_at?: string | null
@@ -364,9 +375,13 @@ export type Database = {
           polymarket_market_id?: string | null
           polymarket_match_confidence?: number | null
           polymarket_price?: number
+          polymarket_updated_at?: string | null
+          polymarket_volume?: number | null
+          polymarket_yes_price?: number | null
           recommended_outcome?: string | null
           side?: string
           signal_factors?: Json | null
+          signal_strength?: number | null
           status?: string | null
           urgency?: string | null
           user_id?: string | null
