@@ -57,10 +57,12 @@ export type Database = {
         Row: {
           bookmaker: string
           captured_at: string | null
+          commence_time: string | null
           confirming_books: number | null
           event_name: string
           id: string
           implied_probability: number
+          is_sharp_book: boolean | null
           market_type: string
           movement_speed: number | null
           odds: number
@@ -71,10 +73,12 @@ export type Database = {
         Insert: {
           bookmaker: string
           captured_at?: string | null
+          commence_time?: string | null
           confirming_books?: number | null
           event_name: string
           id?: string
           implied_probability: number
+          is_sharp_book?: boolean | null
           market_type: string
           movement_speed?: number | null
           odds: number
@@ -85,10 +89,12 @@ export type Database = {
         Update: {
           bookmaker?: string
           captured_at?: string | null
+          commence_time?: string | null
           confirming_books?: number | null
           event_name?: string
           id?: string
           implied_probability?: number
+          is_sharp_book?: boolean | null
           market_type?: string
           movement_speed?: number | null
           odds?: number
@@ -179,6 +185,78 @@ export type Database = {
           total_wins?: number | null
           updated_at?: string | null
           user_id?: string
+        }
+        Relationships: []
+      }
+      scan_config: {
+        Row: {
+          adaptive_scanning_enabled: boolean
+          base_frequency_minutes: number
+          created_at: string
+          daily_requests_used: number
+          event_horizon_hours: number
+          id: string
+          last_request_reset: string | null
+          last_scan_at: string | null
+          max_daily_requests: number
+          max_monthly_requests: number
+          min_event_horizon_hours: number
+          monthly_requests_used: number
+          next_scheduled_scan_at: string | null
+          scanning_paused: boolean
+          sharp_book_weight: number
+          sharp_book_weighting_enabled: boolean
+          total_scans_today: number
+          turbo_frequency_minutes: number
+          turbo_mode_enabled: boolean
+          updated_at: string
+          user_id: string | null
+        }
+        Insert: {
+          adaptive_scanning_enabled?: boolean
+          base_frequency_minutes?: number
+          created_at?: string
+          daily_requests_used?: number
+          event_horizon_hours?: number
+          id?: string
+          last_request_reset?: string | null
+          last_scan_at?: string | null
+          max_daily_requests?: number
+          max_monthly_requests?: number
+          min_event_horizon_hours?: number
+          monthly_requests_used?: number
+          next_scheduled_scan_at?: string | null
+          scanning_paused?: boolean
+          sharp_book_weight?: number
+          sharp_book_weighting_enabled?: boolean
+          total_scans_today?: number
+          turbo_frequency_minutes?: number
+          turbo_mode_enabled?: boolean
+          updated_at?: string
+          user_id?: string | null
+        }
+        Update: {
+          adaptive_scanning_enabled?: boolean
+          base_frequency_minutes?: number
+          created_at?: string
+          daily_requests_used?: number
+          event_horizon_hours?: number
+          id?: string
+          last_request_reset?: string | null
+          last_scan_at?: string | null
+          max_daily_requests?: number
+          max_monthly_requests?: number
+          min_event_horizon_hours?: number
+          monthly_requests_used?: number
+          next_scheduled_scan_at?: string | null
+          scanning_paused?: boolean
+          sharp_book_weight?: number
+          sharp_book_weighting_enabled?: boolean
+          total_scans_today?: number
+          turbo_frequency_minutes?: number
+          turbo_mode_enabled?: boolean
+          updated_at?: string
+          user_id?: string | null
         }
         Relationships: []
       }
