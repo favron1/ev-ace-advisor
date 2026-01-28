@@ -30,6 +30,7 @@ export default function Terminal() {
   const [minConfidence, setMinConfidence] = useState(0);
   const [selectedUrgency, setSelectedUrgency] = useState<string[]>([]);
   const [showTrueEdgesOnly, setShowTrueEdgesOnly] = useState(false);
+  const [showBettableOnly, setShowBettableOnly] = useState(false);
 
   // Notifications hook
   const {
@@ -163,6 +164,7 @@ export default function Terminal() {
     minConfidence: minConfidence > 0 ? minConfidence : undefined,
     urgency: selectedUrgency.length > 0 ? selectedUrgency : undefined,
     trueEdgesOnly: showTrueEdgesOnly,
+    bettableOnly: showBettableOnly,
   });
 
   if (!user) {
@@ -189,10 +191,12 @@ export default function Terminal() {
           minConfidence={minConfidence}
           selectedUrgency={selectedUrgency}
           showTrueEdgesOnly={showTrueEdgesOnly}
+          showBettableOnly={showBettableOnly}
           onMinEdgeChange={setMinEdge}
           onMinConfidenceChange={setMinConfidence}
           onUrgencyChange={setSelectedUrgency}
           onShowTrueEdgesOnlyChange={setShowTrueEdgesOnly}
+          onShowBettableOnlyChange={setShowBettableOnly}
         />
 
         {/* Main Content */}
