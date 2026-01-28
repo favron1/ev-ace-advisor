@@ -1,13 +1,15 @@
-import { TrendingUp, Activity, Clock, Target } from 'lucide-react';
+import { TrendingUp, Activity, Clock, Target, Database, Zap } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import type { SignalOpportunity, SignalLog } from '@/types/arbitrage';
+import type { OvernightStats } from '@/hooks/useOvernightStats';
 
 interface StatsBarProps {
   signals: SignalOpportunity[];
   logs: SignalLog[];
+  overnightStats?: OvernightStats;
 }
 
-export function StatsBar({ signals, logs }: StatsBarProps) {
+export function StatsBar({ signals, logs, overnightStats }: StatsBarProps) {
   const activeSignals = signals.length;
   const avgEdge = signals.length > 0 
     ? signals.reduce((sum, s) => sum + s.edge_percent, 0) / signals.length 
@@ -19,6 +21,17 @@ export function StatsBar({ signals, logs }: StatsBarProps) {
   const wins = settledLogs.filter(l => l.outcome === 'win').length;
   const winRate = settledLogs.length > 0 ? (wins / settledLogs.length) * 100 : 0;
 
+  // Format last snapshot time
+  const formatLastSnapshot = () => {
+    if (!overnightStats?.lastSnapshotAt) return '--';
+    const diff = Date.now() - overnightStats.lastSnapshotAt.getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    return `${hours}h ago`;
+  };
+
   const stats = [
     { 
       label: 'Active Signals', 
@@ -27,10 +40,18 @@ export function StatsBar({ signals, logs }: StatsBarProps) {
       color: 'text-primary'
     },
     { 
-      label: 'Avg Edge', 
-      value: `+${avgEdge.toFixed(1)}%`,
-      icon: TrendingUp,
-      color: avgEdge >= 5 ? 'text-green-500' : 'text-foreground'
+      label: '24h Snapshots', 
+      value: overnightStats?.totalSnapshots24h.toLocaleString() || '--',
+      subtext: `${overnightStats?.eventsMonitored || 0} events`,
+      icon: Database,
+      color: 'text-blue-500'
+    },
+    { 
+      label: 'Max Movement', 
+      value: overnightStats ? `${overnightStats.maxMovementPct.toFixed(1)}%` : '--',
+      subtext: formatLastSnapshot(),
+      icon: Zap,
+      color: (overnightStats?.maxMovementPct || 0) >= 4 ? 'text-green-500' : 'text-muted-foreground'
     },
     { 
       label: 'Urgent', 
@@ -47,7 +68,7 @@ export function StatsBar({ signals, logs }: StatsBarProps) {
   ];
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
       {stats.map(stat => (
         <Card key={stat.label} className="bg-card/50">
           <CardContent className="p-4">
@@ -58,6 +79,9 @@ export function StatsBar({ signals, logs }: StatsBarProps) {
             <span className={`text-2xl font-bold font-mono ${stat.color}`}>
               {stat.value}
             </span>
+            {'subtext' in stat && stat.subtext && (
+              <p className="text-xs text-muted-foreground mt-0.5">{stat.subtext}</p>
+            )}
           </CardContent>
         </Card>
       ))}

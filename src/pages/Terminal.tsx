@@ -14,6 +14,7 @@ import { useScanConfig } from '@/hooks/useScanConfig';
 import { useWatchState } from '@/hooks/useWatchState';
 import { useAutoPolling } from '@/hooks/useAutoPolling';
 import { useNotifications } from '@/hooks/useNotifications';
+import { useOvernightStats } from '@/hooks/useOvernightStats';
 import { arbitrageApi } from '@/lib/api/arbitrage';
 import type { SignalLog } from '@/types/arbitrage';
 import type { EventWatchState } from '@/types/scan-config';
@@ -65,6 +66,9 @@ export default function Terminal() {
   
   const { markets, loading: marketsLoading } = usePolymarket();
   
+  // Overnight stats for server-side poll activity
+  const { stats: overnightStats, refresh: refreshOvernightStats } = useOvernightStats();
+
   const {
     config: scanConfig,
     status: scanStatus,
@@ -176,7 +180,7 @@ export default function Terminal() {
       
       <main className="container py-6 space-y-6">
         {/* Stats Overview */}
-        <StatsBar signals={signals} logs={logs} />
+        <StatsBar signals={signals} logs={logs} overnightStats={overnightStats} />
         
         {/* Filters */}
         <FiltersBar
