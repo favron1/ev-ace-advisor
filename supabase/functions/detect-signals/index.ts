@@ -688,18 +688,32 @@ interface LivePolymarketMatch {
   last_updated: string;
 }
 
+// Maximum live API lookups per invocation to prevent timeout
+const MAX_LIVE_API_LOOKUPS = 5;
+
+// Track live API call count globally within this invocation
+let liveApiCallsUsed = 0;
+
 async function fetchPolymarketForEvent(eventName: string, outcome: string, maxStalenessHours: number): Promise<LivePolymarketMatch | null> {
+  // GUARD: Limit total live API calls to prevent CPU timeout
+  if (liveApiCallsUsed >= MAX_LIVE_API_LOOKUPS) {
+    console.log(`[POLY-LIVE] Skipping ${eventName} - max live lookups (${MAX_LIVE_API_LOOKUPS}) reached`);
+    return null;
+  }
+  
   console.log(`[POLY-LIVE] Searching for: ${eventName} / ${outcome}`);
   
   try {
-    // Extract search terms from event name
-    const searchTerms = extractLiveSearchTerms(eventName);
+    // Extract search terms - only use the most likely matches (limit to 2)
+    const searchTerms = extractLiveSearchTerms(eventName).slice(0, 2);
     
     for (const searchTerm of searchTerms) {
-      const encodedSearch = encodeURIComponent(searchTerm);
-      const url = `https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50&title_contains=${encodedSearch}`;
+      liveApiCallsUsed++;
       
-      console.log(`[POLY-LIVE] Trying search: ${searchTerm}`);
+      const encodedSearch = encodeURIComponent(searchTerm);
+      const url = `https://gamma-api.polymarket.com/events?active=true&closed=false&limit=20&title_contains=${encodedSearch}`;
+      
+      console.log(`[POLY-LIVE] Trying search: ${searchTerm} (call ${liveApiCallsUsed}/${MAX_LIVE_API_LOOKUPS})`);
       
       const response = await fetch(url, {
         headers: { 'Accept': 'application/json' },
@@ -721,6 +735,12 @@ async function fetchPolymarketForEvent(eventName: string, outcome: string, maxSt
         console.log(`[POLY-LIVE] Found: ${match.question.slice(0, 60)}... (conf: ${(match.confidence * 100).toFixed(0)}%, vol: $${match.volume.toFixed(0)})`);
         return match;
       }
+      
+      // If we've hit the limit, stop searching
+      if (liveApiCallsUsed >= MAX_LIVE_API_LOOKUPS) {
+        console.log(`[POLY-LIVE] Stopping early - max live lookups reached`);
+        break;
+      }
     }
     
     console.log(`[POLY-LIVE] No match found for: ${eventName}`);
@@ -735,20 +755,15 @@ async function fetchPolymarketForEvent(eventName: string, outcome: string, maxSt
 function extractLiveSearchTerms(eventName: string): string[] {
   const terms: string[] = [];
   
-  // Full event name
-  terms.push(eventName);
-  
   // Extract team names from "Team A vs Team B" format
   const vsMatch = eventName.match(/(.+?)\s+vs\.?\s+(.+)/i);
   if (vsMatch) {
+    // Start with individual team names - more specific, better matches
     terms.push(vsMatch[1].trim());
     terms.push(vsMatch[2].trim());
-    
-    // Try last word of each team (often most distinctive - Timberwolves, Lakers, etc.)
-    const team1Parts = vsMatch[1].trim().split(' ');
-    const team2Parts = vsMatch[2].trim().split(' ');
-    if (team1Parts.length > 1) terms.push(team1Parts[team1Parts.length - 1]);
-    if (team2Parts.length > 1) terms.push(team2Parts[team2Parts.length - 1]);
+  } else {
+    // Full event name as fallback
+    terms.push(eventName);
   }
   
   return [...new Set(terms)]; // Remove duplicates
