@@ -55,7 +55,9 @@ function extractTeams(question: string, title: string): { home: string | null; a
 
 // Determine if this is a sports H2H market
 function isSportsH2H(event: any): boolean {
-  const tags = event.tags || [];
+  const rawTags = event.tags || [];
+  // Ensure tags are strings
+  const tags = rawTags.filter((t: any) => typeof t === 'string');
   const title = (event.title || '').toLowerCase();
   const question = (event.question || '').toLowerCase();
   
