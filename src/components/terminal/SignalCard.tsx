@@ -6,11 +6,13 @@ import { cn } from '@/lib/utils';
 import type { EnrichedSignal } from '@/types/arbitrage';
 import type { SignalState } from '@/types/scan-config';
 import { ExecutionDecision } from './ExecutionDecision';
+import { ManualPriceInput } from './ManualPriceInput';
 
 interface SignalCardProps {
   signal: EnrichedSignal;
   onDismiss: (id: string) => void;
   onExecute: (id: string, price: number) => void;
+  onRefresh?: () => void;
   watchState?: SignalState;
   movementPct?: number;
   samplesCount?: number;
@@ -60,6 +62,7 @@ export function SignalCard({
   signal, 
   onDismiss, 
   onExecute,
+  onRefresh,
   watchState,
   movementPct,
   samplesCount,
@@ -258,9 +261,17 @@ export function SignalCard({
             {!isTrueArbitrage && (
               <div className="text-xs mt-2 p-2 bg-muted/50 rounded border border-border flex items-start gap-2">
                 <AlertCircle className="h-3 w-3 text-muted-foreground mt-0.5 flex-shrink-0" />
-                <span className="text-muted-foreground">
-                  No Polymarket match — informational signal only
-                </span>
+                <div className="flex-1 flex items-center justify-between">
+                  <span className="text-muted-foreground">
+                    No Polymarket match
+                  </span>
+                  <ManualPriceInput 
+                    signalId={signal.id}
+                    eventName={signal.event_name}
+                    currentPolyPrice={polyYesPrice}
+                    onUpdate={onRefresh || (() => {})}
+                  />
+                </div>
               </div>
             )}
           </div>
