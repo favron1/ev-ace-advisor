@@ -41,10 +41,39 @@ export function useAutoPolling({
     activeCountdown: '--:--',
   });
 
+  // Refs for interval handles
   const watchIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const activeIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const isPollingRef = useRef(false);
+
+  // Refs for callbacks - keeps them stable for interval effect
+  const onWatchPollRef = useRef(onWatchPoll);
+  const onActivePollRef = useRef(onActivePoll);
+
+  // Refs for safeguard values - allows reading latest without being dependencies
+  const dailyUsagePercentRef = useRef(dailyUsagePercent);
+  const isPausedRef = useRef(isPaused);
+  const activeCountRef = useRef(activeCount);
+  const pollsTodayRef = useRef(state.pollsToday);
+
+  // Keep callback refs updated
+  useEffect(() => {
+    onWatchPollRef.current = onWatchPoll;
+    onActivePollRef.current = onActivePoll;
+  }, [onWatchPoll, onActivePoll]);
+
+  // Keep safeguard refs updated
+  useEffect(() => {
+    dailyUsagePercentRef.current = dailyUsagePercent;
+    isPausedRef.current = isPaused;
+    activeCountRef.current = activeCount;
+  }, [dailyUsagePercent, isPaused, activeCount]);
+
+  // Keep pollsToday ref updated
+  useEffect(() => {
+    pollsTodayRef.current = state.pollsToday;
+  }, [state.pollsToday]);
 
   // Format countdown string
   const formatCountdown = (targetDate: Date | null): string => {
@@ -57,14 +86,14 @@ export function useAutoPolling({
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
-  // Run watch poll with overlap protection
+  // Run watch poll with overlap protection - uses refs for stable reference
   const runWatchPollSafe = useCallback(async () => {
     if (isPollingRef.current) return;
-    if (dailyUsagePercent > 90) {
+    if (dailyUsagePercentRef.current > 90) {
       console.log('Auto-polling paused: approaching daily limit');
       return;
     }
-    if (isPaused) {
+    if (isPausedRef.current) {
       console.log('Auto-polling paused: scanning is paused');
       return;
     }
@@ -73,8 +102,8 @@ export function useAutoPolling({
     setState(s => ({ ...s, isRunning: true }));
     
     try {
-      await onWatchPoll();
-      const newPollsToday = state.pollsToday + 1;
+      await onWatchPollRef.current();
+      const newPollsToday = pollsTodayRef.current + 1;
       localStorage.setItem('polls-today', newPollsToday.toString());
       setState(s => ({ ...s, pollsToday: newPollsToday }));
     } finally {
@@ -85,20 +114,20 @@ export function useAutoPolling({
         nextWatchPollAt: new Date(Date.now() + watchIntervalMs),
       }));
     }
-  }, [onWatchPoll, dailyUsagePercent, isPaused, watchIntervalMs, state.pollsToday]);
+  }, [watchIntervalMs]); // Only depends on interval timing
 
-  // Run active poll with overlap protection
+  // Run active poll with overlap protection - uses refs for stable reference
   const runActivePollSafe = useCallback(async () => {
     if (isPollingRef.current) return;
-    if (activeCount === 0) return;
-    if (dailyUsagePercent > 90) return;
-    if (isPaused) return;
+    if (activeCountRef.current === 0) return;
+    if (dailyUsagePercentRef.current > 90) return;
+    if (isPausedRef.current) return;
 
     isPollingRef.current = true;
     setState(s => ({ ...s, isRunning: true }));
     
     try {
-      await onActivePoll();
+      await onActivePollRef.current();
     } finally {
       isPollingRef.current = false;
       setState(s => ({ 
@@ -107,7 +136,7 @@ export function useAutoPolling({
         nextActivePollAt: new Date(Date.now() + activeIntervalMs),
       }));
     }
-  }, [onActivePoll, activeCount, dailyUsagePercent, isPaused, activeIntervalMs]);
+  }, [activeIntervalMs]); // Only depends on interval timing
 
   // Enable auto-polling
   const enable = useCallback(() => {
@@ -116,9 +145,9 @@ export function useAutoPolling({
       ...s, 
       isEnabled: true,
       nextWatchPollAt: new Date(Date.now() + watchIntervalMs),
-      nextActivePollAt: activeCount > 0 ? new Date(Date.now() + activeIntervalMs) : null,
+      nextActivePollAt: activeCountRef.current > 0 ? new Date(Date.now() + activeIntervalMs) : null,
     }));
-  }, [watchIntervalMs, activeIntervalMs, activeCount]);
+  }, [watchIntervalMs, activeIntervalMs]);
 
   // Disable auto-polling
   const disable = useCallback(() => {
@@ -142,7 +171,7 @@ export function useAutoPolling({
     }
   }, [state.isEnabled, enable, disable]);
 
-  // Set up intervals when enabled
+  // Set up intervals when enabled - NO callback dependencies!
   useEffect(() => {
     if (!state.isEnabled) {
       // Clear intervals when disabled
@@ -172,7 +201,7 @@ export function useAutoPolling({
       if (watchIntervalRef.current) clearInterval(watchIntervalRef.current);
       if (activeIntervalRef.current) clearInterval(activeIntervalRef.current);
     };
-  }, [state.isEnabled, watchIntervalMs, activeIntervalMs, activeCount, runWatchPollSafe, runActivePollSafe]);
+  }, [state.isEnabled, watchIntervalMs, activeIntervalMs, activeCount, ]);
 
   // Update active interval when activeCount changes
   useEffect(() => {
@@ -193,7 +222,7 @@ export function useAutoPolling({
         activeCountdown: '--:--',
       }));
     }
-  }, [activeCount, state.isEnabled, activeIntervalMs, runActivePollSafe]);
+  }, [activeCount, state.isEnabled, activeIntervalMs]);
 
   // Countdown timer update every second
   useEffect(() => {
