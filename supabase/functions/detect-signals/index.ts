@@ -1,21 +1,15 @@
 // ========================================
-// DEPRECATED: ANALYTICS & DEBUGGING ONLY
+// SIGNAL DETECTION WITH LIVE POLYMARKET MATCHING
 // ========================================
-// This function uses CACHED Polymarket data from the polymarket_markets table.
-// It does NOT use live Polymarket API calls.
+// This function detects bookmaker signals and matches them against Polymarket.
+// 
+// FLOW:
+// 1. Check cached polymarket_markets table for quick matches
+// 2. If no cache match found for H2H events, make LIVE Polymarket API call
+// 3. Calculate true edge when match found, otherwise create signal-only
 //
-// For TRADING DECISIONS, use active-mode-poll which fetches live Polymarket
-// prices per-event using the fetchPolymarketForEvent() helper.
-//
-// Do NOT use signals from this function for trade execution without
-// cross-referencing with active-mode-poll confirmed edges.
-//
-// This function exists for:
-// - Generating analytics/debugging signals
-// - Testing matching logic
-// - Historical signal tracking
-//
-// AUTHORITATIVE SOURCE FOR TRADING: active-mode-poll (uses live Polymarket API)
+// This ensures H2H game markets (NBA games, etc.) are matched even when
+// not in the cache (which primarily contains high-volume/politics markets).
 // ========================================
 
 const corsHeaders = {
@@ -587,6 +581,171 @@ function calculateUrgency(hoursLeft: number | null, edge: number, isSharp: boole
   return 'low';
 }
 
+// ============================================================================
+// POLYMARKET LIVE FETCH - Targeted per-event API calls for unmatched H2H
+// ============================================================================
+
+interface LivePolymarketMatch {
+  market_id: string;
+  question: string;
+  yes_price: number;
+  no_price: number;
+  volume: number;
+  confidence: number;
+  last_updated: string;
+}
+
+async function fetchPolymarketForEvent(eventName: string, outcome: string, maxStalenessHours: number): Promise<LivePolymarketMatch | null> {
+  console.log(`[POLY-LIVE] Searching for: ${eventName} / ${outcome}`);
+  
+  try {
+    // Extract search terms from event name
+    const searchTerms = extractLiveSearchTerms(eventName);
+    
+    for (const searchTerm of searchTerms) {
+      const encodedSearch = encodeURIComponent(searchTerm);
+      const url = `https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50&title_contains=${encodedSearch}`;
+      
+      console.log(`[POLY-LIVE] Trying search: ${searchTerm}`);
+      
+      const response = await fetch(url, {
+        headers: { 'Accept': 'application/json' },
+      });
+      
+      if (!response.ok) {
+        console.error(`[POLY-LIVE] API error ${response.status} for: ${searchTerm}`);
+        continue;
+      }
+      
+      const events = await response.json();
+      if (!Array.isArray(events) || events.length === 0) {
+        continue;
+      }
+      
+      // Find best matching market
+      const match = findBestLiveMatch(eventName, outcome, events, maxStalenessHours);
+      if (match && match.confidence >= MATCH_THRESHOLD) {
+        console.log(`[POLY-LIVE] Found: ${match.question.slice(0, 60)}... (conf: ${(match.confidence * 100).toFixed(0)}%, vol: $${match.volume.toFixed(0)})`);
+        return match;
+      }
+    }
+    
+    console.log(`[POLY-LIVE] No match found for: ${eventName}`);
+    return null;
+    
+  } catch (error) {
+    console.error('[POLY-LIVE] Error:', error);
+    return null;
+  }
+}
+
+function extractLiveSearchTerms(eventName: string): string[] {
+  const terms: string[] = [];
+  
+  // Full event name
+  terms.push(eventName);
+  
+  // Extract team names from "Team A vs Team B" format
+  const vsMatch = eventName.match(/(.+?)\s+vs\.?\s+(.+)/i);
+  if (vsMatch) {
+    terms.push(vsMatch[1].trim());
+    terms.push(vsMatch[2].trim());
+    
+    // Try last word of each team (often most distinctive - Timberwolves, Lakers, etc.)
+    const team1Parts = vsMatch[1].trim().split(' ');
+    const team2Parts = vsMatch[2].trim().split(' ');
+    if (team1Parts.length > 1) terms.push(team1Parts[team1Parts.length - 1]);
+    if (team2Parts.length > 1) terms.push(team2Parts[team2Parts.length - 1]);
+  }
+  
+  return [...new Set(terms)]; // Remove duplicates
+}
+
+function findBestLiveMatch(eventName: string, outcome: string, events: any[], maxStalenessHours: number): LivePolymarketMatch | null {
+  const eventNorm = normalizeName(eventName);
+  const outcomeNorm = normalizeName(outcome);
+  
+  const eventTokens = new Set<string>();
+  for (const token of tokenize(eventNorm)) {
+    expandWithAliases(token).forEach(t => eventTokens.add(t));
+  }
+  
+  const outcomeTokens = new Set<string>();
+  for (const token of tokenize(outcomeNorm)) {
+    expandWithAliases(token).forEach(t => outcomeTokens.add(t));
+  }
+  
+  let bestMatch: LivePolymarketMatch | null = null;
+  
+  for (const event of events) {
+    const eventMarkets = event.markets || [];
+    
+    for (const market of eventMarkets) {
+      // Skip closed or inactive markets
+      if (market.closed || !market.active) continue;
+      
+      // Check volume - minimum $2K for H2H
+      const volume = parseFloat(market.volume) || 0;
+      if (volume < MIN_VOLUME_REJECT) continue;
+      
+      // Check staleness
+      const lastUpdated = market.lastUpdateTimestamp || market.updatedAt || market.lastTradeTimestamp;
+      if (lastUpdated) {
+        const hoursSinceUpdate = (Date.now() - new Date(lastUpdated).getTime()) / (1000 * 60 * 60);
+        if (hoursSinceUpdate > maxStalenessHours) {
+          continue;
+        }
+      }
+      
+      // Parse prices
+      let yesPrice = 0.5;
+      let noPrice = 0.5;
+      
+      if (market.outcomePrices) {
+        try {
+          const prices = typeof market.outcomePrices === 'string' 
+            ? JSON.parse(market.outcomePrices) 
+            : market.outcomePrices;
+          if (Array.isArray(prices) && prices.length >= 2) {
+            yesPrice = parseFloat(prices[0]) || 0.5;
+            noPrice = parseFloat(prices[1]) || 0.5;
+          }
+        } catch {
+          // Use defaults
+        }
+      }
+      
+      // Skip markets with no real price data
+      if (yesPrice === 0.5 && noPrice === 0.5) continue;
+      
+      const questionNorm = normalizeName(market.question || event.title || '');
+      const questionTokens = tokenize(questionNorm);
+      
+      // Calculate similarity scores
+      const eventJaccard = jaccardSimilarity(eventTokens, questionTokens);
+      const outcomeJaccard = jaccardSimilarity(outcomeTokens, questionTokens);
+      const levenSim = levenshteinSimilarity(eventNorm, questionNorm);
+      
+      // Combined confidence score
+      const confidence = (eventJaccard * 0.4) + (outcomeJaccard * 0.35) + (levenSim * 0.25);
+      
+      if (!bestMatch || confidence > bestMatch.confidence) {
+        bestMatch = {
+          market_id: market.conditionId || market.id,
+          question: market.question || event.title || 'Unknown',
+          yes_price: yesPrice,
+          no_price: noPrice,
+          volume: volume,
+          confidence: confidence,
+          last_updated: lastUpdated || new Date().toISOString(),
+        };
+      }
+    }
+  }
+  
+  return bestMatch;
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -749,12 +908,41 @@ Deno.serve(async (req) => {
         isTrueArbitrage = false;
         h2hUnmatchedCount++;
       } else {
-        // NO MATCH: Calculate signal strength only
-        polyPrice = 0.5;
-        signalStrength = Math.abs(bookmakerProbFair - 0.5) * 100;
-        edgePct = 0; // No edge without match
-        isTrueArbitrage = false;
-        h2hUnmatchedCount++;
+        // NO CACHE MATCH: Try LIVE Polymarket API search before giving up
+        console.log(`No cache match for ${eventName}, trying live Polymarket API...`);
+        
+        const liveMatch = await fetchPolymarketForEvent(eventName, recommendedOutcome, stalenessHoursH2H);
+        
+        if (liveMatch && liveMatch.confidence >= MATCH_THRESHOLD) {
+          // LIVE MATCH FOUND: Calculate true edge
+          polyPrice = liveMatch.yes_price;
+          edgePct = (bookmakerProbFair - polyPrice) * 100;
+          isTrueArbitrage = true;
+          matchConfidence = liveMatch.confidence;
+          polyVolume = liveMatch.volume;
+          polyUpdatedAt = liveMatch.last_updated;
+          h2hMatchedCount++;
+          
+          console.log(`LIVE MATCH: ${eventName} -> ${liveMatch.question.slice(0, 50)}... (conf: ${liveMatch.confidence.toFixed(2)}, edge: ${edgePct.toFixed(1)}%)`);
+          
+          // Must meet minimum edge threshold
+          if (edgePct < minEdgeThreshold) {
+            console.log(`Live match edge too low: ${edgePct.toFixed(1)}% < ${minEdgeThreshold}%`);
+            h2hRejectedCount++;
+            continue;
+          }
+        } else {
+          // No match even from live API - signal only
+          polyPrice = 0.5;
+          signalStrength = Math.abs(bookmakerProbFair - 0.5) * 100;
+          edgePct = 0; // No edge without match
+          isTrueArbitrage = false;
+          h2hUnmatchedCount++;
+          
+          if (liveMatch) {
+            console.log(`Live match confidence too low: ${(liveMatch.confidence * 100).toFixed(0)}% < ${MATCH_THRESHOLD * 100}%`);
+          }
+        }
       }
       
       // Skip signals with low strength if not true arbitrage
