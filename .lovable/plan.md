@@ -1,134 +1,134 @@
 
-# Plan: Add Signal Refresh Button
 
-## Why This Is a Good Idea
+# Plan: Fix Edge Calculation to Measure Real Arbitrage
 
-A refresh button that re-evaluates existing signals **without calling external APIs** is an excellent optimization:
+## Problem Summary
 
-| Action | API Requests | Database Queries |
-|--------|-------------|------------------|
-| Full Scan | 15-20 (Odds API + Polymarket) | Many writes |
-| Refresh | 0 | Read + conditional updates |
+The current edge formula is fundamentally flawed:
 
-With the 500 requests/month limit on The Odds API, this approach lets users:
-- Clean up expired signals (events that have started)
-- Remove signals that no longer meet filters
-- Update time-based urgency calculations
-- All without consuming API quota
-
----
-
-## Implementation Overview
-
-### 1. Create Refresh Edge Function
-A lightweight function that:
-- Fetches current active signals from database
-- Checks each signal against current criteria:
-  - Has the event started? (expire if `commence_time` has passed)
-  - Does edge still meet minimum threshold?
-  - Recalculate urgency based on updated time-to-event
-- Updates or removes signals that no longer qualify
-
-### 2. Update useSignals Hook
-Add a `refreshSignals` function that:
-- Calls the new edge function
-- Updates local state with refreshed data
-- Shows toast with refresh results
-
-### 3. Update SignalFeed Component
-Add a refresh button in the header area:
-- Shows between the title and count
-- Displays loading state during refresh
-- Disabled during full scans
-
----
-
-## Technical Details
-
-### New Edge Function: `refresh-signals/index.ts`
-
-```text
-Purpose: Re-evaluate existing active signals without external API calls
-
-Input: None (reads from database)
-
-Logic:
-1. Fetch all active signals from signal_opportunities
-2. For each signal:
-   - Check if event has started (expires_at < now)
-   - Recalculate hours_until_event
-   - Update urgency based on new time
-   - Mark expired if event has passed
-3. Batch update changed signals
-4. Return summary of changes
-
-Output:
-{
-  refreshed: 13,
-  expired: 2,
-  updated: 5,
-  unchanged: 6
-}
+```typescript
+// CURRENT (wrong)
+edge = Math.abs(bookmakerProb - 0.5) * 100
 ```
 
-### Files to Create/Modify
+This measures **how far from 50/50 an event is** - not actual mispricing. A 79.7% favorite shows as "29.7% edge" even when there's no arbitrage opportunity at all.
+
+**Real edge** requires comparing two independent price sources (bookmakers vs prediction market).
+
+---
+
+## Solution: Proper Edge Calculation
+
+### Option A: Match Against Polymarket (Preferred)
+Compare bookmaker probability against actual Polymarket prices for the same event.
+
+```text
+Edge = Bookmaker Probability - Polymarket Price
+
+Example:
+- Bookmakers say 79.7% for Utah Jazz
+- Polymarket prices Utah Jazz YES at 70¢
+- True Edge = 79.7% - 70% = 9.7%
+```
+
+### Option B: No Match Available
+When no Polymarket market exists for an H2H event, we have two options:
+1. **Don't show edge** - Only surface as "informational signal"
+2. **Show vs sharp book baseline** - Compare soft book consensus vs sharp-only consensus
+
+---
+
+## Implementation Steps
+
+### 1. Enhance Polymarket Matching
+
+Improve the fetch-polymarket function to capture sports-related markets:
+- NBA game outcomes
+- Tennis match winners
+- UFC fight outcomes
+
+Add fuzzy name matching to pair events:
+```text
+Bookmaker: "Utah Jazz vs Golden State Warriors"
+Polymarket: "Will the Utah Jazz beat the Warriors on Jan 29?"
+→ Match confidence: 95%
+```
+
+### 2. Update Signal Detection Logic
+
+```text
+For each H2H event:
+  1. Try to find matching Polymarket market
+  2. If matched:
+     - edge = bookmakerProb - polymarketPrice
+     - Store matched_polymarket: true
+  3. If not matched:
+     - Calculate "signal strength" (current formula renamed)
+     - OR skip event entirely
+     - Store matched_polymarket: false
+```
+
+### 3. Add UI Distinction
+
+Show different badge types:
+- **"EDGE: +9.7%"** - Real arbitrage (matched to Polymarket)
+- **"SIGNAL STRENGTH: 29.7%"** - No match, informational only
+
+### 4. Database Changes
+
+Add columns to track match quality:
+```sql
+ALTER TABLE signal_opportunities
+ADD COLUMN polymarket_match_confidence numeric,
+ADD COLUMN is_true_arbitrage boolean DEFAULT false;
+```
+
+---
+
+## Technical Changes
 
 | File | Change |
 |------|--------|
-| `supabase/functions/refresh-signals/index.ts` | New lightweight refresh function |
-| `src/lib/api/arbitrage.ts` | Add `refreshSignals()` API method |
-| `src/hooks/useSignals.ts` | Add `refreshSignals` function and `refreshing` state |
-| `src/components/terminal/SignalFeed.tsx` | Add header with refresh button |
-| `src/pages/Terminal.tsx` | Wire up refresh handler |
+| `supabase/functions/fetch-polymarket/index.ts` | Add sports category filtering and name extraction |
+| `supabase/functions/detect-signals/index.ts` | Implement proper edge calculation with market matching |
+| `src/components/terminal/SignalCard.tsx` | Distinguish between true edge and signal strength |
+| Database migration | Add match tracking columns |
 
 ---
 
-## UI Design
+## Edge Cases to Handle
+
+1. **Stale Polymarket prices**: Only use markets updated within last 2 hours
+2. **Low liquidity markets**: Flag if Polymarket volume < $10k
+3. **Name mismatches**: Use Levenshtein distance with 0.8 threshold
+4. **Multiple outcomes**: Handle 3-way soccer markets differently
+
+---
+
+## Expected Outcome
+
+After implementation:
+
+| Before | After |
+|--------|-------|
+| Edge: 29.7% (inflated) | True Edge: 8.2% (if Polymarket matched) |
+| All signals show "edge" | Only matched signals show "edge" |
+| Misleading opportunity quality | Accurate arbitrage detection |
+
+**Edge distribution should shift from 20-30% range down to 2-10% range** which is realistic for mature markets.
+
+---
+
+## Alternative: Conservative Mode
+
+If Polymarket matching proves difficult short-term, implement a "sharp book baseline" approach:
 
 ```text
-┌─────────────────────────────────────────────────┐
-│ Signal Feed              [↻ Refresh]  13 signals│
-├─────────────────────────────────────────────────┤
-│                                                 │
-│  [Signal Card 1]                                │
-│  [Signal Card 2]                                │
-│  ...                                            │
-│                                                 │
-└─────────────────────────────────────────────────┘
+Edge = Soft Book Consensus - Sharp Book Price
+
+This measures soft book inefficiency vs sharp benchmark,
+which is a valid (though smaller) opportunity.
 ```
 
-The refresh button:
-- Uses `RefreshCw` icon from lucide-react
-- Shows spinning animation while refreshing
-- Tooltip: "Re-check signals without using API quota"
+This would produce 1-5% edges which are realistic for closing line value plays.
 
----
-
-## Refresh Logic Details
-
-The refresh function will:
-
-1. **Expire stale signals**: Events where `commence_time` has passed
-2. **Update urgency tiers**: Recalculate based on new time-to-event
-3. **Preserve all data**: No external API calls, just database operations
-
-```text
-Example transformations:
-- Signal with 2h left → urgency changes from "normal" to "high"
-- Signal where game started → status changes to "expired"
-- Signal still valid → just updates time_label in signal_factors
-```
-
----
-
-## Summary
-
-| Task | Complexity |
-|------|------------|
-| Create refresh-signals edge function | Low |
-| Add API method | Low |
-| Update useSignals hook | Low |
-| Add refresh button to SignalFeed | Low |
-| Wire up in Terminal page | Low |
-
-This feature saves API quota while keeping the signal feed clean and up-to-date.
