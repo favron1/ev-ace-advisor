@@ -3,18 +3,19 @@ import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
-import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
 import { 
   Clock, 
   Zap, 
   Target, 
   Shield, 
   TrendingUp,
-  AlertCircle
+  AlertCircle,
+  Activity
 } from 'lucide-react';
 import type { ScanConfig } from '@/types/scan-config';
-import { SHARP_BOOKMAKERS } from '@/types/scan-config';
+import { SHARP_BOOKMAKERS, AVAILABLE_SPORTS } from '@/types/scan-config';
 
 interface ScanSettingsPanelProps {
   config: Partial<ScanConfig>;
@@ -22,9 +23,209 @@ interface ScanSettingsPanelProps {
 }
 
 export function ScanSettingsPanel({ config, onChange }: ScanSettingsPanelProps) {
+  const enabledSports = config.enabled_sports || ['basketball_nba'];
+  
+  const handleSportToggle = (sportKey: string, checked: boolean) => {
+    let updated: string[];
+    if (checked) {
+      // Max 2 sports
+      if (enabledSports.length >= 2) {
+        updated = [enabledSports[1], sportKey];
+      } else {
+        updated = [...enabledSports, sportKey];
+      }
+    } else {
+      updated = enabledSports.filter(s => s !== sportKey);
+    }
+    onChange({ enabled_sports: updated });
+  };
+
   return (
     <div className="space-y-6">
-      {/* Scan Frequency */}
+      {/* Sport Scope (NEW) */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Activity className="h-4 w-4" />
+            Sport Scope
+          </CardTitle>
+          <CardDescription>
+            Select which sports to monitor (max 2 for cost control)
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3">
+            {AVAILABLE_SPORTS.map((sport) => (
+              <div key={sport.key} className="flex items-center space-x-3">
+                <Checkbox
+                  id={sport.key}
+                  checked={enabledSports.includes(sport.key)}
+                  onCheckedChange={(checked) => handleSportToggle(sport.key, !!checked)}
+                />
+                <label 
+                  htmlFor={sport.key} 
+                  className="flex items-center gap-2 text-sm cursor-pointer"
+                >
+                  <span>{sport.icon}</span>
+                  <span>{sport.label}</span>
+                </label>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Currently monitoring: {enabledSports.length}/2 sports
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* Two-Tier Polling (NEW) */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Zap className="h-4 w-4" />
+            Two-Tier Polling
+          </CardTitle>
+          <CardDescription>
+            Watch Mode polls all events, Active Mode tracks candidates
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <Label>Watch Poll Interval</Label>
+              <span className="text-sm font-mono">{config.watch_poll_interval_minutes || 5}m</span>
+            </div>
+            <Slider
+              value={[config.watch_poll_interval_minutes || 5]}
+              onValueChange={([v]) => onChange({ watch_poll_interval_minutes: v })}
+              min={2}
+              max={15}
+              step={1}
+            />
+            <p className="text-xs text-muted-foreground">
+              Baseline polling for all events (Tier 1)
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <Label>Active Poll Interval</Label>
+              <span className="text-sm font-mono">{config.active_poll_interval_seconds || 60}s</span>
+            </div>
+            <Slider
+              value={[config.active_poll_interval_seconds || 60]}
+              onValueChange={([v]) => onChange({ active_poll_interval_seconds: v })}
+              min={30}
+              max={120}
+              step={10}
+            />
+            <p className="text-xs text-muted-foreground">
+              High-frequency polling for escalated events (Tier 2)
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <Label>Active Window Duration</Label>
+              <span className="text-sm font-mono">{config.active_window_minutes || 20}m</span>
+            </div>
+            <Slider
+              value={[config.active_window_minutes || 20]}
+              onValueChange={([v]) => onChange({ active_window_minutes: v })}
+              min={10}
+              max={30}
+              step={5}
+            />
+            <p className="text-xs text-muted-foreground">
+              Max time in Active Mode before dropping
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <Label>Max Simultaneous Active</Label>
+              <span className="text-sm font-mono">{config.max_simultaneous_active || 5}</span>
+            </div>
+            <Slider
+              value={[config.max_simultaneous_active || 5]}
+              onValueChange={([v]) => onChange({ max_simultaneous_active: v })}
+              min={1}
+              max={10}
+              step={1}
+            />
+            <p className="text-xs text-muted-foreground">
+              Limits concurrent high-frequency polling
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Movement Detection (NEW) */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <TrendingUp className="h-4 w-4" />
+            Movement Detection
+          </CardTitle>
+          <CardDescription>
+            Configure when to escalate events to Active Mode
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <Label>Movement Threshold</Label>
+              <span className="text-sm font-mono">{config.movement_threshold_pct || 6}%</span>
+            </div>
+            <Slider
+              value={[config.movement_threshold_pct || 6]}
+              onValueChange={([v]) => onChange({ movement_threshold_pct: v })}
+              min={3}
+              max={12}
+              step={0.5}
+            />
+            <p className="text-xs text-muted-foreground">
+              Minimum probability movement to trigger escalation
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <Label>Hold Window</Label>
+              <span className="text-sm font-mono">{config.hold_window_minutes || 3}m</span>
+            </div>
+            <Slider
+              value={[config.hold_window_minutes || 3]}
+              onValueChange={([v]) => onChange({ hold_window_minutes: v })}
+              min={1}
+              max={10}
+              step={1}
+            />
+            <p className="text-xs text-muted-foreground">
+              Movement must persist for this duration
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <Label>Samples Required</Label>
+              <span className="text-sm font-mono">{config.samples_required || 2}</span>
+            </div>
+            <Slider
+              value={[config.samples_required || 2]}
+              onValueChange={([v]) => onChange({ samples_required: v })}
+              min={1}
+              max={5}
+              step={1}
+            />
+            <p className="text-xs text-muted-foreground">
+              Consecutive samples confirming movement
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Legacy Scan Frequency */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -225,7 +426,7 @@ export function ScanSettingsPanel({ config, onChange }: ScanSettingsPanelProps) 
             <AlertCircle className="h-4 w-4 text-muted-foreground mt-0.5" />
             <div className="text-xs text-muted-foreground">
               <p className="font-medium mb-1">Odds API Free Tier: 500 requests/month</p>
-              <p>Each scan uses ~10-12 requests. Adjust limits based on your API plan.</p>
+              <p>Watch Mode uses ~2-4 requests per poll. Active Mode uses ~1 request per event per minute.</p>
             </div>
           </div>
         </CardContent>

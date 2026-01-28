@@ -1,15 +1,20 @@
-import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle } from 'lucide-react';
+import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle, Eye, Zap } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import type { SignalOpportunity } from '@/types/arbitrage';
+import type { SignalState } from '@/types/scan-config';
 
 interface SignalCardProps {
   signal: SignalOpportunity;
   onDismiss: (id: string) => void;
   onExecute: (id: string, price: number) => void;
+  watchState?: SignalState;
+  movementPct?: number;
+  samplesCount?: number;
+  samplesRequired?: number;
 }
 
 // Format volume for display
@@ -30,7 +35,24 @@ function formatTimeAgo(dateStr: string | null | undefined): string {
   return `${hours}h ago`;
 }
 
-export function SignalCard({ signal, onDismiss, onExecute }: SignalCardProps) {
+// State badge configuration
+const stateBadges: Record<SignalState, { color: string; text: string; icon: React.ComponentType<{ className?: string }> }> = {
+  watching: { color: 'bg-yellow-500/10 text-yellow-500 border-yellow-500/30', text: 'WATCHING', icon: Eye },
+  active: { color: 'bg-blue-500/10 text-blue-500 border-blue-500/30', text: 'TRACKING', icon: Zap },
+  confirmed: { color: 'bg-green-500/10 text-green-500 border-green-500/30', text: 'CONFIRMED', icon: TrendingUp },
+  signal: { color: 'bg-muted text-muted-foreground', text: 'SIGNAL ONLY', icon: Activity },
+  dropped: { color: 'bg-red-500/10 text-red-500 border-red-500/30', text: 'DROPPED', icon: X },
+};
+
+export function SignalCard({ 
+  signal, 
+  onDismiss, 
+  onExecute,
+  watchState,
+  movementPct,
+  samplesCount,
+  samplesRequired = 2,
+}: SignalCardProps) {
   const urgencyColors = {
     low: 'bg-muted text-muted-foreground',
     normal: 'bg-blue-500/10 text-blue-500',
@@ -63,12 +85,17 @@ export function SignalCard({ signal, onDismiss, onExecute }: SignalCardProps) {
   const isTrueArbitrage = signal.is_true_arbitrage === true;
   const matchConfidence = signal.polymarket_match_confidence;
   
-  // Get extended fields (may be on signal or signal_factors)
+  // Get extended fields
   const bookmakerProbFair = (signal as any).bookmaker_prob_fair || signal.bookmaker_probability;
   const signalStrength = (signal as any).signal_strength;
   const polyVolume = (signal as any).polymarket_volume;
   const polyUpdatedAt = (signal as any).polymarket_updated_at;
   const polyYesPrice = (signal as any).polymarket_yes_price || signal.polymarket_price;
+  
+  // Determine display state
+  const displayState = watchState || (isTrueArbitrage ? 'confirmed' : 'signal');
+  const stateConfig = stateBadges[displayState];
+  const StateIcon = stateConfig.icon;
 
   return (
     <Card className={cn(
@@ -84,53 +111,42 @@ export function SignalCard({ signal, onDismiss, onExecute }: SignalCardProps) {
                 {signal.urgency.toUpperCase()}
               </Badge>
               
-              {/* True Arbitrage vs Signal Strength indicator */}
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Badge 
-                      variant="outline" 
-                      className={cn(
-                        isTrueArbitrage 
-                          ? "bg-green-500/10 text-green-500 border-green-500/30" 
-                          : "bg-muted text-muted-foreground"
-                      )}
-                    >
-                      {isTrueArbitrage ? (
-                        <>
-                          <TrendingUp className="h-3 w-3 mr-1" />
-                          EDGE: +{signal.edge_percent.toFixed(1)}%
-                        </>
-                      ) : (
-                        <>
-                          <Activity className="h-3 w-3 mr-1" />
-                          SIGNAL: {signalStrength ? `+${signalStrength.toFixed(1)}%` : 'N/A'}
-                        </>
-                      )}
-                    </Badge>
-                  </TooltipTrigger>
-                  <TooltipContent className="max-w-xs">
-                    {isTrueArbitrage ? (
-                      <div className="space-y-1">
-                        <div className="font-semibold">True Arbitrage Opportunity</div>
-                        <div>Bookmaker Fair: {(bookmakerProbFair * 100).toFixed(1)}%</div>
-                        <div>Polymarket: {(polyYesPrice * 100).toFixed(0)}¢</div>
-                        <div>Match Confidence: {matchConfidence ? `${(matchConfidence * 100).toFixed(0)}%` : 'N/A'}</div>
-                      </div>
-                    ) : (
-                      <div className="space-y-1">
-                        <div className="font-semibold">Signal Strength Only</div>
-                        <div>No Polymarket match found</div>
-                        <div>Shows distance from 50% baseline</div>
-                        <div className="text-yellow-500 flex items-center gap-1 mt-1">
-                          <AlertCircle className="h-3 w-3" />
-                          Not a tradeable edge
-                        </div>
-                      </div>
-                    )}
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+              {/* State badge */}
+              <Badge 
+                variant="outline" 
+                className={cn("flex items-center gap-1", stateConfig.color)}
+              >
+                <StateIcon className="h-3 w-3" />
+                {stateConfig.text}
+              </Badge>
+              
+              {/* Edge/Signal indicator */}
+              {isTrueArbitrage ? (
+                <Badge variant="outline" className="bg-green-500/10 text-green-500 border-green-500/30">
+                  <TrendingUp className="h-3 w-3 mr-1" />
+                  EDGE: +{signal.edge_percent.toFixed(1)}%
+                </Badge>
+              ) : signalStrength ? (
+                <Badge variant="outline" className="bg-muted text-muted-foreground">
+                  <Activity className="h-3 w-3 mr-1" />
+                  SIGNAL: +{signalStrength.toFixed(1)}%
+                </Badge>
+              ) : null}
+              
+              {/* Movement indicator for tracking states */}
+              {(displayState === 'watching' || displayState === 'active') && movementPct !== undefined && (
+                <Badge variant="outline" className="bg-muted text-muted-foreground">
+                  <TrendingUp className="h-3 w-3 mr-1" />
+                  {movementPct > 0 ? '+' : ''}{movementPct.toFixed(1)}%
+                </Badge>
+              )}
+              
+              {/* Sample count for active tracking */}
+              {displayState === 'active' && samplesCount !== undefined && (
+                <span className="text-xs text-muted-foreground">
+                  {samplesCount}/{samplesRequired} samples
+                </span>
+              )}
               
               {timeUntilExpiry !== null && (
                 <span className="text-xs text-muted-foreground flex items-center gap-1">
@@ -139,6 +155,7 @@ export function SignalCard({ signal, onDismiss, onExecute }: SignalCardProps) {
                 </span>
               )}
             </div>
+            
             <h3 className="font-medium text-sm truncate mb-1">{signal.event_name}</h3>
             
             {/* Clear bet recommendation */}

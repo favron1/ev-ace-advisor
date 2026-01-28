@@ -7,7 +7,9 @@ import {
   AlertTriangle,
   Clock,
   Activity,
-  Gauge
+  Gauge,
+  Eye,
+  RefreshCw
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -31,6 +33,12 @@ interface ScanControlPanelProps {
   onTogglePause: () => void;
   onToggleTurbo: () => void;
   onOpenSettings: () => void;
+  // New two-tier polling props
+  onWatchModePoll?: () => void;
+  onActiveModePoll?: () => void;
+  watchPolling?: boolean;
+  watchingCount?: number;
+  activeCount?: number;
 }
 
 export function ScanControlPanel({
@@ -41,6 +49,11 @@ export function ScanControlPanel({
   onTogglePause,
   onToggleTurbo,
   onOpenSettings,
+  onWatchModePoll,
+  onActiveModePoll,
+  watchPolling,
+  watchingCount = 0,
+  activeCount = 0,
 }: ScanControlPanelProps) {
   const dailyUsagePercent = (status.dailyRequestsUsed / status.dailyRequestsLimit) * 100;
   const monthlyUsagePercent = (status.monthlyRequestsUsed / status.monthlyRequestsLimit) * 100;
@@ -57,6 +70,18 @@ export function ScanControlPanel({
             Scan Control
           </CardTitle>
           <div className="flex items-center gap-2">
+            {watchingCount > 0 && (
+              <Badge variant="outline" className="text-xs bg-yellow-500/10 text-yellow-500 border-yellow-500/30">
+                <Eye className="h-3 w-3 mr-1" />
+                {watchingCount}
+              </Badge>
+            )}
+            {activeCount > 0 && (
+              <Badge className="text-xs bg-blue-500/20 text-blue-400">
+                <Zap className="h-3 w-3 mr-1" />
+                {activeCount}
+              </Badge>
+            )}
             {status.isPaused ? (
               <Badge variant="secondary" className="text-xs">Paused</Badge>
             ) : status.currentMode === 'turbo' ? (
@@ -69,7 +94,38 @@ export function ScanControlPanel({
       </CardHeader>
       
       <CardContent className="space-y-4">
-        {/* Main scan button */}
+        {/* Two-tier polling buttons */}
+        {(onWatchModePoll || onActiveModePoll) && (
+          <div className="flex gap-2">
+            {onWatchModePoll && (
+              <Button 
+                onClick={onWatchModePoll}
+                disabled={watchPolling || scanning}
+                variant="outline"
+                className="flex-1 gap-2"
+                size="sm"
+              >
+                <Eye className={`h-4 w-4 ${watchPolling ? 'animate-pulse' : ''}`} />
+                Watch Poll
+              </Button>
+            )}
+            
+            {onActiveModePoll && (
+              <Button 
+                onClick={onActiveModePoll}
+                disabled={watchPolling || scanning || activeCount === 0}
+                variant={activeCount > 0 ? 'default' : 'outline'}
+                className="flex-1 gap-2"
+                size="sm"
+              >
+                <RefreshCw className={`h-4 w-4 ${watchPolling ? 'animate-spin' : ''}`} />
+                Active Poll
+              </Button>
+            )}
+          </div>
+        )}
+
+        {/* Main scan button (legacy) */}
         <div className="flex gap-2">
           <Button 
             onClick={onManualScan}
@@ -78,7 +134,7 @@ export function ScanControlPanel({
             size="sm"
           >
             <Zap className={`h-4 w-4 ${scanning ? 'animate-pulse' : ''}`} />
-            {scanning ? 'Scanning...' : 'Scan Now'}
+            {scanning ? 'Scanning...' : 'Full Scan'}
           </Button>
           
           <Button
@@ -127,20 +183,24 @@ export function ScanControlPanel({
                 
                 <div className="space-y-2 text-xs">
                   <div className="flex justify-between">
-                    <span className="text-muted-foreground">Base Frequency</span>
-                    <span>{config?.base_frequency_minutes || 30}m</span>
+                    <span className="text-muted-foreground">Watch Interval</span>
+                    <span>{config?.watch_poll_interval_minutes || 5}m</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-muted-foreground">Turbo Frequency</span>
-                    <span>{config?.turbo_frequency_minutes || 5}m</span>
+                    <span className="text-muted-foreground">Active Interval</span>
+                    <span>{config?.active_poll_interval_seconds || 60}s</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-muted-foreground">Event Horizon</span>
-                    <span>{config?.event_horizon_hours || 24}h</span>
+                    <span className="text-muted-foreground">Movement Threshold</span>
+                    <span>{config?.movement_threshold_pct || 6}%</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-muted-foreground">Sharp Weighting</span>
-                    <span>{config?.sharp_book_weighting_enabled ? 'On' : 'Off'}</span>
+                    <span className="text-muted-foreground">Max Active Events</span>
+                    <span>{config?.max_simultaneous_active || 5}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Sports</span>
+                    <span>{config?.enabled_sports?.length || 1}</span>
                   </div>
                 </div>
                 

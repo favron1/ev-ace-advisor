@@ -104,6 +104,126 @@ export type Database = {
         }
         Relationships: []
       }
+      event_watch_state: {
+        Row: {
+          active_until: string | null
+          commence_time: string | null
+          created_at: string | null
+          current_probability: number | null
+          escalated_at: string | null
+          event_key: string
+          event_name: string
+          hold_start_at: string | null
+          id: string
+          initial_probability: number | null
+          movement_pct: number | null
+          movement_velocity: number | null
+          outcome: string | null
+          peak_probability: number | null
+          polymarket_market_id: string | null
+          polymarket_matched: boolean | null
+          polymarket_price: number | null
+          reverted: boolean | null
+          samples_since_hold: number | null
+          updated_at: string | null
+          watch_state: string | null
+        }
+        Insert: {
+          active_until?: string | null
+          commence_time?: string | null
+          created_at?: string | null
+          current_probability?: number | null
+          escalated_at?: string | null
+          event_key: string
+          event_name: string
+          hold_start_at?: string | null
+          id?: string
+          initial_probability?: number | null
+          movement_pct?: number | null
+          movement_velocity?: number | null
+          outcome?: string | null
+          peak_probability?: number | null
+          polymarket_market_id?: string | null
+          polymarket_matched?: boolean | null
+          polymarket_price?: number | null
+          reverted?: boolean | null
+          samples_since_hold?: number | null
+          updated_at?: string | null
+          watch_state?: string | null
+        }
+        Update: {
+          active_until?: string | null
+          commence_time?: string | null
+          created_at?: string | null
+          current_probability?: number | null
+          escalated_at?: string | null
+          event_key?: string
+          event_name?: string
+          hold_start_at?: string | null
+          id?: string
+          initial_probability?: number | null
+          movement_pct?: number | null
+          movement_velocity?: number | null
+          outcome?: string | null
+          peak_probability?: number | null
+          polymarket_market_id?: string | null
+          polymarket_matched?: boolean | null
+          polymarket_price?: number | null
+          reverted?: boolean | null
+          samples_since_hold?: number | null
+          updated_at?: string | null
+          watch_state?: string | null
+        }
+        Relationships: []
+      }
+      movement_logs: {
+        Row: {
+          actual_outcome: boolean | null
+          created_at: string | null
+          edge_at_confirmation: number | null
+          event_key: string
+          event_name: string
+          final_state: string | null
+          hold_duration_seconds: number | null
+          id: string
+          movement_pct: number | null
+          polymarket_matched: boolean | null
+          profit_loss: number | null
+          samples_captured: number | null
+          velocity: number | null
+        }
+        Insert: {
+          actual_outcome?: boolean | null
+          created_at?: string | null
+          edge_at_confirmation?: number | null
+          event_key: string
+          event_name: string
+          final_state?: string | null
+          hold_duration_seconds?: number | null
+          id?: string
+          movement_pct?: number | null
+          polymarket_matched?: boolean | null
+          profit_loss?: number | null
+          samples_captured?: number | null
+          velocity?: number | null
+        }
+        Update: {
+          actual_outcome?: boolean | null
+          created_at?: string | null
+          edge_at_confirmation?: number | null
+          event_key?: string
+          event_name?: string
+          final_state?: string | null
+          hold_duration_seconds?: number | null
+          id?: string
+          movement_pct?: number | null
+          polymarket_matched?: boolean | null
+          profit_loss?: number | null
+          samples_captured?: number | null
+          velocity?: number | null
+        }
+        Relationships: []
+      }
       polymarket_markets: {
         Row: {
           category: string | null
@@ -152,6 +272,36 @@ export type Database = {
         }
         Relationships: []
       }
+      probability_snapshots: {
+        Row: {
+          captured_at: string
+          event_key: string
+          event_name: string
+          fair_probability: number
+          id: string
+          outcome: string
+          source: string | null
+        }
+        Insert: {
+          captured_at?: string
+          event_key: string
+          event_name: string
+          fair_probability: number
+          id?: string
+          outcome: string
+          source?: string | null
+        }
+        Update: {
+          captured_at?: string
+          event_key?: string
+          event_name?: string
+          fair_probability?: number
+          id?: string
+          outcome?: string
+          source?: string | null
+        }
+        Relationships: []
+      }
       profiles: {
         Row: {
           bankroll: number | null
@@ -190,19 +340,26 @@ export type Database = {
       }
       scan_config: {
         Row: {
+          active_poll_interval_seconds: number | null
+          active_window_minutes: number | null
           adaptive_scanning_enabled: boolean
           base_frequency_minutes: number
           created_at: string
           daily_requests_used: number
+          enabled_sports: string[] | null
           event_horizon_hours: number
+          hold_window_minutes: number | null
           id: string
           last_request_reset: string | null
           last_scan_at: string | null
           max_daily_requests: number
           max_monthly_requests: number
+          max_simultaneous_active: number | null
           min_event_horizon_hours: number
           monthly_requests_used: number
+          movement_threshold_pct: number | null
           next_scheduled_scan_at: string | null
+          samples_required: number | null
           scanning_paused: boolean
           sharp_book_weight: number
           sharp_book_weighting_enabled: boolean
@@ -211,21 +368,29 @@ export type Database = {
           turbo_mode_enabled: boolean
           updated_at: string
           user_id: string | null
+          watch_poll_interval_minutes: number | null
         }
         Insert: {
+          active_poll_interval_seconds?: number | null
+          active_window_minutes?: number | null
           adaptive_scanning_enabled?: boolean
           base_frequency_minutes?: number
           created_at?: string
           daily_requests_used?: number
+          enabled_sports?: string[] | null
           event_horizon_hours?: number
+          hold_window_minutes?: number | null
           id?: string
           last_request_reset?: string | null
           last_scan_at?: string | null
           max_daily_requests?: number
           max_monthly_requests?: number
+          max_simultaneous_active?: number | null
           min_event_horizon_hours?: number
           monthly_requests_used?: number
+          movement_threshold_pct?: number | null
           next_scheduled_scan_at?: string | null
+          samples_required?: number | null
           scanning_paused?: boolean
           sharp_book_weight?: number
           sharp_book_weighting_enabled?: boolean
@@ -234,21 +399,29 @@ export type Database = {
           turbo_mode_enabled?: boolean
           updated_at?: string
           user_id?: string | null
+          watch_poll_interval_minutes?: number | null
         }
         Update: {
+          active_poll_interval_seconds?: number | null
+          active_window_minutes?: number | null
           adaptive_scanning_enabled?: boolean
           base_frequency_minutes?: number
           created_at?: string
           daily_requests_used?: number
+          enabled_sports?: string[] | null
           event_horizon_hours?: number
+          hold_window_minutes?: number | null
           id?: string
           last_request_reset?: string | null
           last_scan_at?: string | null
           max_daily_requests?: number
           max_monthly_requests?: number
+          max_simultaneous_active?: number | null
           min_event_horizon_hours?: number
           monthly_requests_used?: number
+          movement_threshold_pct?: number | null
           next_scheduled_scan_at?: string | null
+          samples_required?: number | null
           scanning_paused?: boolean
           sharp_book_weight?: number
           sharp_book_weighting_enabled?: boolean
@@ -257,6 +430,7 @@ export type Database = {
           turbo_mode_enabled?: boolean
           updated_at?: string
           user_id?: string | null
+          watch_poll_interval_minutes?: number | null
         }
         Relationships: []
       }

@@ -10,6 +10,7 @@ import { ScanControlPanel } from '@/components/terminal/ScanControlPanel';
 import { useSignals } from '@/hooks/useSignals';
 import { usePolymarket } from '@/hooks/usePolymarket';
 import { useScanConfig } from '@/hooks/useScanConfig';
+import { useWatchState } from '@/hooks/useWatchState';
 import { arbitrageApi } from '@/lib/api/arbitrage';
 import type { SignalLog } from '@/types/arbitrage';
 
@@ -47,6 +48,17 @@ export default function Terminal() {
     toggleTurboMode,
   } = useScanConfig();
 
+  // Two-tier polling state
+  const {
+    watchingEvents,
+    activeEvents,
+    polling: watchPolling,
+    runWatchModePoll,
+    runActiveModePoll,
+    totalWatching,
+    totalActive,
+  } = useWatchState();
+
   // Auth check
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -76,6 +88,18 @@ export default function Terminal() {
   // Handle scan completion - refresh signals
   const handleManualScan = async () => {
     await runManualScan();
+    await fetchSignals();
+  };
+
+  // Handle watch mode poll - also refresh signals after
+  const handleWatchModePoll = async () => {
+    await runWatchModePoll();
+    await fetchSignals();
+  };
+
+  // Handle active mode poll - also refresh signals after
+  const handleActiveModePoll = async () => {
+    await runActiveModePoll();
     await fetchSignals();
   };
 
@@ -135,6 +159,11 @@ export default function Terminal() {
               onTogglePause={togglePause}
               onToggleTurbo={toggleTurboMode}
               onOpenSettings={() => navigate('/settings')}
+              onWatchModePoll={handleWatchModePoll}
+              onActiveModePoll={handleActiveModePoll}
+              watchPolling={watchPolling}
+              watchingCount={totalWatching}
+              activeCount={totalActive}
             />
             
             {/* Polymarket Sidebar */}
