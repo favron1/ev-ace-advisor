@@ -1,3 +1,21 @@
+// ========================================
+// DEPRECATED: MANUAL DEBUGGING ONLY
+// ========================================
+// This function is NOT scheduled via pg_cron.
+// Polymarket data is now fetched per-event by active-mode-poll
+// using the fetchPolymarketForEvent() helper with LIVE API calls.
+//
+// This function exists for:
+// - Manual debugging (invoke manually when needed)
+// - Testing Polymarket API connectivity
+// - Populating polymarket_markets table for analytics
+//
+// DO NOT schedule this via pg_cron.
+// DO NOT use cached data from polymarket_markets for trading decisions.
+//
+// AUTHORITATIVE SOURCE FOR TRADING: active-mode-poll (uses live Polymarket API)
+// ========================================
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',

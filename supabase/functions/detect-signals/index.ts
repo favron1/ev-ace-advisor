@@ -1,3 +1,23 @@
+// ========================================
+// DEPRECATED: ANALYTICS & DEBUGGING ONLY
+// ========================================
+// This function uses CACHED Polymarket data from the polymarket_markets table.
+// It does NOT use live Polymarket API calls.
+//
+// For TRADING DECISIONS, use active-mode-poll which fetches live Polymarket
+// prices per-event using the fetchPolymarketForEvent() helper.
+//
+// Do NOT use signals from this function for trade execution without
+// cross-referencing with active-mode-poll confirmed edges.
+//
+// This function exists for:
+// - Generating analytics/debugging signals
+// - Testing matching logic
+// - Historical signal tracking
+//
+// AUTHORITATIVE SOURCE FOR TRADING: active-mode-poll (uses live Polymarket API)
+// ========================================
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
