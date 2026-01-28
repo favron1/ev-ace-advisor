@@ -18,6 +18,15 @@ const DEFAULT_CONFIG: Partial<ScanConfig> = {
   daily_requests_used: 0,
   monthly_requests_used: 0,
   total_scans_today: 0,
+  // Two-tier polling defaults
+  enabled_sports: ['basketball_nba'],
+  max_simultaneous_active: 5,
+  movement_threshold_pct: 6.0,
+  hold_window_minutes: 3,
+  samples_required: 2,
+  watch_poll_interval_minutes: 5,
+  active_poll_interval_seconds: 60,
+  active_window_minutes: 20,
 };
 
 export function useScanConfig() {
