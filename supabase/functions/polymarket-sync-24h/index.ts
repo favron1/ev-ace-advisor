@@ -53,55 +53,66 @@ function extractTeams(question: string, title: string): { home: string | null; a
   return { home: null, away: null };
 }
 
-// Determine if this is a sports H2H market
-function isSportsH2H(event: any): boolean {
+// Determine if this is a sports event (broader filter for H2H-style markets)
+function isSportsEvent(event: any): { isSports: boolean; isH2H: boolean; league: string | null } {
   const rawTags = event.tags || [];
   // Ensure tags are strings
   const tags = rawTags.filter((t: any) => typeof t === 'string');
   const title = (event.title || '').toLowerCase();
   const question = (event.question || '').toLowerCase();
+  const combined = `${title} ${question}`;
   
   // Check if it's a sports category
   const isSports = tags.some((tag: string) => 
     SPORTS_CATEGORIES.some(cat => tag.toLowerCase().includes(cat.toLowerCase()))
   ) || SPORTS_CATEGORIES.some(cat => 
-    title.includes(cat.toLowerCase()) || question.includes(cat.toLowerCase())
+    combined.includes(cat.toLowerCase())
   );
   
-  if (!isSports) return false;
+  if (!isSports) return { isSports: false, isH2H: false, league: null };
   
-  // Check if it's a H2H match (not futures/championship)
-  const futuresKeywords = ['championship', 'winner', 'mvp', 'season', 'playoffs', 'finals', 'title'];
-  const isFutures = futuresKeywords.some(kw => title.includes(kw) || question.includes(kw));
-  
-  // H2H patterns
-  const h2hPatterns = ['vs', 'versus', 'beat', 'defeat', 'win against', 'to win'];
-  const isH2H = h2hPatterns.some(p => title.includes(p) || question.includes(p));
-  
-  return isH2H && !isFutures;
-}
-
-// Detect league from question/title
-function detectLeague(question: string, title: string): string | null {
-  const combined = `${title} ${question}`.toLowerCase();
-  
-  const leagues = [
-    { pattern: /\bnba\b/, league: 'NBA' },
-    { pattern: /\bnfl\b/, league: 'NFL' },
-    { pattern: /\bnhl\b/, league: 'NHL' },
-    { pattern: /\bufc\b/, league: 'UFC' },
-    { pattern: /\bmma\b/, league: 'MMA' },
-    { pattern: /\batp\b|\bwta\b|tennis/i, league: 'Tennis' },
-    { pattern: /\bpremier league\b|\bepl\b/, league: 'EPL' },
-    { pattern: /\bla liga\b/, league: 'La Liga' },
-    { pattern: /\bchampions league\b|\bucl\b/, league: 'UCL' },
+  // Detect league
+  const leaguePatterns = [
+    { pattern: /\bnba\b/i, league: 'NBA' },
+    { pattern: /\bnfl\b/i, league: 'NFL' },
+    { pattern: /\bnhl\b/i, league: 'NHL' },
+    { pattern: /\bufc\b/i, league: 'UFC' },
+    { pattern: /\bmma\b/i, league: 'MMA' },
+    { pattern: /\batp\b|\bwta\b|australian open|wimbledon|us open|french open/i, league: 'Tennis' },
+    { pattern: /\bpremier league\b|\bepl\b/i, league: 'EPL' },
+    { pattern: /\bchampions league\b|\bucl\b/i, league: 'UCL' },
   ];
   
-  for (const { pattern, league } of leagues) {
-    if (pattern.test(combined)) return league;
+  let league: string | null = null;
+  for (const { pattern, league: l } of leaguePatterns) {
+    if (pattern.test(combined)) {
+      league = l;
+      break;
+    }
   }
   
-  return null;
+  // Long-dated futures keywords (exclude these)
+  const futuresKeywords = ['championship', 'mvp', 'season', 'regular season', 'division', 'conference'];
+  const isFutures = futuresKeywords.some(kw => combined.includes(kw));
+  
+  // H2H patterns - be more inclusive
+  const h2hPatterns = ['vs', 'versus', 'beat', 'defeat', 'win against', 'to win', ' win ', ' beat '];
+  const hasH2HPattern = h2hPatterns.some(p => combined.includes(p));
+  
+  // Also check for "Will X win?" pattern which is common for match outcomes
+  const willWinPattern = /will\s+(?:the\s+)?[\w\s]+\s+win/i.test(combined);
+  
+  // Check for team-like patterns (e.g., "Lakers", "Celtics", "Heat", "Warriors")
+  const teamPattern = /lakers|celtics|warriors|heat|bulls|knicks|nets|bucks|76ers|suns|nuggets|clippers|mavericks|rockets|grizzlies|timberwolves|pelicans|spurs|thunder|jazz|blazers|kings|hornets|hawks|wizards|magic|pistons|cavaliers|raptors|pacers/i;
+  const hasTeam = teamPattern.test(combined);
+  
+  // Consider it H2H if:
+  // 1. Has explicit H2H pattern (vs, beat, etc.) OR
+  // 2. Has "Will X win?" pattern with a team name
+  // 3. NOT a long-dated futures market
+  const isH2H = (hasH2HPattern || willWinPattern || hasTeam) && !isFutures;
+  
+  return { isSports: true, isH2H, league };
 }
 
 Deno.serve(async (req) => {
@@ -155,50 +166,94 @@ Deno.serve(async (req) => {
 
     console.log(`[POLY-SYNC-24H] Fetched ${allEvents.length} total active events`);
 
-    // Filter to events within 24hr window that are sports H2H
+    // Filter to sports events (be more inclusive for now to understand inventory)
     const qualifying: any[] = [];
+    let statsNoEndDate = 0;
+    let statsFutures = 0;
+    let statsNotSports = 0;
+    let statsNoMarkets = 0;
+    let sampleSportsEvents: string[] = [];
+    let sampleEndDates: string[] = [];
 
     for (const event of allEvents) {
-      // Skip if no end date
-      if (!event.endDate) continue;
+      // Must be sports
+      const sportCheck = isSportsEvent(event);
+      if (!sportCheck.isSports) {
+        statsNotSports++;
+        continue;
+      }
 
-      const endDate = new Date(event.endDate);
-      
-      // Must end within 24 hours and not already ended
-      if (endDate <= now || endDate > in24Hours) continue;
+      // Log sample sports events for debugging
+      if (sampleSportsEvents.length < 10) {
+        const endDate = event.endDate ? new Date(event.endDate).toISOString() : 'no-date';
+        sampleSportsEvents.push(`${event.title?.substring(0, 50)}...`);
+        sampleEndDates.push(endDate);
+      }
 
-      // Must be sports H2H (not futures)
-      if (!isSportsH2H(event)) continue;
+      // For now, skip if not H2H pattern (but accept even if end date is far)
+      if (!sportCheck.isH2H) {
+        statsFutures++;
+        continue;
+      }
 
       // Get markets for this event
       const markets = event.markets || [];
-      if (markets.length === 0) continue;
+      if (markets.length === 0) {
+        statsNoMarkets++;
+        continue;
+      }
 
       // Take the primary market
       const primaryMarket = markets[0];
+      
+      // Use endDate as the event date (even if it's far in future for now)
+      const endDate = event.endDate ? new Date(event.endDate) : new Date(Date.now() + 24*60*60*1000);
       
       qualifying.push({
         event,
         market: primaryMarket,
         endDate,
+        league: sportCheck.league,
       });
     }
 
-    console.log(`[POLY-SYNC-24H] ${qualifying.length} events qualify (H2H, <24hr)`);
+    console.log(`[POLY-SYNC-24H] Stats: notSports=${statsNotSports}, futures=${statsFutures}, noMarkets=${statsNoMarkets}`);
+    console.log(`[POLY-SYNC-24H] Sample sports titles: ${JSON.stringify(sampleSportsEvents)}`);
+    console.log(`[POLY-SYNC-24H] Sample end dates: ${JSON.stringify(sampleEndDates)}`);
+    console.log(`[POLY-SYNC-24H] ${qualifying.length} events qualify as H2H sports`);
 
     // Upsert qualifying events to cache and event_watch_state
     let upserted = 0;
     let monitored = 0;
 
-    for (const { event, market, endDate } of qualifying) {
-      const conditionId = market.conditionId || market.id;
-      const yesPrice = parseFloat(market.outcomePrices?.[0] || market.yes_price || '0.5');
-      const noPrice = parseFloat(market.outcomePrices?.[1] || market.no_price || '0.5');
-      const volume = parseFloat(market.volume || event.volume || '0');
-      const liquidity = parseFloat(market.liquidity || event.liquidity || '0');
+    for (const { event, market, endDate, league } of qualifying) {
+      const conditionId = market.conditionId || market.id || event.id;
       
-      const teams = extractTeams(market.question || event.question, event.title);
-      const league = detectLeague(market.question || event.question, event.title);
+      // Parse prices defensively - Polymarket API structure varies
+      let yesPrice = 0.5;
+      let noPrice = 0.5;
+      
+      // Try different price field locations
+      if (market.outcomePrices && Array.isArray(market.outcomePrices)) {
+        yesPrice = parseFloat(market.outcomePrices[0]) || 0.5;
+        noPrice = parseFloat(market.outcomePrices[1]) || 0.5;
+      } else if (market.yes_price !== undefined) {
+        yesPrice = parseFloat(market.yes_price) || 0.5;
+        noPrice = parseFloat(market.no_price) || 0.5;
+      } else if (market.outcomes && Array.isArray(market.outcomes)) {
+        // Some markets have outcomes array with price field
+        yesPrice = parseFloat(market.outcomes[0]?.price) || 0.5;
+        noPrice = parseFloat(market.outcomes[1]?.price) || 0.5;
+      }
+      
+      // Validate prices are in valid range
+      if (isNaN(yesPrice) || yesPrice < 0 || yesPrice > 1) yesPrice = 0.5;
+      if (isNaN(noPrice) || noPrice < 0 || noPrice > 1) noPrice = 0.5;
+      
+      const volume = parseFloat(market.volume || event.volume || '0') || 0;
+      const liquidity = parseFloat(market.liquidity || event.liquidity || '0') || 0;
+      
+      const teams = extractTeams(market.question || event.question || '', event.title || '');
 
       // Upsert to polymarket_h2h_cache
       const { error: cacheError } = await supabase
