@@ -8,44 +8,59 @@ const corsHeaders = {
 // Gamma API for Polymarket events
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
 
-// Sports-related categories to capture
-const SPORTS_TAGS = [
-  'sports', 'nba', 'nfl', 'nhl', 'mlb', 'mls',
-  'ufc', 'mma', 'boxing', 'wrestling',
-  'tennis', 'golf', 'soccer', 'football', 'basketball',
-  'baseball', 'hockey', 'cricket', 'rugby',
-  'formula 1', 'f1', 'nascar', 'motorsport',
-  'olympics', 'esports', 'darts', 'snooker',
-];
-
-// Check if event is sports-related based on tags
-function isSportsCategory(tags: any[]): boolean {
-  if (!tags || !Array.isArray(tags)) return false;
-  
-  return tags.some(tag => {
-    if (typeof tag !== 'string') return false;
-    const tagLower = tag.toLowerCase();
-    return SPORTS_TAGS.some(sport => tagLower.includes(sport));
-  });
-}
-
-// Detect sport from title/question
+// Detect sport from title/question using keywords
+// Returns sport key or null if not sports-related
 function detectSport(title: string, question: string): string | null {
   const combined = `${title} ${question}`.toLowerCase();
   
   const sportPatterns: Array<{ patterns: RegExp[]; sport: string }> = [
-    { patterns: [/\bnba\b/, /lakers|celtics|warriors|heat|bulls|knicks|nets|bucks|76ers|suns|nuggets|clippers|mavericks|rockets|grizzlies|timberwolves|pelicans|spurs|thunder|jazz|blazers|kings|hornets|hawks|wizards|magic|pistons|cavaliers|raptors|pacers/i], sport: 'NBA' },
-    { patterns: [/\bnfl\b/, /chiefs|eagles|49ers|cowboys|bills|ravens|bengals|dolphins|lions|packers|jets|patriots|broncos|chargers|raiders|steelers|browns|texans|colts|jaguars|titans|commanders|giants|saints|panthers|falcons|buccaneers|seahawks|rams|cardinals|bears|vikings/i], sport: 'NFL' },
-    { patterns: [/\bnhl\b/, /maple leafs|canadiens|bruins|rangers|islanders|devils|flyers|penguins|capitals|hurricanes|panthers|lightning|red wings|senators|sabres|blue jackets|blackhawks|blues|wild|avalanche|stars|predators|jets|flames|oilers|canucks|kraken|golden knights|coyotes|sharks|ducks|kings/i], sport: 'NHL' },
-    { patterns: [/\bufc\b/, /\bmma\b/, /adesanya|jones|pereira|volkanovski|makhachev|islam|strickland|chimaev|covington|diaz|mcgregor|usman|chandler|poirier|holloway|o'?malley|yan|sterling/i], sport: 'UFC' },
-    { patterns: [/\batp\b/, /\bwta\b/, /djokovic|sinner|alcaraz|medvedev|zverev|rublev|tsitsipas|ruud|fritz|de minaur|sabalenka|swiatek|gauff|rybakina|pegula|keys|zheng|ostapenko|kvitova|badosa/i, /australian open|french open|wimbledon|us open|grand slam/i], sport: 'Tennis' },
-    { patterns: [/premier league|\bepl\b|arsenal|chelsea|liverpool|man city|manchester city|man united|manchester united|tottenham|spurs|newcastle|brighton|aston villa|west ham|bournemouth|fulham|crystal palace|brentford|wolves|nottingham forest|everton|luton|burnley|sheffield/i], sport: 'EPL' },
-    { patterns: [/\bmlb\b|yankees|red sox|dodgers|mets|phillies|braves|cubs|cardinals|padres|giants|mariners|astros|rangers|twins|guardians|orioles|rays|blue jays|brewers|diamondbacks|rockies|marlins|nationals|pirates|reds|royals|tigers|white sox|angels|athletics/i], sport: 'MLB' },
-    { patterns: [/champions league|\bucl\b|real madrid|barcelona|bayern|juventus|inter milan|ac milan|psg|paris saint|dortmund|benfica|porto|ajax|celtic/i], sport: 'UCL' },
-    { patterns: [/la liga|atletico madrid|sevilla|villarreal|real sociedad|athletic bilbao/i], sport: 'LaLiga' },
-    { patterns: [/serie a|napoli|roma|lazio|fiorentina|atalanta/i], sport: 'SerieA' },
-    { patterns: [/bundesliga|leverkusen|leipzig|frankfurt|wolfsburg|freiburg/i], sport: 'Bundesliga' },
-    { patterns: [/\bbox(?:ing)?\b|fury|usyk|joshua|canelo|crawford|spence|davis|haney|stevenson|lomachenko/i], sport: 'Boxing' },
+    // NBA - team names and league
+    { patterns: [/\bnba\b/, /lakers|celtics|warriors|heat|bulls|knicks|nets|bucks|76ers|sixers|suns|nuggets|clippers|mavericks|rockets|grizzlies|timberwolves|pelicans|spurs|thunder|jazz|blazers|trail blazers|kings|hornets|hawks|wizards|magic|pistons|cavaliers|raptors|pacers/i], sport: 'NBA' },
+    
+    // NFL - team names and league
+    { patterns: [/\bnfl\b/, /chiefs|eagles|49ers|niners|cowboys|bills|ravens|bengals|dolphins|lions|packers|jets|patriots|broncos|chargers|raiders|steelers|browns|texans|colts|jaguars|titans|commanders|giants|saints|panthers|falcons|buccaneers|bucs|seahawks|rams|cardinals|bears|vikings/i], sport: 'NFL' },
+    
+    // NHL - team names and league
+    { patterns: [/\bnhl\b/, /maple leafs|canadiens|habs|bruins|rangers|islanders|devils|flyers|penguins|capitals|caps|hurricanes|canes|panthers|lightning|bolts|red wings|senators|sens|sabres|blue jackets|blackhawks|hawks|blues|wild|avalanche|avs|stars|predators|preds|jets|flames|oilers|canucks|kraken|golden knights|knights|coyotes|sharks|ducks|kings/i], sport: 'NHL' },
+    
+    // UFC/MMA - fighters and terms
+    { patterns: [/\bufc\b/, /\bmma\b/, /adesanya|jones|pereira|volkanovski|makhachev|islam|strickland|chimaev|covington|diaz|mcgregor|usman|chandler|poirier|holloway|o'?malley|yan|sterling|pantoja|moreno|figueiredo|dvalishvili|merab|shevchenko|grasso|zhang weili|namajunas|nunes/i], sport: 'UFC' },
+    
+    // Tennis - players and tournaments
+    { patterns: [/\batp\b/, /\bwta\b/, /djokovic|sinner|alcaraz|medvedev|zverev|rublev|tsitsipas|ruud|fritz|de minaur|sabalenka|swiatek|gauff|rybakina|pegula|keys|zheng|ostapenko|kvitova|badosa|krejcikova|vondrousova|haddad|paolini/i, /australian open|french open|roland garros|wimbledon|us open|grand slam|indian wells|miami open|madrid open|italian open|cincinnati/i], sport: 'Tennis' },
+    
+    // EPL - team names
+    { patterns: [/premier league|\bepl\b|arsenal|chelsea|liverpool|man city|manchester city|man united|manchester united|tottenham|spurs|newcastle|brighton|aston villa|west ham|bournemouth|fulham|crystal palace|brentford|wolves|wolverhampton|nottingham forest|everton|luton|burnley|sheffield|ipswich|leicester/i], sport: 'EPL' },
+    
+    // MLB - team names and league
+    { patterns: [/\bmlb\b|yankees|red sox|dodgers|mets|phillies|braves|cubs|cardinals|padres|giants|mariners|astros|rangers|twins|guardians|orioles|rays|blue jays|brewers|diamondbacks|d-?backs|rockies|marlins|nationals|nats|pirates|reds|royals|tigers|white sox|angels|athletics|a's/i], sport: 'MLB' },
+    
+    // Champions League
+    { patterns: [/champions league|\bucl\b|real madrid|barcelona|barca|bayern|juventus|juve|inter milan|ac milan|psg|paris saint|dortmund|benfica|porto|ajax|celtic/i], sport: 'UCL' },
+    
+    // La Liga
+    { patterns: [/la liga|laliga|atletico madrid|sevilla|villarreal|real sociedad|athletic bilbao|real betis|valencia cf|girona/i], sport: 'LaLiga' },
+    
+    // Serie A
+    { patterns: [/serie a|napoli|roma|lazio|fiorentina|atalanta|bologna|torino|monza|genoa|udinese|sassuolo|lecce|empoli|cagliari|verona|frosinone|salernitana/i], sport: 'SerieA' },
+    
+    // Bundesliga
+    { patterns: [/bundesliga|leverkusen|leipzig|frankfurt|wolfsburg|freiburg|hoffenheim|mainz|augsburg|werder bremen|union berlin|koln|cologne|gladbach|bochum|heidenheim|darmstadt/i], sport: 'Bundesliga' },
+    
+    // Boxing
+    { patterns: [/\bbox(?:ing)?\b|fury|usyk|joshua|canelo|crawford|spence|davis|haney|stevenson|lomachenko|bivol|beterbiev|tank davis|shakur/i], sport: 'Boxing' },
+    
+    // College sports
+    { patterns: [/\bncaa\b|march madness|college football|college basketball|cfb playoff|final four/i], sport: 'NCAA' },
+    
+    // Golf
+    { patterns: [/\bpga\b|\bgolf\b|masters|us open golf|british open|open championship|ryder cup|scheffler|mcilroy|rahm|koepka|spieth|thomas|hovland|morikawa|cantlay|woods/i], sport: 'Golf' },
+    
+    // F1/Racing
+    { patterns: [/formula 1|\bf1\b|verstappen|hamilton|leclerc|norris|sainz|perez|alonso|russell|grand prix|monaco gp|silverstone/i], sport: 'F1' },
+    
+    // Generic sports terms that indicate it's a sports event
+    { patterns: [/\bvs\.?\b.*(?:win|beat|defeat)/, /will\s+(?:the\s+)?[A-Z][a-z]+\s+(?:beat|win|defeat)/, /who\s+will\s+win.*(?:game|match|fight|bout)/i], sport: 'Sports' },
   ];
   
   for (const { patterns, sport } of sportPatterns) {
@@ -115,14 +130,15 @@ Deno.serve(async (req) => {
 
     console.log(`[POLY-SYNC-24H] Window: now to ${in24Hours.toISOString()}`);
 
-    // Fetch ALL active events from Gamma API
+    // Fetch sports events using tag_slug=sports filter
     let allEvents: any[] = [];
     let offset = 0;
     const limit = 100;
     let hasMore = true;
 
+    // Primary: Fetch events tagged with "sports"
     while (hasMore) {
-      const url = `${GAMMA_API_BASE}/events?active=true&closed=false&limit=${limit}&offset=${offset}`;
+      const url = `${GAMMA_API_BASE}/events?active=true&closed=false&tag_slug=sports&limit=${limit}&offset=${offset}`;
       const response = await fetch(url);
       
       if (!response.ok) {
@@ -138,30 +154,34 @@ Deno.serve(async (req) => {
         allEvents = allEvents.concat(events);
         offset += limit;
         
-        // Safety cap at 1000 events
-        if (allEvents.length >= 1000) {
+        // Safety cap at 500 sports events
+        if (allEvents.length >= 500) {
           hasMore = false;
         }
       }
     }
 
-    console.log(`[POLY-SYNC-24H] Fetched ${allEvents.length} total active events`);
+    console.log(`[POLY-SYNC-24H] Fetched ${allEvents.length} sports-tagged events`);
 
-    // Filter: Sports category + ends within 24 hours
+    // Log first 10 event titles for debugging
+    console.log(`[POLY-SYNC-24H] Sample sports event titles:`);
+    allEvents.slice(0, 10).forEach((e, i) => {
+      console.log(`  ${i + 1}. title="${e.title || 'N/A'}" endDate="${e.endDate || 'N/A'}"`);
+    });
+
+    // Filter: ends within 24 hours (sports filter already applied via tag_slug)
     const qualifying: any[] = [];
     let statsNoEndDate = 0;
-    let statsNotSports = 0;
     let statsOutsideWindow = 0;
     let statsNoMarkets = 0;
 
     for (const event of allEvents) {
-      const tags = event.tags || [];
+      const title = event.title || '';
+      const question = event.question || '';
+      const firstMarketQuestion = event.markets?.[0]?.question || '';
       
-      // Must be sports category
-      if (!isSportsCategory(tags)) {
-        statsNotSports++;
-        continue;
-      }
+      // Detect specific sport from title/question for bookmaker matching
+      const detectedSport = detectSport(title, question) || detectSport(title, firstMarketQuestion) || 'Sports';
 
       // Must have an end date
       if (!event.endDate) {
@@ -190,27 +210,38 @@ Deno.serve(async (req) => {
         event,
         market: primaryMarket,
         endDate,
+        detectedSport,
       });
     }
 
     console.log(`[POLY-SYNC-24H] Filtering stats:`);
-    console.log(`  - Not sports: ${statsNotSports}`);
+    console.log(`  - No end date: ${statsNoEndDate}`);
+    console.log(`  - Outside 24h window: ${statsOutsideWindow}`);
+    console.log(`  - No markets: ${statsNoMarkets}`);
+    console.log(`  - QUALIFYING: ${qualifying.length}`);
     console.log(`  - No end date: ${statsNoEndDate}`);
     console.log(`  - Outside 24h window: ${statsOutsideWindow}`);
     console.log(`  - No markets: ${statsNoMarkets}`);
     console.log(`  - QUALIFYING: ${qualifying.length}`);
 
+    // Log first few qualifying events for debugging
+    if (qualifying.length > 0) {
+      console.log(`[POLY-SYNC-24H] Sample qualifying events:`);
+      qualifying.slice(0, 5).forEach((q, i) => {
+        console.log(`  ${i + 1}. [${q.detectedSport}] ${q.event.title?.substring(0, 60) || q.market.question?.substring(0, 60)}`);
+      });
+    }
+
     // Upsert qualifying events
     let upserted = 0;
     let monitored = 0;
 
-    for (const { event, market, endDate } of qualifying) {
+    for (const { event, market, endDate, detectedSport } of qualifying) {
       const conditionId = market.conditionId || market.id || event.id;
       const question = market.question || event.question || '';
       const title = event.title || '';
       
-      // Detect sport and market type
-      const detectedSport = detectSport(title, question);
+      // Detect market type
       const marketType = detectMarketType(question);
       const extractedEntity = extractEntity(question, title);
 
@@ -248,7 +279,7 @@ Deno.serve(async (req) => {
           no_price: noPrice,
           volume: volume,
           liquidity: liquidity,
-          sport_category: detectedSport || 'Sports',
+          sport_category: detectedSport,
           extracted_league: detectedSport,
           extracted_entity: extractedEntity,
           market_type: marketType,
@@ -324,7 +355,6 @@ Deno.serve(async (req) => {
         expired: expiredCount,
         duration_ms: duration,
         filter_stats: {
-          not_sports: statsNotSports,
           no_end_date: statsNoEndDate,
           outside_window: statsOutsideWindow,
           no_markets: statsNoMarkets,
