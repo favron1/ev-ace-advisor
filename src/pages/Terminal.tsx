@@ -27,10 +27,12 @@ export default function Terminal() {
     signals, 
     loading: signalsLoading, 
     detecting,
+    refreshing,
     dismissSignal, 
     executeSignal,
     getFilteredSignals,
     fetchSignals,
+    refreshSignals,
   } = useSignals();
   
   const { markets, loading: marketsLoading } = usePolymarket();
@@ -108,17 +110,13 @@ export default function Terminal() {
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
           {/* Signal Feed */}
           <div className="lg:col-span-2">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold">Signal Feed</h2>
-              <span className="text-sm text-muted-foreground">
-                {filteredSignals.length} signal{filteredSignals.length !== 1 ? 's' : ''}
-              </span>
-            </div>
             <SignalFeed
               signals={filteredSignals}
               loading={signalsLoading}
+              refreshing={refreshing}
               onDismiss={dismissSignal}
               onExecute={executeSignal}
+              onRefresh={refreshSignals}
             />
           </div>
 

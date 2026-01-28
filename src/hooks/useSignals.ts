@@ -8,6 +8,7 @@ export function useSignals() {
   const [signals, setSignals] = useState<SignalOpportunity[]>([]);
   const [loading, setLoading] = useState(true);
   const [detecting, setDetecting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { toast } = useToast();
 
@@ -55,6 +56,29 @@ export function useSignals() {
       return null;
     } finally {
       setDetecting(false);
+    }
+  }, [fetchSignals, toast]);
+
+  const refreshSignals = useCallback(async () => {
+    try {
+      setRefreshing(true);
+      const result = await arbitrageApi.refreshSignals();
+      await fetchSignals();
+      
+      toast({
+        title: 'Signals Refreshed',
+        description: `${result.expired} expired, ${result.updated} updated, ${result.unchanged} unchanged`,
+      });
+      return result;
+    } catch (err) {
+      toast({
+        title: 'Refresh Error',
+        description: err instanceof Error ? err.message : 'Failed to refresh signals',
+        variant: 'destructive',
+      });
+      return null;
+    } finally {
+      setRefreshing(false);
     }
   }, [fetchSignals, toast]);
 
@@ -108,9 +132,11 @@ export function useSignals() {
     signals,
     loading,
     detecting,
+    refreshing,
     error,
     fetchSignals,
     runDetection,
+    refreshSignals,
     dismissSignal,
     executeSignal,
     getFilteredSignals,
