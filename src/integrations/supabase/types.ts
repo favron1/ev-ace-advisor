@@ -227,6 +227,69 @@ export type Database = {
         }
         Relationships: []
       }
+      polymarket_h2h_cache: {
+        Row: {
+          condition_id: string
+          created_at: string | null
+          event_date: string | null
+          event_title: string
+          id: string
+          last_bulk_sync: string | null
+          last_price_update: string | null
+          liquidity: number | null
+          no_price: number
+          question: string
+          sport_category: string | null
+          status: string | null
+          team_away: string | null
+          team_away_normalized: string | null
+          team_home: string | null
+          team_home_normalized: string | null
+          volume: number | null
+          yes_price: number
+        }
+        Insert: {
+          condition_id: string
+          created_at?: string | null
+          event_date?: string | null
+          event_title: string
+          id?: string
+          last_bulk_sync?: string | null
+          last_price_update?: string | null
+          liquidity?: number | null
+          no_price: number
+          question: string
+          sport_category?: string | null
+          status?: string | null
+          team_away?: string | null
+          team_away_normalized?: string | null
+          team_home?: string | null
+          team_home_normalized?: string | null
+          volume?: number | null
+          yes_price: number
+        }
+        Update: {
+          condition_id?: string
+          created_at?: string | null
+          event_date?: string | null
+          event_title?: string
+          id?: string
+          last_bulk_sync?: string | null
+          last_price_update?: string | null
+          liquidity?: number | null
+          no_price?: number
+          question?: string
+          sport_category?: string | null
+          status?: string | null
+          team_away?: string | null
+          team_away_normalized?: string | null
+          team_home?: string | null
+          team_home_normalized?: string | null
+          volume?: number | null
+          yes_price?: number
+        }
+        Relationships: []
+      }
       polymarket_markets: {
         Row: {
           category: string | null

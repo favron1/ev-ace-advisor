@@ -17,3 +17,6 @@ verify_jwt = false
 
 [functions.active-mode-poll]
 verify_jwt = false
+
+[functions.sync-polymarket-h2h]
+verify_jwt = false
