@@ -84,17 +84,61 @@ async function refreshPolymarketPrice(conditionId: string): Promise<{
   volume: number;
 } | null> {
   try {
-    const url = `https://gamma-api.polymarket.com/markets/${conditionId}`;
+    // Use the CLOB API for direct condition_id price lookup
+    const url = `https://clob.polymarket.com/price?token_id=${conditionId}`;
     const response = await fetch(url, {
       headers: { 'Accept': 'application/json' },
     });
     
     if (!response.ok) {
-      console.error(`[ACTIVE-MODE-POLL] Polymarket API error ${response.status} for ${conditionId}`);
+      // Try fallback to Gamma events search
+      console.log(`[ACTIVE-MODE-POLL] CLOB API returned ${response.status}, trying Gamma fallback`);
+      return await refreshPolymarketPriceViaGamma(conditionId);
+    }
+    
+    const priceData = await response.json();
+    
+    if (priceData && priceData.price !== undefined) {
+      return {
+        yesPrice: parseFloat(priceData.price) || 0.5,
+        noPrice: 1 - (parseFloat(priceData.price) || 0.5),
+        volume: 0, // CLOB doesn't return volume directly
+      };
+    }
+    
+    return await refreshPolymarketPriceViaGamma(conditionId);
+  } catch (error) {
+    console.error(`[ACTIVE-MODE-POLL] Error refreshing Polymarket price:`, error);
+    return await refreshPolymarketPriceViaGamma(conditionId);
+  }
+}
+
+// Fallback to Gamma API by searching for the market
+async function refreshPolymarketPriceViaGamma(conditionId: string): Promise<{
+  yesPrice: number;
+  noPrice: number;
+  volume: number;
+} | null> {
+  try {
+    // Search for market by condition_id
+    const url = `https://gamma-api.polymarket.com/markets?condition_id=${conditionId}`;
+    const response = await fetch(url, {
+      headers: { 'Accept': 'application/json' },
+    });
+    
+    if (!response.ok) {
+      console.error(`[ACTIVE-MODE-POLL] Gamma fallback failed: ${response.status}`);
       return null;
     }
     
-    const market = await response.json();
+    const markets = await response.json();
+    
+    if (!Array.isArray(markets) || markets.length === 0) {
+      console.error(`[ACTIVE-MODE-POLL] No market found for condition_id: ${conditionId}`);
+      return null;
+    }
+    
+    const market = markets[0];
     
     if (market.outcomePrices) {
       const prices = typeof market.outcomePrices === 'string'
@@ -112,7 +156,7 @@ async function refreshPolymarketPrice(conditionId: string): Promise<{
     
     return null;
   } catch (error) {
-    console.error(`[ACTIVE-MODE-POLL] Error refreshing Polymarket price:`, error);
+    console.error(`[ACTIVE-MODE-POLL] Gamma fallback error:`, error);
     return null;
   }
 }
