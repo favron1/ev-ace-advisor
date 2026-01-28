@@ -1,0 +1,108 @@
+// Core types for the Prediction Market Arbitrage Engine
+
+export interface PolymarketMarket {
+  id: string;
+  market_id: string;
+  question: string;
+  description?: string;
+  category?: string;
+  end_date?: string;
+  yes_price: number;
+  no_price: number;
+  volume: number;
+  liquidity: number;
+  status: 'active' | 'resolved' | 'closed';
+  last_updated: string;
+  created_at: string;
+}
+
+export interface BookmakerSignal {
+  id: string;
+  event_name: string;
+  market_type: string;
+  outcome: string;
+  bookmaker: string;
+  odds: number;
+  implied_probability: number;
+  previous_odds?: number;
+  odds_movement?: number;
+  movement_speed?: number;
+  confirming_books: number;
+  captured_at: string;
+}
+
+export interface SignalOpportunity {
+  id: string;
+  polymarket_market_id?: string;
+  event_name: string;
+  side: 'YES' | 'NO';
+  polymarket_price: number;
+  bookmaker_probability: number;
+  edge_percent: number;
+  confidence_score: number;
+  urgency: 'low' | 'normal' | 'high' | 'critical';
+  signal_factors: SignalFactors;
+  status: 'active' | 'expired' | 'executed' | 'dismissed';
+  expires_at?: string;
+  created_at: string;
+  user_id?: string;
+}
+
+export interface SignalFactors {
+  movement_magnitude?: number;
+  confirming_books?: number;
+  movement_speed?: number;
+  time_to_resolution?: number;
+  liquidity_score?: number;
+  market_maturity?: number;
+}
+
+export interface SignalLog {
+  id: string;
+  opportunity_id?: string;
+  event_name: string;
+  side: string;
+  entry_price: number;
+  edge_at_signal: number;
+  confidence_at_signal: number;
+  outcome?: 'win' | 'loss' | 'void' | 'pending';
+  actual_result?: boolean;
+  profit_loss?: number;
+  created_at: string;
+  settled_at?: string;
+}
+
+export interface ArbitrageConfig {
+  id: string;
+  user_id?: string;
+  min_edge_percent: number;
+  min_confidence: number;
+  min_liquidity: number;
+  max_exposure_per_event: number;
+  time_to_resolution_hours: number;
+  notifications_enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+// Signal detection types
+export interface OddsMovement {
+  event_id: string;
+  event_name: string;
+  market_type: string;
+  outcome: string;
+  current_odds: number;
+  previous_odds: number;
+  change_percent: number;
+  direction: 'shortening' | 'drifting';
+  confirming_books: string[];
+  timestamp: string;
+}
+
+export interface SignalDetectionResult {
+  opportunities: SignalOpportunity[];
+  movements_detected: number;
+  polymarkets_analyzed: number;
+  signals_surfaced: number;
+  timestamp: string;
+}
