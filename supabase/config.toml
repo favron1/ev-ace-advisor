@@ -8,3 +8,6 @@ verify_jwt = false
 
 [functions.detect-signals]
 verify_jwt = false
+
+[functions.refresh-signals]
+verify_jwt = false

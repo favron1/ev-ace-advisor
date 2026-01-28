@@ -95,6 +95,21 @@ export const arbitrageApi = {
     return data as SignalDetectionResult;
   },
 
+  // Refresh signals without API calls
+  async refreshSignals(): Promise<{
+    refreshed: number;
+    expired: number;
+    updated: number;
+    unchanged: number;
+  }> {
+    const { data, error } = await supabase.functions.invoke('refresh-signals', {
+      body: {}
+    });
+    
+    if (error) throw error;
+    return data;
+  },
+
   // Dismiss a signal
   async dismissSignal(signalId: string): Promise<void> {
     const { error } = await supabase
