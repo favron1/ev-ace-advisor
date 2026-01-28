@@ -1,284 +1,223 @@
 
-# Plan: Shift Market Focus to Short-Term H2H + Add News-Spike Mode
+# Plan: Add SMS Text Notifications for Confirmed Signals
 
 ## Summary
 
-This plan implements your approved changes with all required edits:
-- **FocusMode parameter** (h2h_only | all | futures_only) - default h2h_only
-- **Deprioritize futures** by default (keep code, skip unless explicitly requested)
-- **Reorder sport priority**: NBA, UFC, Tennis, NFL, NHL, Soccer
-- **News Spike Mode**: 5-minute high-frequency burst with 10-minute cooldown
-- **Year-round tennis coverage**: All ATP/WTA tournaments (not just slams)
-- **Configurable thresholds**: Staleness and edge overrides for spike mode only
+This plan adds SMS text notifications via Twilio so you receive alerts on your phone even when your browser is closed overnight. When an event transitions to **confirmed** status, the system will send an SMS to your configured phone number.
 
 ---
 
-## Files to Modify
+## What You'll Need to Provide
+
+**Twilio Account Setup** (5 minutes):
+1. Go to [twilio.com](https://twilio.com) and create a free account (includes trial credits)
+2. Get your **Account SID** and **Auth Token** from the Twilio console
+3. Get a Twilio phone number (free in trial mode)
+4. Provide these 3 values when prompted:
+   - `TWILIO_ACCOUNT_SID`
+   - `TWILIO_AUTH_TOKEN`  
+   - `TWILIO_PHONE_NUMBER` (the Twilio number, e.g., +15551234567)
+
+---
+
+## Files to Create/Modify
 
 | File | Purpose |
 |------|---------|
-| `supabase/functions/detect-signals/index.ts` | Add focusMode, configurable staleness/edge overrides |
-| `supabase/functions/ingest-odds/index.ts` | Reorder H2H priority, expand tennis tournaments |
-| `src/hooks/useAutoPolling.ts` | Add triggerNewsSpike(), cooldown logic |
-| `src/components/terminal/ScanControlPanel.tsx` | Add News Spike button with countdown |
-| `src/pages/Terminal.tsx` | Wire up news spike state |
-| `src/types/scan-config.ts` | Expand available sports list |
+| `supabase/functions/send-sms-alert/index.ts` | **NEW** - Edge function to send SMS via Twilio |
+| `supabase/functions/active-mode-poll/index.ts` | Call SMS function when event confirmed |
+| Database migration | Add `user_phone` column to profiles table |
+| `src/pages/Settings.tsx` | Add phone number input field |
 
 ---
 
 ## Implementation Details
 
-### 1. detect-signals/index.ts - FocusMode + Configurable Thresholds
+### 1. Create send-sms-alert Edge Function
 
-**Add new request parameters:**
 ```typescript
-interface RequestBody {
-  eventHorizonHours?: number;
-  minEventHorizonHours?: number;
-  minEdgeThreshold?: number;
-  focusMode?: 'h2h_only' | 'all' | 'futures_only';  // NEW
-  stalenessHoursOverride?: number;  // NEW - for spike mode
-  minEdgeOverride?: number;  // NEW - for spike mode (1.5% during spike)
+// supabase/functions/send-sms-alert/index.ts
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
+Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders });
+  }
+
+  try {
+    const { to, message } = await req.json();
+    
+    const accountSid = Deno.env.get('TWILIO_ACCOUNT_SID');
+    const authToken = Deno.env.get('TWILIO_AUTH_TOKEN');
+    const fromNumber = Deno.env.get('TWILIO_PHONE_NUMBER');
+    
+    if (!accountSid || !authToken || !fromNumber) {
+      throw new Error('Twilio credentials not configured');
+    }
+
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
+    
+    const credentials = btoa(`${accountSid}:${authToken}`);
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': `Basic ${credentials}`,
+      },
+      body: new URLSearchParams({
+        To: to,
+        From: fromNumber,
+        Body: message,
+      }),
+    });
+
+    const result = await response.json();
+    
+    return new Response(
+      JSON.stringify({ success: true, sid: result.sid }),
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  } catch (error) {
+    console.error('[SEND-SMS-ALERT] Error:', error);
+    return new Response(
+      JSON.stringify({ error: error.message }),
+      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
+});
+```
+
+---
+
+### 2. Update active-mode-poll to Send SMS on Confirmation
+
+Add SMS notification after creating the signal opportunity (around line 187):
+
+```typescript
+// After confirming an edge...
+console.log(`[ACTIVE-MODE-POLL] CONFIRMED EDGE: ${event.event_name} - ${edgePct.toFixed(1)}%`);
+
+// Send SMS alert
+try {
+  const smsMessage = `EDGE DETECTED: ${event.event_name}\n+${edgePct.toFixed(1)}% edge. Poly: ${(polyPrice * 100).toFixed(0)}c. Execute now!`;
+  
+  // Get user phone from profiles (assumes single user for now)
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('phone_number')
+    .limit(1)
+    .single();
+    
+  if (profile?.phone_number) {
+    await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/send-sms-alert`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${Deno.env.get('SUPABASE_ANON_KEY')}`,
+      },
+      body: JSON.stringify({
+        to: profile.phone_number,
+        message: smsMessage,
+      }),
+    });
+    console.log(`[ACTIVE-MODE-POLL] SMS sent to ${profile.phone_number}`);
+  }
+} catch (smsErr) {
+  console.error('[ACTIVE-MODE-POLL] SMS error:', smsErr);
+  // Don't fail the whole operation if SMS fails
 }
 ```
 
-**Configuration logic:**
-- Default `focusMode: 'h2h_only'` - skip futures processing loop
-- Default staleness: 2 hours (unchanged)
-- Default min edge: 2.0% (unchanged)
-- Spike mode overrides: `stalenessHoursOverride: 1`, `minEdgeOverride: 1.5`
+---
 
-**Processing logic:**
-```text
-if focusMode === 'h2h_only':
-  - Process H2H signals only
-  - Skip championship futures loop entirely
+### 3. Database Migration - Add Phone Number
 
-if focusMode === 'all':
-  - Process both H2H and futures (current behavior)
+Add `phone_number` column to profiles table:
 
-if focusMode === 'futures_only':
-  - Skip H2H, only process futures
+```sql
+ALTER TABLE profiles 
+ADD COLUMN phone_number text DEFAULT NULL;
+
+COMMENT ON COLUMN profiles.phone_number IS 
+  'User phone number in E.164 format for SMS alerts';
 ```
 
 ---
 
-### 2. ingest-odds/index.ts - Sport Priority + Year-Round Tennis
+### 4. Settings Page - Add Phone Input
 
-**Reordered H2H sports list (priority order):**
-```typescript
-const h2hSports = [
-  // TOP PRIORITY: Short-term, news-sensitive markets
-  'basketball_nba',
-  'mma_mixed_martial_arts',
-  
-  // TENNIS: All available tournaments for year-round coverage
-  'tennis_atp_aus_open_singles',
-  'tennis_atp_french_open',
-  'tennis_atp_wimbledon',
-  'tennis_atp_us_open',
-  'tennis_atp_indian_wells',
-  'tennis_atp_miami_open',
-  'tennis_atp_monte_carlo_masters',
-  'tennis_atp_madrid_open',
-  'tennis_atp_italian_open',
-  'tennis_atp_cincinnati_open',
-  'tennis_atp_canadian_open',
-  'tennis_atp_shanghai_masters',
-  'tennis_atp_paris_masters',
-  'tennis_atp_qatar_open',
-  'tennis_atp_dubai',
-  'tennis_atp_china_open',
-  'tennis_wta_aus_open_singles',
-  'tennis_wta_french_open',
-  'tennis_wta_wimbledon',
-  'tennis_wta_us_open',
-  'tennis_wta_indian_wells',
-  'tennis_wta_miami_open',
-  'tennis_wta_madrid_open',
-  'tennis_wta_italian_open',
-  'tennis_wta_cincinnati_open',
-  'tennis_wta_canadian_open',
-  'tennis_wta_china_open',
-  'tennis_wta_wuhan_open',
-  'tennis_wta_qatar_open',
-  'tennis_wta_dubai',
-  
-  // OTHER H2H
-  'americanfootball_nfl',
-  'icehockey_nhl',
-  'soccer_epl',
-  'soccer_spain_la_liga',
-  'soccer_germany_bundesliga',
-  'soccer_italy_serie_a',
-  'soccer_france_ligue_one',
-  'basketball_euroleague',
-];
-```
+Add a phone number field to the Settings page:
 
-**Note:** The Odds API does NOT have general `tennis_atp_singles` keys. Coverage is tournament-specific - the API only returns data when a tournament is "in season". By including all 30+ tournaments, we ensure year-round coverage (one is always running).
-
----
-
-### 3. useAutoPolling.ts - News Spike Mode
-
-**New state:**
-```typescript
-interface AutoPollingState {
-  // ... existing fields
-  newsSpikeActive: boolean;
-  newsSpikeEndsAt: Date | null;
-  spikeCountdown: string;
-  cooldownActive: boolean;
-  cooldownEndsAt: Date | null;
-}
-```
-
-**New function: `triggerNewsSpike()`**
-```text
-1. Check if cooldown is active → if yes, return early with toast
-2. Run immediate Watch Poll
-3. Set newsSpikeActive = true
-4. Set newsSpikeEndsAt = now + 5 minutes
-5. Override active poll interval to 60s
-6. Set stalenessHoursOverride = 1 (passed to detect-signals)
-7. Set minEdgeOverride = 1.5 (passed to detect-signals)
-8. Start countdown timer
-9. After 5 minutes: auto-disable spike, start 10-minute cooldown
-```
-
-**Cooldown logic:**
-- Cannot trigger News Spike for 10 minutes after previous spike ends
-- Visual indicator shows cooldown remaining
-
----
-
-### 4. ScanControlPanel.tsx - News Spike Button
-
-**New UI element:**
 ```text
 +------------------------------------------+
-|  [🔥 News Spike]  |  Cooldown: --:--     |
+|  SMS Notifications                        |
+|  ----------------------------------------|
+|  Phone Number: [+61 412 345 678]          |
+|  Format: Include country code (+61...)   |
+|  [Save]                                  |
 +------------------------------------------+
 ```
 
-**Button behavior:**
-- Orange/red styling when available
-- Disabled + gray when cooldown active or spike running
-- Shows countdown during spike: "Spike Active: 4:32"
-- Shows cooldown after spike: "Cooldown: 9:15"
-- Tooltip: "Trigger 5-min high-frequency polling after news breaks"
+- Input validation for E.164 format (starts with +, 10-15 digits)
+- Save to `profiles.phone_number`
+- Show confirmation when saved
 
 ---
 
-### 5. Terminal.tsx - Wire Up Spike State
-
-**Pass spike controls to components:**
-```typescript
-const {
-  // ... existing
-  triggerNewsSpike,
-  newsSpikeActive,
-  spikeCountdown,
-  cooldownActive,
-  cooldownCountdown,
-} = useAutoPolling({...});
-
-// Pass to ScanControlPanel
-<ScanControlPanel
-  // ... existing
-  onTriggerNewsSpike={triggerNewsSpike}
-  newsSpikeActive={newsSpikeActive}
-  spikeCountdown={spikeCountdown}
-  cooldownActive={cooldownActive}
-  cooldownCountdown={cooldownCountdown}
-/>
-```
-
----
-
-### 6. scan-config.ts - Expand Available Sports
-
-**Updated AVAILABLE_SPORTS list:**
-```typescript
-export const AVAILABLE_SPORTS = [
-  { key: 'basketball_nba', label: 'NBA Basketball', icon: '🏀' },
-  { key: 'mma_mixed_martial_arts', label: 'MMA / UFC', icon: '🥊' },
-  
-  // Tennis Grand Slams
-  { key: 'tennis_atp_aus_open_singles', label: 'ATP Australian Open', icon: '🎾' },
-  { key: 'tennis_atp_french_open', label: 'ATP French Open', icon: '🎾' },
-  { key: 'tennis_atp_wimbledon', label: 'ATP Wimbledon', icon: '🎾' },
-  { key: 'tennis_atp_us_open', label: 'ATP US Open', icon: '🎾' },
-  { key: 'tennis_wta_aus_open_singles', label: 'WTA Australian Open', icon: '🎾' },
-  { key: 'tennis_wta_french_open', label: 'WTA French Open', icon: '🎾' },
-  { key: 'tennis_wta_wimbledon', label: 'WTA Wimbledon', icon: '🎾' },
-  { key: 'tennis_wta_us_open', label: 'WTA US Open', icon: '🎾' },
-  
-  // Tennis Masters 1000
-  { key: 'tennis_atp_indian_wells', label: 'ATP Indian Wells', icon: '🎾' },
-  { key: 'tennis_atp_miami_open', label: 'ATP Miami Open', icon: '🎾' },
-  { key: 'tennis_atp_madrid_open', label: 'ATP Madrid Open', icon: '🎾' },
-  { key: 'tennis_atp_italian_open', label: 'ATP Italian Open', icon: '🎾' },
-  { key: 'tennis_atp_canadian_open', label: 'ATP Canadian Open', icon: '🎾' },
-  { key: 'tennis_atp_cincinnati_open', label: 'ATP Cincinnati Open', icon: '🎾' },
-  { key: 'tennis_atp_shanghai_masters', label: 'ATP Shanghai Masters', icon: '🎾' },
-  { key: 'tennis_atp_paris_masters', label: 'ATP Paris Masters', icon: '🎾' },
-  
-  // Other sports
-  { key: 'americanfootball_nfl', label: 'NFL Football', icon: '🏈' },
-  { key: 'icehockey_nhl', label: 'NHL Hockey', icon: '🏒' },
-  { key: 'soccer_epl', label: 'English Premier League', icon: '⚽' },
-] as const;
-```
-
----
-
-## Technical Flow: News Spike Mode
+## How It Works Overnight
 
 ```text
-User sees injury news
+You go to bed with Auto-Polling ON
         ↓
-Clicks "🔥 News Spike"
+Browser tab stays open (laptop plugged in)
         ↓
-[1] Immediate Watch Poll (with spike overrides)
+3:47 AM - Watch Poll detects NBA injury movement
         ↓
-[2] newsSpikeActive = true
-    newsSpikeEndsAt = now + 5min
+Event escalated to ACTIVE state
         ↓
-[3] Active Poll every 60s with:
-    - stalenessHoursOverride: 1h (stricter freshness)
-    - minEdgeOverride: 1.5% (lower threshold for early visibility)
+Active Poll runs every 60s
         ↓
-[4] After 5 minutes:
-    - Auto-disable spike
-    - Start 10-minute cooldown
+3:52 AM - Movement holds, edge confirmed!
         ↓
-[5] After cooldown:
-    - News Spike button re-enabled
+active-mode-poll calls send-sms-alert
+        ↓
+Your phone buzzes: "EDGE DETECTED: Lakers vs Celtics +4.2% edge..."
+        ↓
+You wake up, grab phone, execute on Polymarket
 ```
 
 ---
 
-## Configuration Summary
+## Secrets Required
 
-| Setting | Default | During Spike |
-|---------|---------|--------------|
-| Focus Mode | h2h_only | h2h_only |
-| Staleness Window | 2 hours | 1 hour |
-| Min Edge Threshold | 2.0% | 1.5% |
-| Active Poll Interval | 60s | 60s (forced) |
-| Spike Duration | N/A | 5 minutes |
-| Cooldown | N/A | 10 minutes |
+| Secret | Description |
+|--------|-------------|
+| `TWILIO_ACCOUNT_SID` | Your Twilio Account SID (starts with AC...) |
+| `TWILIO_AUTH_TOKEN` | Your Twilio Auth Token |
+| `TWILIO_PHONE_NUMBER` | Your Twilio phone number (+15551234567 format) |
+
+---
+
+## Cost
+
+Twilio SMS pricing:
+- **Australia**: ~$0.08 AUD per SMS
+- **US**: ~$0.01 USD per SMS
+- Trial accounts get $15 free credit (~150+ messages)
+
+With ~2-5 confirmed signals per week, monthly cost would be under $2.
 
 ---
 
 ## Expected Outcome
 
 After implementation:
-- System primarily surfaces short-term H2H signals (NBA games, UFC fights, Tennis matches)
-- Futures are deprioritized by default (available via focusMode: 'all')
-- Year-round tennis coverage with all ATP/WTA 1000+ tournaments
-- News Spike Mode captures reaction gaps during information shocks
-- 10-minute cooldown prevents API abuse
-- Edge threshold and staleness temporarily relaxed during spikes for early signal visibility
+- Your phone buzzes whenever an edge is confirmed (even at 3 AM)
+- SMS includes event name, edge percentage, and Polymarket price
+- You can set your phone number in Settings
+- Works independently of browser - true "set and forget" overnight monitoring
