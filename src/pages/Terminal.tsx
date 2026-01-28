@@ -6,8 +6,10 @@ import { SignalFeed } from '@/components/terminal/SignalFeed';
 import { StatsBar } from '@/components/terminal/StatsBar';
 import { FiltersBar } from '@/components/terminal/FiltersBar';
 import { MarketsSidebar } from '@/components/terminal/MarketsSidebar';
+import { ScanControlPanel } from '@/components/terminal/ScanControlPanel';
 import { useSignals } from '@/hooks/useSignals';
 import { usePolymarket } from '@/hooks/usePolymarket';
+import { useScanConfig } from '@/hooks/useScanConfig';
 import { arbitrageApi } from '@/lib/api/arbitrage';
 import type { SignalLog } from '@/types/arbitrage';
 
@@ -25,13 +27,22 @@ export default function Terminal() {
     signals, 
     loading: signalsLoading, 
     detecting,
-    runDetection, 
     dismissSignal, 
     executeSignal,
-    getFilteredSignals 
+    getFilteredSignals,
+    fetchSignals,
   } = useSignals();
   
   const { markets, loading: marketsLoading } = usePolymarket();
+  
+  const {
+    config: scanConfig,
+    status: scanStatus,
+    scanning,
+    runManualScan,
+    togglePause,
+    toggleTurboMode,
+  } = useScanConfig();
 
   // Auth check
   useEffect(() => {
@@ -59,6 +70,12 @@ export default function Terminal() {
     arbitrageApi.getSignalLogs(100).then(setLogs).catch(console.error);
   }, []);
 
+  // Handle scan completion - refresh signals
+  const handleManualScan = async () => {
+    await runManualScan();
+    await fetchSignals();
+  };
+
   const filteredSignals = getFilteredSignals({
     minEdge: minEdge > 0 ? minEdge : undefined,
     minConfidence: minConfidence > 0 ? minConfidence : undefined,
@@ -71,7 +88,7 @@ export default function Terminal() {
 
   return (
     <div className="min-h-screen bg-background">
-      <Header onRunDetection={runDetection} detecting={detecting} />
+      <Header onRunDetection={handleManualScan} detecting={scanning} />
       
       <main className="container py-6 space-y-6">
         {/* Stats Overview */}
@@ -90,7 +107,7 @@ export default function Terminal() {
         {/* Main Content */}
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
           {/* Signal Feed */}
-          <div className="lg:col-span-3">
+          <div className="lg:col-span-2">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold">Signal Feed</h2>
               <span className="text-sm text-muted-foreground">
@@ -105,10 +122,24 @@ export default function Terminal() {
             />
           </div>
 
-          {/* Polymarket Sidebar */}
-          <div className="hidden lg:block">
-            <h2 className="text-lg font-semibold mb-4">Polymarket</h2>
-            <MarketsSidebar markets={markets} loading={marketsLoading} />
+          {/* Right sidebar */}
+          <div className="lg:col-span-2 space-y-6">
+            {/* Scan Control Panel */}
+            <ScanControlPanel
+              config={scanConfig}
+              status={scanStatus}
+              scanning={scanning}
+              onManualScan={handleManualScan}
+              onTogglePause={togglePause}
+              onToggleTurbo={toggleTurboMode}
+              onOpenSettings={() => navigate('/settings')}
+            />
+            
+            {/* Polymarket Sidebar */}
+            <div>
+              <h2 className="text-lg font-semibold mb-4">Polymarket</h2>
+              <MarketsSidebar markets={markets} loading={marketsLoading} />
+            </div>
           </div>
         </div>
       </main>
