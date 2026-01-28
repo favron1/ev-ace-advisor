@@ -100,7 +100,7 @@ export default function Terminal() {
     await fetchSignals();
   }, [runActiveModePoll, fetchSignals]);
 
-  // Auto-polling hook
+  // Auto-polling hook with News Spike Mode
   const {
     isEnabled: autoPollingEnabled,
     isRunning: autoPollingRunning,
@@ -108,6 +108,11 @@ export default function Terminal() {
     activeCountdown,
     pollsToday,
     toggle: toggleAutoPolling,
+    triggerNewsSpike,
+    newsSpikeActive,
+    spikeCountdown,
+    cooldownActive,
+    cooldownCountdown,
   } = useAutoPolling({
     onWatchPoll: handleWatchModePoll,
     onActivePoll: handleActiveModePoll,
@@ -232,6 +237,12 @@ export default function Terminal() {
               watchPolling={watchPolling}
               watchingCount={totalWatching}
               activeCount={totalActive}
+              // News Spike Mode props
+              onTriggerNewsSpike={triggerNewsSpike}
+              newsSpikeActive={newsSpikeActive}
+              spikeCountdown={spikeCountdown}
+              cooldownActive={cooldownActive}
+              cooldownCountdown={cooldownCountdown}
             />
             
             {/* Polymarket Sidebar */}
