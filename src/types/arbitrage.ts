@@ -102,6 +102,7 @@ export interface OddsMovement {
 export interface SignalDetectionResult {
   opportunities: SignalOpportunity[];
   movements_detected: number;
+  outright_signals?: number;
   polymarkets_analyzed: number;
   signals_surfaced: number;
   timestamp: string;
