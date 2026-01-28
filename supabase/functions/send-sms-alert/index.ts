@@ -1,9 +1,49 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
+
+interface SmsAlertRequest {
+  to: string;
+  message: string;
+  // Enhanced alert fields (optional)
+  event_name?: string;
+  market?: string;
+  poly_price?: number;
+  poly_volume?: number;
+  bookmaker_fair_prob?: number;
+  raw_edge?: number;
+  net_edge?: number;
+  stake_amount?: number;
+  time_until_start?: string;
+}
+
+// Build enhanced message if structured data is provided
+function buildEnhancedMessage(req: SmsAlertRequest): string {
+  // If a custom message is provided, use it directly
+  if (req.message && !req.event_name) {
+    return req.message;
+  }
+  
+  // Build structured alert if we have the data
+  if (req.event_name && req.poly_price !== undefined && req.bookmaker_fair_prob !== undefined) {
+    const volume = req.poly_volume ? `$${(req.poly_volume / 1000).toFixed(0)}K vol` : '';
+    const netEv = req.net_edge && req.stake_amount 
+      ? `+$${(req.net_edge * req.stake_amount / 100).toFixed(2)}`
+      : '';
+    
+    return `🎯 EDGE DETECTED: ${req.event_name}
+Market: ${req.market || 'H2H'}
+Polymarket: ${(req.poly_price * 100).toFixed(0)}¢ ${volume ? `(${volume})` : ''}
+Bookmaker Fair: ${(req.bookmaker_fair_prob * 100).toFixed(0)}%
+Raw Edge: +${req.raw_edge?.toFixed(1) || '0'}%
+${netEv ? `Net EV: ${netEv} on $${req.stake_amount} stake` : ''}
+${req.time_until_start ? `Time: ${req.time_until_start} until start` : ''}
+ACT NOW - window may close`.trim();
+  }
+  
+  return req.message;
+}
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -14,10 +54,18 @@ Deno.serve(async (req) => {
   console.log('[SEND-SMS-ALERT] Processing SMS request...');
 
   try {
-    const { to, message } = await req.json();
+    const requestData: SmsAlertRequest = await req.json();
+    const { to } = requestData;
     
-    if (!to || !message) {
-      throw new Error('Missing required fields: to, message');
+    if (!to) {
+      throw new Error('Missing required field: to');
+    }
+
+    // Build message (enhanced or custom)
+    const message = buildEnhancedMessage(requestData);
+    
+    if (!message) {
+      throw new Error('Missing required field: message');
     }
 
     // Validate E.164 format
@@ -35,6 +83,7 @@ Deno.serve(async (req) => {
     }
 
     console.log(`[SEND-SMS-ALERT] Sending SMS to ${to.substring(0, 5)}...`);
+    console.log(`[SEND-SMS-ALERT] Message length: ${message.length} chars`);
 
     const url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
     

@@ -23,3 +23,12 @@ verify_jwt = false
 
 [functions.polymarket-first-scan]
 verify_jwt = false
+
+[functions.send-sms-alert]
+verify_jwt = false
+
+[functions.polymarket-sync-24h]
+verify_jwt = false
+
+[functions.polymarket-monitor]
+verify_jwt = false
