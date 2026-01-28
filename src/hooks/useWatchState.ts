@@ -18,6 +18,12 @@ export function useWatchState(options?: UseWatchStateOptions) {
   // Track previous confirmed IDs for notification detection
   const previousConfirmedIdsRef = useRef<Set<string>>(new Set());
 
+  // Store callback in ref to avoid dependency issues that cause infinite loops
+  const onNewConfirmedRef = useRef(options?.onNewConfirmed);
+  useEffect(() => {
+    onNewConfirmedRef.current = options?.onNewConfirmed;
+  }, [options?.onNewConfirmed]);
+
   const fetchWatchStates = useCallback(async () => {
     try {
       const { data, error } = await supabase
@@ -35,14 +41,12 @@ export function useWatchState(options?: UseWatchStateOptions) {
       const newConfirmed = events.filter(e => e.watch_state === 'confirmed' || e.watch_state === 'signal');
       setConfirmedEvents(newConfirmed);
 
-      // Check for new confirmed events and trigger callback
-      if (options?.onNewConfirmed) {
-        const previousIds = previousConfirmedIdsRef.current;
-        const newlyConfirmed = newConfirmed.filter(e => !previousIds.has(e.id));
-        
-        if (newlyConfirmed.length > 0) {
-          options.onNewConfirmed(newlyConfirmed);
-        }
+      // Check for new confirmed events and trigger callback via ref
+      const previousIds = previousConfirmedIdsRef.current;
+      const newlyConfirmed = newConfirmed.filter(e => !previousIds.has(e.id));
+      
+      if (newlyConfirmed.length > 0 && onNewConfirmedRef.current) {
+        onNewConfirmedRef.current(newlyConfirmed);
       }
 
       // Update previous IDs ref
@@ -52,7 +56,7 @@ export function useWatchState(options?: UseWatchStateOptions) {
     } finally {
       setLoading(false);
     }
-  }, [options]);
+  }, []); // No dependencies - stable reference
 
   // Run Watch Mode poll
   const runWatchModePoll = useCallback(async () => {
