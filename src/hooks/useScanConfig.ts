@@ -153,19 +153,16 @@ export function useScanConfig() {
     setStatus(prev => ({ ...prev, isScanning: true }));
 
     try {
-      // Run the full pipeline
-      toast({ title: 'Scanning...', description: 'Fetching latest odds data' });
+      // Run bookmaker scan only - Polymarket is fetched per-event in active-mode-poll
+      toast({ title: 'Scanning...', description: 'Fetching latest bookmaker odds' });
       
-      const [polyResult, oddsResult] = await Promise.all([
-        supabase.functions.invoke('fetch-polymarket', { body: {} }),
-        supabase.functions.invoke('ingest-odds', { 
-          body: { 
-            eventHorizonHours: config.event_horizon_hours,
-            sharpBookWeighting: config.sharp_book_weighting_enabled,
-            sharpBookWeight: config.sharp_book_weight,
-          } 
-        }),
-      ]);
+      const oddsResult = await supabase.functions.invoke('ingest-odds', { 
+        body: { 
+          eventHorizonHours: config.event_horizon_hours,
+          sharpBookWeighting: config.sharp_book_weighting_enabled,
+          sharpBookWeight: config.sharp_book_weight,
+        } 
+      });
 
       // Run detection
       const { data: detectResult, error: detectError } = await supabase.functions.invoke('detect-signals', {

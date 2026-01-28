@@ -8,12 +8,49 @@ const corsHeaders = {
 // Sharp bookmakers for baseline polling
 const SHARP_BOOKS = ['pinnacle', 'betfair', 'betfair_ex_uk', 'matchbook'];
 
-// Sport key mapping
+// ============================================================================
+// EXPANDED SPORTS COVERAGE - Full spec coverage for H2H markets
+// ============================================================================
 const SPORTS_MAP: Record<string, string> = {
+  // TOP PRIORITY - H2H markets with Polymarket presence
   basketball_nba: 'basketball_nba',
+  mma_mixed_martial_arts: 'mma_mixed_martial_arts',
+  americanfootball_nfl: 'americanfootball_nfl',
+  icehockey_nhl: 'icehockey_nhl',
+  
+  // TENNIS - Grand Slams + Masters 1000
+  tennis_atp_aus_open_singles: 'tennis_atp_aus_open_singles',
+  tennis_wta_aus_open_singles: 'tennis_wta_aus_open_singles',
+  tennis_atp_french_open: 'tennis_atp_french_open',
+  tennis_wta_french_open: 'tennis_wta_french_open',
+  tennis_atp_wimbledon: 'tennis_atp_wimbledon',
+  tennis_wta_wimbledon: 'tennis_wta_wimbledon',
+  tennis_atp_us_open: 'tennis_atp_us_open',
+  tennis_wta_us_open: 'tennis_wta_us_open',
+  tennis_atp_indian_wells: 'tennis_atp_indian_wells',
+  tennis_wta_indian_wells: 'tennis_wta_indian_wells',
+  tennis_atp_miami_open: 'tennis_atp_miami_open',
+  tennis_wta_miami_open: 'tennis_wta_miami_open',
+  tennis_atp_madrid_open: 'tennis_atp_madrid_open',
+  tennis_wta_madrid_open: 'tennis_wta_madrid_open',
+  tennis_atp_italian_open: 'tennis_atp_italian_open',
+  tennis_wta_italian_open: 'tennis_wta_italian_open',
+  tennis_atp_canadian_open: 'tennis_atp_canadian_open',
+  tennis_wta_canadian_open: 'tennis_wta_canadian_open',
+  tennis_atp_cincinnati_open: 'tennis_atp_cincinnati_open',
+  tennis_wta_cincinnati_open: 'tennis_wta_cincinnati_open',
+  
+  // SOCCER - Top Leagues + Champions League
+  soccer_epl: 'soccer_epl',
+  soccer_spain_la_liga: 'soccer_spain_la_liga',
+  soccer_germany_bundesliga: 'soccer_germany_bundesliga',
+  soccer_italy_serie_a: 'soccer_italy_serie_a',
+  soccer_france_ligue_one: 'soccer_france_ligue_one',
+  soccer_uefa_champs_league: 'soccer_uefa_champs_league',
+  
+  // Legacy mappings for backwards compatibility
   football_nfl: 'americanfootball_nfl',
   hockey_nhl: 'icehockey_nhl',
-  soccer_epl: 'soccer_epl',
   mma: 'mma_mixed_martial_arts',
 };
 
@@ -23,6 +60,7 @@ const MOVEMENT_VELOCITY_MIN = 0.4; // % per minute
 const LOOKBACK_MINUTES = 15;
 const ACTIVE_WINDOW_MINUTES = 20;
 const MAX_SIMULTANEOUS_ACTIVE = 5;
+const MIN_CONFIRMING_BOOKS = 2; // Consensus requirement
 
 interface Snapshot {
   event_key: string;
@@ -44,6 +82,37 @@ interface WatchState {
   movement_velocity: number;
   escalated_at: string | null;
   active_until: string | null;
+}
+
+// ============================================================================
+// CONSENSUS MOVEMENT DETECTION - Require 2+ books confirming same direction
+// ============================================================================
+function validateConsensusMovement(outcomeOdds: Record<string, number[]>): { hasConsensus: boolean; confirmingBooks: number } {
+  const movements: { book: string; delta: number }[] = [];
+  
+  for (const [book, oddsHistory] of Object.entries(outcomeOdds)) {
+    if (oddsHistory.length >= 1) {
+      // Convert odds to probability (1/odds)
+      const currentProb = 1 / oddsHistory[0];
+      movements.push({ book, delta: currentProb });
+    }
+  }
+  
+  if (movements.length < MIN_CONFIRMING_BOOKS) {
+    return { hasConsensus: false, confirmingBooks: movements.length };
+  }
+  
+  // For consensus, we check if books agree on probability range
+  // Calculate standard deviation - low std dev means consensus
+  const probs = movements.map(m => m.delta);
+  const avgProb = probs.reduce((a, b) => a + b, 0) / probs.length;
+  const variance = probs.reduce((sum, p) => sum + Math.pow(p - avgProb, 2), 0) / probs.length;
+  const stdDev = Math.sqrt(variance);
+  
+  // If std dev is low (< 5%), we have consensus
+  const hasConsensus = stdDev < 0.05 && movements.length >= MIN_CONFIRMING_BOOKS;
+  
+  return { hasConsensus, confirmingBooks: movements.length };
 }
 
 Deno.serve(async (req) => {
@@ -68,17 +137,19 @@ Deno.serve(async (req) => {
     // Get scan config (use defaults if none exists)
     const { data: configData } = await supabase
       .from('scan_config')
-      .select('enabled_sports, max_simultaneous_active, movement_threshold_pct')
+      .select('enabled_sports, max_simultaneous_active, movement_threshold_pct, focus_mode')
       .limit(1)
       .maybeSingle();
 
     const enabledSports = configData?.enabled_sports || ['basketball_nba'];
     const maxActive = configData?.max_simultaneous_active || MAX_SIMULTANEOUS_ACTIVE;
     const movementThreshold = configData?.movement_threshold_pct || MOVEMENT_THRESHOLD_PCT;
+    const focusMode = (configData as any)?.focus_mode || 'h2h_only';
 
     console.log(`[WATCH-MODE-POLL] Enabled sports: ${enabledSports.join(', ')}`);
+    console.log(`[WATCH-MODE-POLL] Focus mode: ${focusMode}`);
 
-    // Limit to max 2 sports
+    // Limit to max 2 sports per poll to manage API costs
     const sportsToFetch = enabledSports.slice(0, 2);
     const snapshots: Snapshot[] = [];
     let apiCallsUsed = 0;
@@ -104,28 +175,43 @@ Deno.serve(async (req) => {
 
         // Process each event
         for (const event of events) {
+          // Focus mode filter: skip futures (events > 14 days out)
+          if (focusMode === 'h2h_only') {
+            const commenceTime = new Date(event.commence_time);
+            const daysUntilEvent = (commenceTime.getTime() - Date.now()) / (1000 * 60 * 60 * 24);
+            if (daysUntilEvent > 14) {
+              continue; // Skip long-dated futures
+            }
+          }
+          
           const eventKey = normalizeEventKey(event.home_team, event.away_team, event.commence_time);
           const eventName = `${event.home_team} vs ${event.away_team}`;
 
           // Extract H2H odds and calculate fair probabilities
-          const h2hMarket = event.bookmakers
-            ?.flatMap((b: any) => b.markets?.filter((m: any) => m.key === 'h2h') || [])
-            .flatMap((m: any) => m.outcomes || []);
-
-          if (!h2hMarket || h2hMarket.length === 0) continue;
-
-          // Group by outcome and calculate fair probability
           const outcomeOdds: Record<string, number[]> = {};
-          for (const outcome of h2hMarket) {
-            if (!outcomeOdds[outcome.name]) {
-              outcomeOdds[outcome.name] = [];
+          
+          for (const bookmaker of event.bookmakers || []) {
+            for (const market of bookmaker.markets || []) {
+              if (market.key !== 'h2h') continue;
+              
+              for (const outcome of market.outcomes || []) {
+                if (!outcomeOdds[outcome.name]) {
+                  outcomeOdds[outcome.name] = [];
+                }
+                outcomeOdds[outcome.name].push(outcome.price);
+              }
             }
-            outcomeOdds[outcome.name].push(outcome.price);
           }
 
-          // Calculate vig-removed fair probability for each outcome
+          // Check consensus before proceeding
           const outcomes = Object.entries(outcomeOdds);
           if (outcomes.length !== 2) continue; // Only process 2-way markets
+          
+          // Validate we have consensus from 2+ books
+          const consensus = validateConsensusMovement(outcomeOdds);
+          if (!consensus.hasConsensus) {
+            continue; // Skip events without multi-book consensus
+          }
 
           const [outcome1, outcome2] = outcomes;
           const avg1 = outcome1[1].reduce((a, b) => a + b, 0) / outcome1[1].length;

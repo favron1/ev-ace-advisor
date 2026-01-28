@@ -30,12 +30,10 @@ export function useSignals() {
       setDetecting(true);
       
       // First, refresh data sources
-      toast({ title: 'Refreshing data sources...' });
+      toast({ title: 'Refreshing bookmaker data...' });
       
-      await Promise.all([
-        supabase.functions.invoke('fetch-polymarket', { body: {} }),
-        supabase.functions.invoke('ingest-odds', { body: {} }),
-      ]);
+      // Only fetch bookmaker odds - Polymarket is fetched per-event in active-mode-poll
+      await supabase.functions.invoke('ingest-odds', { body: {} });
       
       // Then run detection
       const result = await arbitrageApi.runSignalDetection();

@@ -5,13 +5,16 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Confirmation thresholds
+// ============================================================================
+// QUALITY THRESHOLDS - Professional trading standards
+// ============================================================================
 const HOLD_WINDOW_MINUTES = 3;
 const SAMPLES_REQUIRED = 2;
 const REVERSION_THRESHOLD_PCT = 1.5;
 const MIN_EDGE_PCT = 2.0;
-const MATCH_THRESHOLD = 0.75;
-const MIN_VOLUME = 2000;
+const MATCH_THRESHOLD = 0.85;      // 85% match confidence required
+const MIN_VOLUME = 10000;          // $10K minimum volume
+const MAX_STALENESS_HOURS = 2;     // Reject markets older than 2h
 
 // Team alias mapping for better Polymarket matching
 const TEAM_ALIASES: Record<string, string[]> = {
@@ -58,6 +61,7 @@ interface PolymarketMatch {
   no_price: number;
   volume: number;
   confidence: number;
+  last_updated: string;  // Track staleness
 }
 
 // ============================================================================
@@ -95,7 +99,7 @@ async function fetchPolymarketForEvent(eventName: string, outcome: string): Prom
       // Find best matching market
       const match = findBestMatch(eventName, outcome, events);
       if (match && match.confidence >= MATCH_THRESHOLD) {
-        console.log(`[POLY-FETCH] Found match: ${match.question} (conf: ${(match.confidence * 100).toFixed(0)}%)`);
+        console.log(`[POLY-FETCH] Found match: ${match.question} (conf: ${(match.confidence * 100).toFixed(0)}%, vol: $${match.volume.toFixed(0)})`);
         return match;
       }
     }
@@ -163,9 +167,21 @@ function findBestMatch(eventName: string, outcome: string, events: any[]): Polym
       // Skip closed or inactive markets
       if (market.closed || !market.active) continue;
       
-      // Skip low volume markets
+      // Skip low volume markets (professional standard: $10K minimum)
       const volume = parseFloat(market.volume) || 0;
-      if (volume < MIN_VOLUME) continue;
+      if (volume < MIN_VOLUME) {
+        continue;
+      }
+      
+      // Check staleness - reject markets older than 2 hours
+      const lastUpdated = market.lastUpdateTimestamp || market.updatedAt || market.lastTradeTimestamp;
+      if (lastUpdated) {
+        const hoursSinceUpdate = (Date.now() - new Date(lastUpdated).getTime()) / (1000 * 60 * 60);
+        if (hoursSinceUpdate > MAX_STALENESS_HOURS) {
+          console.log(`[POLY-FETCH] Skipping stale market: ${market.question?.substring(0, 50)} (${hoursSinceUpdate.toFixed(1)}h old)`);
+          continue;
+        }
+      }
       
       // Parse prices
       let yesPrice = 0.5;
@@ -207,6 +223,7 @@ function findBestMatch(eventName: string, outcome: string, events: any[]): Polym
           no_price: noPrice,
           volume: volume,
           confidence: confidence,
+          last_updated: lastUpdated || new Date().toISOString(),
         };
       }
     }
@@ -420,6 +437,9 @@ Deno.serve(async (req) => {
       dropped: 0,
       continued: 0,
       polymarket_calls: 0,
+      rejected_stale: 0,
+      rejected_low_volume: 0,
+      rejected_low_confidence: 0,
     };
 
     for (const event of activeEvents as WatchState[]) {
@@ -484,7 +504,24 @@ Deno.serve(async (req) => {
           const match = await fetchPolymarketForEvent(event.event_name, snapshots[0].outcome);
           results.polymarket_calls++;
           
-          if (match && match.confidence >= MATCH_THRESHOLD) {
+          if (match) {
+            // Check quality filters
+            if (match.confidence < MATCH_THRESHOLD) {
+              console.log(`[ACTIVE-MODE-POLL] Match confidence too low (${(match.confidence * 100).toFixed(0)}%) for: ${event.event_name}`);
+              results.rejected_low_confidence++;
+              await transitionToSignalOnly(supabase, event, currentProb, holdDurationMinutes);
+              results.signalOnly++;
+              continue;
+            }
+            
+            if (match.volume < MIN_VOLUME) {
+              console.log(`[ACTIVE-MODE-POLL] Volume too low ($${match.volume.toFixed(0)}) for: ${event.event_name}`);
+              results.rejected_low_volume++;
+              await transitionToSignalOnly(supabase, event, currentProb, holdDurationMinutes);
+              results.signalOnly++;
+              continue;
+            }
+            
             // Calculate edge using LIVE Polymarket price
             const bookmakerProb = currentProb;
             const polyPrice = match.yes_price;
@@ -496,7 +533,7 @@ Deno.serve(async (req) => {
               // Send SMS alert
               await sendSmsAlert(supabase, event, edgePct, polyPrice);
               
-              // Create signal opportunity
+              // Create signal opportunity with enhanced data
               await supabase.from('signal_opportunities').insert({
                 event_name: event.event_name,
                 recommended_outcome: snapshots[0].outcome,
@@ -505,6 +542,7 @@ Deno.serve(async (req) => {
                 polymarket_price: polyPrice,
                 polymarket_yes_price: polyPrice,
                 polymarket_volume: match.volume,
+                polymarket_updated_at: match.last_updated,
                 bookmaker_probability: bookmakerProb,
                 bookmaker_prob_fair: bookmakerProb,
                 edge_percent: edgePct,
