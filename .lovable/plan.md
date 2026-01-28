@@ -1,101 +1,87 @@
 
-# Fix: Auto-Polling Intervals Keep Resetting (Never Fire)
+# Plan: Enable Championship Futures Arbitrage Matching
 
-## Problem Identified
+## Problem Summary
 
-The auto-polling system has a **perpetual reset bug** - the 5-minute Watch Poll timer is being reset every time any state changes, so it never actually reaches zero and fires.
+Your system has all the data needed for sports arbitrage, but **detect-signals only processes H2H markets**:
 
-## Root Cause
+| Data Source | What You Have | What's Matchable |
+|-------------|---------------|------------------|
+| Bookmaker Outrights | 496 signals (e.g., "NBA Championship Winner: Denver Nuggets" @ 13%) | **These can match Polymarket** |
+| Bookmaker H2H | 437 signals (e.g., "Jazz vs Warriors") | No Polymarket equivalent |
+| Polymarket Sports | 364 markets (e.g., "Will the Denver Nuggets win the 2026 NBA Finals?") | Championship futures only |
 
-In `useAutoPolling.ts`, line 175:
-```typescript
-}, [state.isEnabled, watchIntervalMs, activeIntervalMs, activeCount, runWatchPollSafe, runActivePollSafe]);
+The fix is to update `detect-signals` to also process **outright markets** with championship-specific matching logic.
+
+## Solution Overview
+
+Add a second processing pipeline in `detect-signals/index.ts` that:
+1. Fetches outright bookmaker signals (currently ignored)
+2. Uses specialized matching logic for championship questions
+3. Compares bookmaker fair probability vs Polymarket price
+4. Surfaces true arbitrage opportunities
+
+## Implementation Details
+
+### File: `supabase/functions/detect-signals/index.ts`
+
+**Change 1: Fetch outrights alongside H2H**
+
+Add a third parallel fetch for outright signals:
+```
+bookmaker_signals?market_type=eq.outrights
 ```
 
-The `runWatchPollSafe` and `runActivePollSafe` callbacks are dependencies of the interval setup effect. But these callbacks depend on `state.pollsToday`, `dailyUsagePercent`, and other values that change. Every time these values change:
+**Change 2: Add championship-specific team extraction**
 
-1. The callbacks get recreated
-2. The effect runs again (because dependencies changed)
-3. Old intervals are cleared
-4. New intervals are created - **resetting the countdown**
-5. Timer never reaches zero
-
-## Solution
-
-Store the poll functions in refs so they can be called with the latest values without being dependencies of the interval effect:
-
-### Changes to `useAutoPolling.ts`
-
-```text
-1. Create refs to store the latest poll functions:
-   const onWatchPollRef = useRef(onWatchPoll);
-   const onActivePollRef = useRef(onActivePoll);
-   
-   // Keep refs updated
-   useEffect(() => {
-     onWatchPollRef.current = onWatchPoll;
-     onActivePollRef.current = onActivePoll;
-   }, [onWatchPoll, onActivePoll]);
-
-2. Create refs for safeguard values:
-   const dailyUsagePercentRef = useRef(dailyUsagePercent);
-   const isPausedRef = useRef(isPaused);
-   const activeCountRef = useRef(activeCount);
-   
-   // Keep updated
-   useEffect(() => {
-     dailyUsagePercentRef.current = dailyUsagePercent;
-     isPausedRef.current = isPaused;
-     activeCountRef.current = activeCount;
-   }, [dailyUsagePercent, isPaused, activeCount]);
-
-3. Simplify poll functions to use refs (no dependencies):
-   const runWatchPollSafe = useCallback(async () => {
-     if (isPollingRef.current) return;
-     if (dailyUsagePercentRef.current > 90) return;
-     if (isPausedRef.current) return;
-     
-     isPollingRef.current = true;
-     setState(s => ({ ...s, isRunning: true }));
-     
-     try {
-       await onWatchPollRef.current();
-       // ... rest of logic
-     } finally {
-       isPollingRef.current = false;
-       // ...
-     }
-   }, [watchIntervalMs]); // Minimal stable dependencies
-
-4. Remove callback dependencies from interval effect:
-   useEffect(() => {
-     if (!state.isEnabled) { ... }
-     
-     watchIntervalRef.current = setInterval(runWatchPollSafe, watchIntervalMs);
-     // ...
-     
-     return () => { ... };
-   }, [state.isEnabled, watchIntervalMs, activeIntervalMs, activeCount]);
-   // Note: runWatchPollSafe removed from dependencies
+Create a function to extract team names from outright event names:
+```
+"NBA Championship Winner: Denver Nuggets" → "Denver Nuggets"
+"EPL Winner: Manchester City" → "Manchester City"
 ```
 
-## Why This Fixes It
+**Change 3: Add championship question matching**
 
-| Before | After |
-|--------|-------|
-| Poll function changes → effect re-runs → interval resets | Poll function refs stay stable → effect only runs when truly needed |
-| Timer resets every second | Timer runs uninterrupted for full 5 minutes |
-| Poll never fires | Poll fires on schedule |
+Create a new matching function that:
+- Parses Polymarket questions like "Will the Denver Nuggets win the 2026 NBA Finals?"
+- Extracts the team name
+- Matches against bookmaker outright team names
+- Returns the YES price as the comparison point
+
+**Change 4: Process outrights loop**
+
+Add a second processing loop after the H2H loop that:
+- Iterates through outright signals
+- Matches against championship Polymarket markets
+- Calculates edge as: `bookmaker_prob - polymarket_yes_price`
+- Creates opportunities with `is_true_arbitrage: true` when matched
+
+### Example Match Flow
+
+```
+Bookmaker Signal:
+  event_name: "NBA Championship Winner: Denver Nuggets"
+  implied_probability: 0.13 (13%)
+
+Polymarket Market:
+  question: "Will the Denver Nuggets win the 2026 NBA Finals?"
+  yes_price: 0.08 (8%)
+
+Result:
+  edge_percent: 5% (13% - 8%)
+  is_true_arbitrage: true
+  side: YES
+```
 
 ## Files to Modify
 
 | File | Changes |
 |------|---------|
-| `src/hooks/useAutoPolling.ts` | Use refs for callbacks and safeguard values to stabilize the interval setup effect |
+| `supabase/functions/detect-signals/index.ts` | Add outright fetching, championship matching logic, and processing loop |
 
-## Expected Behavior After Fix
+## Expected Outcome
 
-- Watch Poll: Fires every 5 minutes consistently
-- Active Poll: Fires every 60 seconds when active events exist
-- Countdown timers: Count down smoothly without resetting
-- Safeguards: Still work (API limit check, pause check) via refs
+After implementation:
+- True arbitrage signals when bookmaker championship odds exceed Polymarket prices
+- Example: Denver Nuggets at 13% bookmaker vs 8% Polymarket = 5% edge opportunity
+- Signals properly labeled as `is_true_arbitrage: true` with real edge percentages
