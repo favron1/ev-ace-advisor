@@ -134,7 +134,7 @@ export function useScanConfig() {
     }
   }, [config]);
 
-  // Run a manual scan
+  // Run a manual scan - discovers Polymarket events then checks for edges
   const runManualScan = useCallback(async (): Promise<AdaptiveScanResult | null> => {
     if (scanning) return null;
     if (!config) return null;
@@ -153,29 +153,46 @@ export function useScanConfig() {
     setStatus(prev => ({ ...prev, isScanning: true }));
 
     try {
-      // Run bookmaker scan only - Polymarket is fetched per-event in active-mode-poll
-      toast({ title: 'Scanning...', description: 'Fetching latest bookmaker odds' });
+      // Step 1: Sync all Polymarket sports events within 24h
+      toast({ title: 'Discovering markets...', description: 'Scanning Polymarket for sports events' });
       
-      const oddsResult = await supabase.functions.invoke('ingest-odds', { 
-        body: { 
-          eventHorizonHours: config.event_horizon_hours,
-          sharpBookWeighting: config.sharp_book_weighting_enabled,
-          sharpBookWeight: config.sharp_book_weight,
-        } 
+      const { data: syncResult, error: syncError } = await supabase.functions.invoke('polymarket-sync-24h');
+      
+      if (syncError) {
+        console.error('Sync error:', syncError);
+        toast({
+          title: 'Sync Failed',
+          description: syncError.message || 'Failed to sync Polymarket events',
+          variant: 'destructive',
+        });
+        throw syncError;
+      }
+
+      console.log('Sync result:', syncResult);
+      
+      const eventsFound = syncResult?.qualifying_events || 0;
+      toast({ 
+        title: `Found ${eventsFound} events`, 
+        description: 'Now checking for edges against bookmakers...' 
       });
 
-      // Run detection
-      const { data: detectResult, error: detectError } = await supabase.functions.invoke('detect-signals', {
-        body: {
-          eventHorizonHours: config.event_horizon_hours,
-          minEventHorizonHours: config.min_event_horizon_hours,
-        }
-      });
+      // Step 2: Run monitor to check for edges
+      const { data: monitorResult, error: monitorError } = await supabase.functions.invoke('polymarket-monitor');
+      
+      if (monitorError) {
+        console.error('Monitor error:', monitorError);
+        toast({
+          title: 'Monitor Failed',
+          description: monitorError.message || 'Failed to check for edges',
+          variant: 'destructive',
+        });
+        throw monitorError;
+      }
 
-      if (detectError) throw detectError;
+      console.log('Monitor result:', monitorResult);
 
       // Update usage counters
-      const requestsUsed = 12; // Approximate: 10 sport endpoints + 2 functions
+      const requestsUsed = 15; // Approximate: sync + monitor + API calls
       await updateConfig({
         daily_requests_used: config.daily_requests_used + requestsUsed,
         monthly_requests_used: config.monthly_requests_used + requestsUsed,
@@ -185,16 +202,19 @@ export function useScanConfig() {
 
       const result: AdaptiveScanResult = {
         scanType: 'manual',
-        eventsScanned: detectResult?.polymarkets_analyzed || 0,
-        signalsDetected: detectResult?.signals_surfaced || 0,
+        eventsScanned: eventsFound,
+        signalsDetected: monitorResult?.edges_found || 0,
         apiRequestsUsed: requestsUsed,
-        nearTermEvents: 0,
+        nearTermEvents: monitorResult?.events_matched || 0,
         timestamp: new Date().toISOString(),
       };
 
+      const edgesFound = monitorResult?.edges_found || 0;
+      const matched = monitorResult?.events_matched || 0;
+      
       toast({
         title: 'Scan Complete',
-        description: `Found ${result.signalsDetected} signals from ${result.eventsScanned} markets`,
+        description: `${eventsFound} markets scanned, ${matched} matched to bookmakers, ${edgesFound} edges detected`,
       });
 
       return result;
