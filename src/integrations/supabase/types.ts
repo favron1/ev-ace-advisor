@@ -110,6 +110,8 @@ export type Database = {
       event_watch_state: {
         Row: {
           active_until: string | null
+          bookmaker_market_key: string | null
+          bookmaker_source: string | null
           commence_time: string | null
           created_at: string | null
           current_probability: number | null
@@ -119,13 +121,18 @@ export type Database = {
           hold_start_at: string | null
           id: string
           initial_probability: number | null
+          last_poly_refresh: string | null
           movement_pct: number | null
           movement_velocity: number | null
           outcome: string | null
           peak_probability: number | null
+          polymarket_condition_id: string | null
           polymarket_market_id: string | null
           polymarket_matched: boolean | null
           polymarket_price: number | null
+          polymarket_question: string | null
+          polymarket_volume: number | null
+          polymarket_yes_price: number | null
           reverted: boolean | null
           samples_since_hold: number | null
           updated_at: string | null
@@ -133,6 +140,8 @@ export type Database = {
         }
         Insert: {
           active_until?: string | null
+          bookmaker_market_key?: string | null
+          bookmaker_source?: string | null
           commence_time?: string | null
           created_at?: string | null
           current_probability?: number | null
@@ -142,13 +151,18 @@ export type Database = {
           hold_start_at?: string | null
           id?: string
           initial_probability?: number | null
+          last_poly_refresh?: string | null
           movement_pct?: number | null
           movement_velocity?: number | null
           outcome?: string | null
           peak_probability?: number | null
+          polymarket_condition_id?: string | null
           polymarket_market_id?: string | null
           polymarket_matched?: boolean | null
           polymarket_price?: number | null
+          polymarket_question?: string | null
+          polymarket_volume?: number | null
+          polymarket_yes_price?: number | null
           reverted?: boolean | null
           samples_since_hold?: number | null
           updated_at?: string | null
@@ -156,6 +170,8 @@ export type Database = {
         }
         Update: {
           active_until?: string | null
+          bookmaker_market_key?: string | null
+          bookmaker_source?: string | null
           commence_time?: string | null
           created_at?: string | null
           current_probability?: number | null
@@ -165,13 +181,18 @@ export type Database = {
           hold_start_at?: string | null
           id?: string
           initial_probability?: number | null
+          last_poly_refresh?: string | null
           movement_pct?: number | null
           movement_velocity?: number | null
           outcome?: string | null
           peak_probability?: number | null
+          polymarket_condition_id?: string | null
           polymarket_market_id?: string | null
           polymarket_matched?: boolean | null
           polymarket_price?: number | null
+          polymarket_question?: string | null
+          polymarket_volume?: number | null
+          polymarket_yes_price?: number | null
           reverted?: boolean | null
           samples_since_hold?: number | null
           updated_at?: string | null
@@ -233,6 +254,9 @@ export type Database = {
           created_at: string | null
           event_date: string | null
           event_title: string
+          extracted_entity: string | null
+          extracted_league: string | null
+          extracted_threshold: number | null
           id: string
           last_bulk_sync: string | null
           last_price_update: string | null
@@ -254,6 +278,9 @@ export type Database = {
           created_at?: string | null
           event_date?: string | null
           event_title: string
+          extracted_entity?: string | null
+          extracted_league?: string | null
+          extracted_threshold?: number | null
           id?: string
           last_bulk_sync?: string | null
           last_price_update?: string | null
@@ -275,6 +302,9 @@ export type Database = {
           created_at?: string | null
           event_date?: string | null
           event_title?: string
+          extracted_entity?: string | null
+          extracted_league?: string | null
+          extracted_threshold?: number | null
           id?: string
           last_bulk_sync?: string | null
           last_price_update?: string | null
@@ -418,6 +448,7 @@ export type Database = {
           base_frequency_minutes: number
           created_at: string
           daily_requests_used: number
+          enabled_market_types: string[] | null
           enabled_sports: string[] | null
           event_horizon_hours: number
           focus_mode: string | null
@@ -429,9 +460,11 @@ export type Database = {
           max_monthly_requests: number
           max_simultaneous_active: number | null
           min_event_horizon_hours: number
+          min_poly_volume: number | null
           monthly_requests_used: number
           movement_threshold_pct: number | null
           next_scheduled_scan_at: string | null
+          poly_sync_interval_hours: number | null
           samples_required: number | null
           scanning_paused: boolean
           sharp_book_weight: number
@@ -450,6 +483,7 @@ export type Database = {
           base_frequency_minutes?: number
           created_at?: string
           daily_requests_used?: number
+          enabled_market_types?: string[] | null
           enabled_sports?: string[] | null
           event_horizon_hours?: number
           focus_mode?: string | null
@@ -461,9 +495,11 @@ export type Database = {
           max_monthly_requests?: number
           max_simultaneous_active?: number | null
           min_event_horizon_hours?: number
+          min_poly_volume?: number | null
           monthly_requests_used?: number
           movement_threshold_pct?: number | null
           next_scheduled_scan_at?: string | null
+          poly_sync_interval_hours?: number | null
           samples_required?: number | null
           scanning_paused?: boolean
           sharp_book_weight?: number
@@ -482,6 +518,7 @@ export type Database = {
           base_frequency_minutes?: number
           created_at?: string
           daily_requests_used?: number
+          enabled_market_types?: string[] | null
           enabled_sports?: string[] | null
           event_horizon_hours?: number
           focus_mode?: string | null
@@ -493,9 +530,11 @@ export type Database = {
           max_monthly_requests?: number
           max_simultaneous_active?: number | null
           min_event_horizon_hours?: number
+          min_poly_volume?: number | null
           monthly_requests_used?: number
           movement_threshold_pct?: number | null
           next_scheduled_scan_at?: string | null
+          poly_sync_interval_hours?: number | null
           samples_required?: number | null
           scanning_paused?: boolean
           sharp_book_weight?: number
