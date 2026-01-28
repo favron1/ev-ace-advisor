@@ -2,11 +2,11 @@ import { SignalCard } from './SignalCard';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import type { SignalOpportunity } from '@/types/arbitrage';
+import type { EnrichedSignal } from '@/types/arbitrage';
 import { Activity, RefreshCw } from 'lucide-react';
 
 interface SignalFeedProps {
-  signals: SignalOpportunity[];
+  signals: EnrichedSignal[];
   loading: boolean;
   refreshing?: boolean;
   onDismiss: (id: string) => void;

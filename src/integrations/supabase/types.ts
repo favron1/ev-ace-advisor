@@ -17,6 +17,7 @@ export type Database = {
       arbitrage_config: {
         Row: {
           created_at: string | null
+          default_stake_amount: number | null
           id: string
           max_exposure_per_event: number | null
           min_confidence: number | null
@@ -29,6 +30,7 @@ export type Database = {
         }
         Insert: {
           created_at?: string | null
+          default_stake_amount?: number | null
           id?: string
           max_exposure_per_event?: number | null
           min_confidence?: number | null
@@ -41,6 +43,7 @@ export type Database = {
         }
         Update: {
           created_at?: string | null
+          default_stake_amount?: number | null
           id?: string
           max_exposure_per_event?: number | null
           min_confidence?: number | null

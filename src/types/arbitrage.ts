@@ -116,3 +116,31 @@ export interface SignalDetectionResult {
   signals_surfaced: number;
   timestamp: string;
 }
+
+// Execution Decision Layer Types
+export interface ExecutionAnalysis {
+  // Raw edge (what we calculate now)
+  raw_edge_percent: number;
+  
+  // Estimated costs
+  platform_fee_percent: number;      // 1% on profits
+  estimated_spread_percent: number;  // Based on market liquidity
+  estimated_slippage_percent: number; // Based on stake vs order book
+  total_costs_percent: number;        // Sum of all costs
+  
+  // Net edge after costs
+  net_edge_percent: number;
+  
+  // Liquidity assessment
+  liquidity_tier: 'high' | 'medium' | 'low' | 'insufficient';
+  max_stake_without_impact: number;  // $ amount
+  
+  // Final decision
+  execution_decision: 'STRONG_BET' | 'BET' | 'MARGINAL' | 'NO_BET';
+  decision_reason: string;
+}
+
+// Extended SignalOpportunity with execution analysis attached
+export interface EnrichedSignal extends SignalOpportunity {
+  execution?: ExecutionAnalysis;
+}
