@@ -2,13 +2,23 @@ import { Activity, Settings, LogOut, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { supabase } from '@/integrations/supabase/client';
 import { useNavigate } from 'react-router-dom';
+import { cn } from '@/lib/utils';
 
 interface HeaderProps {
   onRunDetection?: () => void;
   detecting?: boolean;
+  hasUnviewedAlerts?: boolean;
+  unviewedCount?: number;
+  onAlertClick?: () => void;
 }
 
-export function Header({ onRunDetection, detecting }: HeaderProps) {
+export function Header({ 
+  onRunDetection, 
+  detecting, 
+  hasUnviewedAlerts = false,
+  unviewedCount = 0,
+  onAlertClick,
+}: HeaderProps) {
   const navigate = useNavigate();
 
   const handleLogout = async () => {
@@ -23,6 +33,25 @@ export function Header({ onRunDetection, detecting }: HeaderProps) {
           <div className="flex items-center gap-2">
             <Activity className="h-5 w-5 text-primary" />
             <span className="font-semibold text-lg tracking-tight">SIGNAL TERMINAL</span>
+            
+            {/* Alert Indicator */}
+            {hasUnviewedAlerts && (
+              <button
+                onClick={onAlertClick}
+                className="relative flex items-center gap-1 ml-2"
+                title={`${unviewedCount} new confirmed signal${unviewedCount > 1 ? 's' : ''}`}
+              >
+                <span className="relative flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-destructive opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-destructive"></span>
+                </span>
+                {unviewedCount > 0 && (
+                  <span className="text-xs font-bold text-destructive">
+                    {unviewedCount}
+                  </span>
+                )}
+              </button>
+            )}
           </div>
           <div className="hidden md:flex items-center gap-1 text-xs text-muted-foreground">
             <span className="px-2 py-0.5 rounded bg-primary/10 text-primary font-mono">PHASE 1</span>

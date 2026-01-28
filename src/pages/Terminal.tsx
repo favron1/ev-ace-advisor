@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '@/integrations/supabase/client';
 import { Header } from '@/components/terminal/Header';
@@ -7,12 +7,16 @@ import { StatsBar } from '@/components/terminal/StatsBar';
 import { FiltersBar } from '@/components/terminal/FiltersBar';
 import { MarketsSidebar } from '@/components/terminal/MarketsSidebar';
 import { ScanControlPanel } from '@/components/terminal/ScanControlPanel';
+import { AutomationPanel } from '@/components/terminal/AutomationPanel';
 import { useSignals } from '@/hooks/useSignals';
 import { usePolymarket } from '@/hooks/usePolymarket';
 import { useScanConfig } from '@/hooks/useScanConfig';
 import { useWatchState } from '@/hooks/useWatchState';
+import { useAutoPolling } from '@/hooks/useAutoPolling';
+import { useNotifications } from '@/hooks/useNotifications';
 import { arbitrageApi } from '@/lib/api/arbitrage';
 import type { SignalLog } from '@/types/arbitrage';
+import type { EventWatchState } from '@/types/scan-config';
 
 export default function Terminal() {
   const navigate = useNavigate();
@@ -24,6 +28,28 @@ export default function Terminal() {
   const [minConfidence, setMinConfidence] = useState(0);
   const [selectedUrgency, setSelectedUrgency] = useState<string[]>([]);
   const [showTrueEdgesOnly, setShowTrueEdgesOnly] = useState(false);
+
+  // Notifications hook
+  const {
+    enabled: notificationsEnabled,
+    permission: notificationPermission,
+    hasUnviewedConfirmed,
+    unviewedCount,
+    toggle: toggleNotifications,
+    notify,
+    markViewed,
+  } = useNotifications();
+
+  // Callback for when new confirmed events are detected
+  const handleNewConfirmed = useCallback((newEvents: EventWatchState[]) => {
+    for (const event of newEvents) {
+      const movement = event.movement_pct?.toFixed(1) || '0';
+      notify(
+        `🎯 EDGE DETECTED`,
+        `${event.event_name}\n+${movement}% movement confirmed. Execute now!`
+      );
+    }
+  }, [notify]);
 
   const { 
     signals, 
@@ -48,7 +74,7 @@ export default function Terminal() {
     toggleTurboMode,
   } = useScanConfig();
 
-  // Two-tier polling state
+  // Two-tier polling state with notification callback
   const {
     watchingEvents,
     activeEvents,
@@ -57,7 +83,38 @@ export default function Terminal() {
     runActiveModePoll,
     totalWatching,
     totalActive,
-  } = useWatchState();
+  } = useWatchState({ onNewConfirmed: handleNewConfirmed });
+
+  // Calculate daily usage percent for safeguards
+  const dailyUsagePercent = scanStatus.dailyRequestsUsed / scanStatus.dailyRequestsLimit * 100;
+
+  // Handle watch mode poll - also refresh signals after
+  const handleWatchModePoll = useCallback(async () => {
+    await runWatchModePoll();
+    await fetchSignals();
+  }, [runWatchModePoll, fetchSignals]);
+
+  // Handle active mode poll - also refresh signals after
+  const handleActiveModePoll = useCallback(async () => {
+    await runActiveModePoll();
+    await fetchSignals();
+  }, [runActiveModePoll, fetchSignals]);
+
+  // Auto-polling hook
+  const {
+    isEnabled: autoPollingEnabled,
+    isRunning: autoPollingRunning,
+    watchCountdown,
+    activeCountdown,
+    pollsToday,
+    toggle: toggleAutoPolling,
+  } = useAutoPolling({
+    onWatchPoll: handleWatchModePoll,
+    onActivePoll: handleActiveModePoll,
+    activeCount: totalActive,
+    dailyUsagePercent,
+    isPaused: scanStatus.isPaused,
+  });
 
   // Auth check
   useEffect(() => {
@@ -91,18 +148,6 @@ export default function Terminal() {
     await fetchSignals();
   };
 
-  // Handle watch mode poll - also refresh signals after
-  const handleWatchModePoll = async () => {
-    await runWatchModePoll();
-    await fetchSignals();
-  };
-
-  // Handle active mode poll - also refresh signals after
-  const handleActiveModePoll = async () => {
-    await runActiveModePoll();
-    await fetchSignals();
-  };
-
   const filteredSignals = getFilteredSignals({
     minEdge: minEdge > 0 ? minEdge : undefined,
     minConfidence: minConfidence > 0 ? minConfidence : undefined,
@@ -116,7 +161,13 @@ export default function Terminal() {
 
   return (
     <div className="min-h-screen bg-background">
-      <Header onRunDetection={handleManualScan} detecting={scanning} />
+      <Header 
+        onRunDetection={handleManualScan} 
+        detecting={scanning}
+        hasUnviewedAlerts={hasUnviewedConfirmed}
+        unviewedCount={unviewedCount}
+        onAlertClick={markViewed}
+      />
       
       <main className="container py-6 space-y-6">
         {/* Stats Overview */}
@@ -150,6 +201,23 @@ export default function Terminal() {
 
           {/* Right sidebar */}
           <div className="lg:col-span-2 space-y-6">
+            {/* Automation Panel - NEW */}
+            <AutomationPanel
+              autoPollingEnabled={autoPollingEnabled}
+              onToggleAutoPolling={toggleAutoPolling}
+              isPolling={autoPollingRunning || watchPolling}
+              watchCountdown={watchCountdown}
+              activeCountdown={activeCountdown}
+              pollsToday={pollsToday}
+              activeCount={totalActive}
+              notificationsEnabled={notificationsEnabled}
+              notificationPermission={notificationPermission}
+              onToggleNotifications={toggleNotifications}
+              hasUnviewedAlerts={hasUnviewedConfirmed}
+              dailyUsagePercent={dailyUsagePercent}
+              isPaused={scanStatus.isPaused}
+            />
+
             {/* Scan Control Panel */}
             <ScanControlPanel
               config={scanConfig}
