@@ -1,8 +1,7 @@
-import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle, Eye, Zap } from 'lucide-react';
+import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle, Eye, Zap, DollarSign, Timer } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import type { SignalOpportunity } from '@/types/arbitrage';
 import type { SignalState } from '@/types/scan-config';
@@ -33,6 +32,18 @@ function formatTimeAgo(dateStr: string | null | undefined): string {
   if (mins < 60) return `${mins}m ago`;
   const hours = Math.floor(mins / 60);
   return `${hours}h ago`;
+}
+
+// Check if Polymarket data is stale (>2h)
+function isStalePolymarket(dateStr: string | null | undefined): boolean {
+  if (!dateStr) return true;
+  const hours = (Date.now() - new Date(dateStr).getTime()) / (1000 * 60 * 60);
+  return hours > 2;
+}
+
+// Check if volume meets professional threshold
+function isLowVolume(volume: number | null | undefined): boolean {
+  return !volume || volume < 10000;
 }
 
 // State badge configuration
@@ -91,6 +102,10 @@ export function SignalCard({
   const polyVolume = (signal as any).polymarket_volume;
   const polyUpdatedAt = (signal as any).polymarket_updated_at;
   const polyYesPrice = (signal as any).polymarket_yes_price || signal.polymarket_price;
+  
+  // Quality checks
+  const isStale = isStalePolymarket(polyUpdatedAt);
+  const hasLowVolume = isLowVolume(polyVolume);
   
   // Determine display state
   const displayState = watchState || (isTrueArbitrage ? 'confirmed' : 'signal');
@@ -176,31 +191,60 @@ export function SignalCard({
               )}
             </p>
             
-            {/* True arbitrage detailed breakdown */}
+            {/* True arbitrage PROFESSIONAL trade display */}
             {isTrueArbitrage && (
-              <div className="text-xs space-y-1 mt-2 p-2 bg-green-500/10 rounded border border-green-500/20">
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Bookmaker Fair:</span>
-                  <span className="font-mono">{(bookmakerProbFair * 100).toFixed(1)}%</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Polymarket:</span>
-                  <span className="font-mono">{(polyYesPrice * 100).toFixed(0)}¢</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Match Conf:</span>
-                  <span className="font-mono">{matchConfidence ? `${(matchConfidence * 100).toFixed(0)}%` : 'N/A'}</span>
-                </div>
-                {polyVolume && (
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Volume:</span>
-                    <span className="font-mono">{formatVolume(polyVolume)}</span>
+              <div className="mt-3 p-3 bg-green-500/10 rounded-lg border border-green-500/30">
+                {/* Hero metrics row - trading terminal style */}
+                <div className="grid grid-cols-3 gap-4 mb-3">
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-green-400">
+                      {(polyYesPrice * 100).toFixed(0)}¢
+                    </div>
+                    <div className="text-xs text-muted-foreground">POLY YES</div>
                   </div>
-                )}
-                {polyUpdatedAt && (
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Updated:</span>
-                    <span className="font-mono">{formatTimeAgo(polyUpdatedAt)}</span>
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-foreground">
+                      {(bookmakerProbFair * 100).toFixed(0)}%
+                    </div>
+                    <div className="text-xs text-muted-foreground">FAIR VALUE</div>
+                  </div>
+                  <div className="text-center">
+                    <Badge className="bg-green-600 hover:bg-green-700 text-white text-lg px-3 py-1">
+                      +{signal.edge_percent.toFixed(1)}%
+                    </Badge>
+                    <div className="text-xs text-muted-foreground mt-1">EDGE</div>
+                  </div>
+                </div>
+                
+                {/* Quality indicators row */}
+                <div className="flex justify-between text-xs border-t border-green-500/20 pt-2">
+                  <span className={cn(
+                    "flex items-center gap-1",
+                    hasLowVolume ? 'text-orange-400' : 'text-green-400'
+                  )}>
+                    <DollarSign className="h-3 w-3" />
+                    {formatVolume(polyVolume)}
+                    {hasLowVolume && ' ⚠️'}
+                  </span>
+                  <span className="text-muted-foreground">
+                    Match: {matchConfidence ? `${(matchConfidence * 100).toFixed(0)}%` : 'N/A'}
+                  </span>
+                  <span className={cn(
+                    "flex items-center gap-1",
+                    isStale ? 'text-red-400' : 'text-green-400'
+                  )}>
+                    <Timer className="h-3 w-3" />
+                    {formatTimeAgo(polyUpdatedAt)}
+                    {isStale && ' ⚠️'}
+                  </span>
+                </div>
+                
+                {/* Warnings */}
+                {(isStale || hasLowVolume) && (
+                  <div className="mt-2 text-xs text-orange-400 flex items-center gap-1">
+                    <AlertCircle className="h-3 w-3" />
+                    {isStale && 'Stale price data. '}
+                    {hasLowVolume && 'Low liquidity.'}
                   </div>
                 )}
               </div>

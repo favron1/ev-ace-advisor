@@ -41,6 +41,9 @@ export interface ScanConfig {
   active_poll_interval_seconds: number;
   active_window_minutes: number;
   
+  // Focus mode for market filtering
+  focus_mode: FocusMode;
+  
   created_at: string;
   updated_at: string;
 }
