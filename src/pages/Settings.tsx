@@ -13,6 +13,7 @@ import { useToast } from '@/hooks/use-toast';
 import { arbitrageApi } from '@/lib/api/arbitrage';
 import { useScanConfig } from '@/hooks/useScanConfig';
 import { ScanSettingsPanel } from '@/components/terminal/ScanSettingsPanel';
+import { SmsNotificationSettings } from '@/components/settings/SmsNotificationSettings';
 import type { ArbitrageConfig } from '@/types/arbitrage';
 import type { ScanConfig } from '@/types/scan-config';
 
@@ -207,6 +208,8 @@ export default function Settings() {
                 </div>
               </CardContent>
             </Card>
+
+            {userId && <SmsNotificationSettings userId={userId} />}
           </TabsContent>
 
           <TabsContent value="risk" className="space-y-6">

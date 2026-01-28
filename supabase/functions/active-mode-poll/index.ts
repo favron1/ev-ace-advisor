@@ -166,6 +166,45 @@ Deno.serve(async (req) => {
             if (edgePct >= MIN_EDGE_PCT) {
               console.log(`[ACTIVE-MODE-POLL] CONFIRMED EDGE: ${event.event_name} - ${edgePct.toFixed(1)}%`);
               
+              // Send SMS alert
+              try {
+                const smsMessage = `🚨 EDGE DETECTED: ${event.event_name}\n+${edgePct.toFixed(1)}% edge. Poly: ${(polyPrice * 100).toFixed(0)}c. Execute now!`;
+                
+                // Get user phone from profiles (assumes single user for now)
+                const { data: profile } = await supabase
+                  .from('profiles')
+                  .select('phone_number')
+                  .not('phone_number', 'is', null)
+                  .limit(1)
+                  .maybeSingle();
+                  
+                if (profile?.phone_number) {
+                  const smsResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/send-sms-alert`, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+                    },
+                    body: JSON.stringify({
+                      to: profile.phone_number,
+                      message: smsMessage,
+                    }),
+                  });
+                  
+                  if (smsResponse.ok) {
+                    console.log(`[ACTIVE-MODE-POLL] SMS sent to ${profile.phone_number.substring(0, 5)}...`);
+                  } else {
+                    const smsError = await smsResponse.text();
+                    console.error('[ACTIVE-MODE-POLL] SMS failed:', smsError);
+                  }
+                } else {
+                  console.log('[ACTIVE-MODE-POLL] No phone number configured, skipping SMS');
+                }
+              } catch (smsErr) {
+                console.error('[ACTIVE-MODE-POLL] SMS error:', smsErr);
+                // Don't fail the whole operation if SMS fails
+              }
+              
               // Create signal opportunity
               await supabase.from('signal_opportunities').insert({
                 event_name: event.event_name,
