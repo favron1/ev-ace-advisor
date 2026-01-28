@@ -308,6 +308,7 @@ export type Database = {
           created_at: string | null
           display_name: string | null
           id: string
+          phone_number: string | null
           total_bets: number | null
           total_profit: number | null
           total_wins: number | null
@@ -319,6 +320,7 @@ export type Database = {
           created_at?: string | null
           display_name?: string | null
           id?: string
+          phone_number?: string | null
           total_bets?: number | null
           total_profit?: number | null
           total_wins?: number | null
@@ -330,6 +332,7 @@ export type Database = {
           created_at?: string | null
           display_name?: string | null
           id?: string
+          phone_number?: string | null
           total_bets?: number | null
           total_profit?: number | null
           total_wins?: number | null
