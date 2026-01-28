@@ -704,6 +704,7 @@ interface CacheMatchResult {
   entry: PolymarketCacheEntry;
   confidence: number;
   matchedPrice: number;
+  matchedTeam: string | null; // The team name corresponding to the bet (home or away)
   isAmbiguous: boolean;
 }
 
@@ -718,7 +719,7 @@ function findCacheMatch(
   if (teams.length < 2) return null;
   
   const normalizedOutcome = normalizeName(outcome);
-  const candidates: { entry: PolymarketCacheEntry; confidence: number; matchedPrice: number }[] = [];
+  const candidates: { entry: PolymarketCacheEntry; confidence: number; matchedPrice: number; matchedTeam: string | null }[] = [];
   
   // Normalize input team names
   const team1Norm = normalizeName(teams[0]);
@@ -774,11 +775,15 @@ function findCacheMatch(
     // If outcome matches home team, use yes_price; if away, use no_price
     const outcomeMatchesHome = team1Aliases.has(cacheHomeNorm) || normalizedOutcome.includes(cacheHomeNorm) || cacheHomeNorm.includes(normalizedOutcome);
     const matchedPrice = outcomeMatchesHome ? entry.yes_price : entry.no_price;
+    const matchedTeam = outcomeMatchesHome 
+      ? (entry.team_home || cacheHomeNorm) 
+      : (entry.team_away || cacheAwayNorm);
     
     candidates.push({
       entry,
       confidence: matchScore,
       matchedPrice,
+      matchedTeam,
     });
   }
   
@@ -805,6 +810,7 @@ function findCacheMatch(
     entry: best.entry,
     confidence: best.confidence,
     matchedPrice: best.matchedPrice,
+    matchedTeam: best.matchedTeam,
     isAmbiguous,
   };
 }
@@ -877,6 +883,7 @@ function findCacheFuturesMatch(
     entry: best.entry,
     confidence: best.confidence,
     matchedPrice: best.entry.yes_price, // Always YES for championship
+    matchedTeam: teamName, // Use the team name passed in
     isAmbiguous,
   };
 }
@@ -1011,15 +1018,22 @@ Deno.serve(async (req) => {
 
       // This is now vig-removed fair probability from ingest-odds
       const bookmakerProbFair = bestSignal.implied_probability;
-      const recommendedOutcome = bestSignal.outcome;
+      let recommendedOutcome = bestSignal.outcome;
       
       // NEW: Try cache-based matching first, then fall back to legacy enhanced matching
       let cacheMatch = findCacheMatch(eventName, recommendedOutcome, polymarketCache, ['h2h']);
       
+      // If cache matched, prefer the Polymarket team name for display (it may be cleaner)
+      // e.g., bookmaker says "New York Rangers" but Polymarket shows "Rangers" - use "Rangers" for clarity
+      if (cacheMatch && cacheMatch.matchedTeam) {
+        // Keep the bookmaker outcome for matching logic, but use matchedTeam for display if available
+        recommendedOutcome = cacheMatch.matchedTeam;
+      }
+      
       // If no cache match, try the legacy enhanced matching
       const polyMatch = cacheMatch 
         ? { market: cacheToLegacyMarket(cacheMatch.entry), confidence: cacheMatch.confidence, matchedPrice: cacheMatch.matchedPrice, isAmbiguous: cacheMatch.isAmbiguous }
-        : findEnhancedPolymarketMatch(eventName, recommendedOutcome, polymarkets);
+        : findEnhancedPolymarketMatch(eventName, bestSignal.outcome, polymarkets);
       
       let edgePct: number;
       let polyPrice: number;
