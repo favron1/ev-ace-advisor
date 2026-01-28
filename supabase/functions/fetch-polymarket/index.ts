@@ -77,7 +77,8 @@ Deno.serve(async (req) => {
         no_price: noPrice,
         volume: parseFloat(market.volume) || 0,
         liquidity: parseFloat(market.liquidity) || 0,
-        status: market.active !== false ? 'active' : 'closed',
+        status: market.active !== false && !market.closed ? 'active' : 'closed',
+        last_updated: new Date().toISOString(),
       };
     });
 
