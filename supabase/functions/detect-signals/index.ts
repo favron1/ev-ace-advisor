@@ -146,7 +146,8 @@ Deno.serve(async (req) => {
       // For now, treat "edge" as distance from 50% implied probability (proxy signal strength).
       const bookmakerProb = bestSignal.implied_probability;
       const edge = Math.abs(bookmakerProb - 0.5) * 100;
-      const side = bookmakerProb > 0.5 ? 'YES' : 'NO';
+      const recommendedOutcome = bestSignal.outcome; // The actual team/player to bet on
+      const side = 'YES'; // Always YES since we're recommending the favorite
       const polyPrice = 0.5; // placeholder until we add proper H2H market matching
       
       // Minimum edge threshold
@@ -202,6 +203,7 @@ Deno.serve(async (req) => {
       opportunities.push({
         polymarket_market_id: null,
         event_name: eventName,
+        recommended_outcome: recommendedOutcome, // The specific team/player to bet on
         side,
         polymarket_price: polyPrice,
         bookmaker_probability: bookmakerProb,

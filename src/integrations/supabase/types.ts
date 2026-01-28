@@ -324,6 +324,7 @@ export type Database = {
           id: string
           polymarket_market_id: string | null
           polymarket_price: number
+          recommended_outcome: string | null
           side: string
           signal_factors: Json | null
           status: string | null
@@ -340,6 +341,7 @@ export type Database = {
           id?: string
           polymarket_market_id?: string | null
           polymarket_price: number
+          recommended_outcome?: string | null
           side: string
           signal_factors?: Json | null
           status?: string | null
@@ -356,6 +358,7 @@ export type Database = {
           id?: string
           polymarket_market_id?: string | null
           polymarket_price?: number
+          recommended_outcome?: string | null
           side?: string
           signal_factors?: Json | null
           status?: string | null

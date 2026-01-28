@@ -35,6 +35,7 @@ export interface SignalOpportunity {
   id: string;
   polymarket_market_id?: string;
   event_name: string;
+  recommended_outcome?: string; // The specific team/player to bet on
   side: 'YES' | 'NO';
   polymarket_price: number;
   bookmaker_probability: number;
