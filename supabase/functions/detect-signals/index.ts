@@ -30,12 +30,15 @@ interface PolymarketMarket {
   no_price: number;
   volume: number;
   last_updated: string;
+  category?: string;
 }
 
 // Configuration constants
 const MATCH_THRESHOLD = 0.85;
+const CHAMPIONSHIP_MATCH_THRESHOLD = 0.70; // Lower threshold for championship matching
 const AMBIGUITY_MARGIN = 0.03;
-const STALENESS_HOURS = 2;
+const STALENESS_HOURS_H2H = 2; // Strict for H2H (real-time matters)
+const STALENESS_HOURS_FUTURES = 24; // Relaxed for futures (prices move slowly)
 const MIN_VOLUME_FLAG = 10000;
 const MIN_VOLUME_REJECT = 2000;
 const MIN_EDGE_THRESHOLD = 2.0;
@@ -59,6 +62,19 @@ const TEAM_ALIASES: Record<string, string[]> = {
   'sacramento kings': ['kings', 'sacramento'],
   'new orleans pelicans': ['pelicans', 'nola'],
   'cleveland cavaliers': ['cavs', 'cavaliers', 'cleveland'],
+  'memphis grizzlies': ['grizzlies', 'memphis'],
+  'houston rockets': ['rockets', 'houston'],
+  'orlando magic': ['magic', 'orlando'],
+  'indiana pacers': ['pacers', 'indiana'],
+  'atlanta hawks': ['hawks', 'atlanta'],
+  'chicago bulls': ['bulls', 'chicago'],
+  'toronto raptors': ['raptors', 'toronto'],
+  'charlotte hornets': ['hornets', 'charlotte'],
+  'detroit pistons': ['pistons', 'detroit'],
+  'san antonio spurs': ['spurs', 'san antonio'],
+  'portland trail blazers': ['blazers', 'portland', 'trail blazers'],
+  'utah jazz': ['jazz', 'utah'],
+  'washington wizards': ['wizards', 'washington'],
   'manchester united': ['man united', 'man utd', 'mufc', 'united'],
   'manchester city': ['man city', 'mcfc', 'city'],
   'liverpool': ['liverpool fc', 'lfc'],
@@ -76,6 +92,18 @@ const TEAM_ALIASES: Record<string, string[]> = {
   'dallas cowboys': ['cowboys', 'dallas'],
   'new england patriots': ['patriots', 'pats', 'new england'],
   'green bay packers': ['packers', 'green bay'],
+  'leeds': ['leeds united', 'lufc'],
+  'newcastle': ['newcastle united', 'nufc', 'magpies'],
+  'west ham': ['west ham united', 'hammers'],
+  'aston villa': ['villa', 'avfc'],
+  'everton': ['everton fc', 'toffees'],
+  'brighton': ['brighton & hove albion', 'seagulls'],
+  'crystal palace': ['palace', 'cpfc'],
+  'wolverhampton': ['wolves', 'wolverhampton wanderers'],
+  'nottingham forest': ['forest', 'nffc'],
+  'bournemouth': ['afc bournemouth', 'cherries'],
+  'fulham': ['fulham fc', 'cottagers'],
+  'brentford': ['brentford fc', 'bees'],
 };
 
 // Normalize team/player names for fuzzy matching
@@ -154,6 +182,119 @@ function extractTeams(eventName: string): string[] {
   return [eventName];
 }
 
+// Extract league from bookmaker event name
+// e.g., "NBA Championship Winner: Denver Nuggets" → "nba"
+// e.g., "NHL Championship Winner: Dallas Stars" → "nhl"
+function extractLeagueFromOutright(eventName: string): string | null {
+  const lowerName = eventName.toLowerCase();
+  
+  if (lowerName.includes('nba') || lowerName.includes('basketball')) return 'nba';
+  if (lowerName.includes('nhl') || lowerName.includes('hockey') || lowerName.includes('stanley cup')) return 'nhl';
+  if (lowerName.includes('nfl') || lowerName.includes('super bowl')) return 'nfl';
+  if (lowerName.includes('mlb') || lowerName.includes('world series') || lowerName.includes('baseball')) return 'mlb';
+  if (lowerName.includes('epl') || lowerName.includes('premier league') || lowerName.includes('english premier')) return 'epl';
+  if (lowerName.includes('champions league') || lowerName.includes('ucl')) return 'ucl';
+  if (lowerName.includes('la liga') || lowerName.includes('laliga')) return 'laliga';
+  if (lowerName.includes('bundesliga')) return 'bundesliga';
+  if (lowerName.includes('serie a')) return 'seriea';
+  if (lowerName.includes('ligue 1')) return 'ligue1';
+  
+  return null;
+}
+
+// Extract league from Polymarket question
+// e.g., "Will the Denver Nuggets win the 2026 NBA Finals?" → "nba"
+// e.g., "Will the Dallas Stars win the 2026 NHL Stanley Cup?" → "nhl"
+function extractLeagueFromQuestion(question: string): string | null {
+  const lowerQ = question.toLowerCase();
+  
+  if (lowerQ.includes('nba finals') || lowerQ.includes('nba championship')) return 'nba';
+  if (lowerQ.includes('stanley cup') || lowerQ.includes('nhl')) return 'nhl';
+  if (lowerQ.includes('super bowl') || lowerQ.includes('nfl')) return 'nfl';
+  if (lowerQ.includes('world series') || lowerQ.includes('mlb')) return 'mlb';
+  if (lowerQ.includes('english premier league') || lowerQ.includes('epl') || lowerQ.includes('premier league')) return 'epl';
+  if (lowerQ.includes('champions league') || lowerQ.includes('ucl')) return 'ucl';
+  if (lowerQ.includes('la liga') || lowerQ.includes('laliga')) return 'laliga';
+  if (lowerQ.includes('bundesliga')) return 'bundesliga';
+  if (lowerQ.includes('serie a')) return 'seriea';
+  if (lowerQ.includes('ligue 1')) return 'ligue1';
+  
+  return null;
+}
+
+// Check if two leagues are compatible for matching
+function leaguesCompatible(league1: string | null, league2: string | null): boolean {
+  // If either is null, we can't be sure - allow match but with lower confidence
+  if (!league1 || !league2) return true;
+  // Direct match
+  if (league1 === league2) return true;
+  // Incompatible
+  return false;
+}
+
+// Extract team name from outright event name
+// e.g., "NBA Championship Winner: Denver Nuggets" → "Denver Nuggets"
+// e.g., "EPL Winner: Manchester City" → "Manchester City"
+function extractTeamFromOutright(eventName: string): string | null {
+  const patterns = [
+    /championship winner:\s*(.+)/i,
+    /winner:\s*(.+)/i,
+    /champion:\s*(.+)/i,
+    /to win:\s*(.+)/i,
+    /:\s*(.+)$/i, // Fallback: anything after colon
+  ];
+  
+  for (const pattern of patterns) {
+    const match = eventName.match(pattern);
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+  }
+  
+  return null;
+}
+
+// Extract team name from Polymarket championship question
+// e.g., "Will the Denver Nuggets win the 2026 NBA Finals?" → "Denver Nuggets"
+// e.g., "Will Leeds win 2025-26 EPL?" → "Leeds"
+function extractTeamFromChampionshipQuestion(question: string): string | null {
+  const patterns = [
+    /will\s+(?:the\s+)?(.+?)\s+win\s+(?:the\s+)?(\d{4}(?:-\d{2,4})?)/i,
+    /will\s+(?:the\s+)?(.+?)\s+win\s+/i,
+    /(.+?)\s+to\s+win\s+/i,
+  ];
+  
+  for (const pattern of patterns) {
+    const match = question.match(pattern);
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+  }
+  
+  return null;
+}
+
+// Check if a Polymarket question is a championship/winner question
+function isChampionshipQuestion(question: string): boolean {
+  const lowerQuestion = question.toLowerCase();
+  const championshipKeywords = [
+    'win the',
+    'win 20', // win 2025, win 2026, etc.
+    'championship',
+    'finals',
+    'premier league',
+    'epl',
+    'nba',
+    'nfl',
+    'super bowl',
+    'world series',
+    'stanley cup',
+    'champions league',
+  ];
+  
+  return championshipKeywords.some(kw => lowerQuestion.includes(kw));
+}
+
 // Calculate combined match confidence using Jaccard + Levenshtein
 function calculateMatchConfidence(
   bookmakerEvent: string,
@@ -188,6 +329,35 @@ function calculateMatchConfidence(
   return confidence;
 }
 
+// Calculate match confidence for championship/futures markets
+function calculateChampionshipMatchConfidence(
+  bookmakerTeam: string,
+  polymarketTeam: string
+): number {
+  const normBook = normalizeName(bookmakerTeam);
+  const normPoly = normalizeName(polymarketTeam);
+  
+  // Expand both with aliases
+  const bookAliases = expandWithAliases(normBook);
+  const polyAliases = expandWithAliases(normPoly);
+  
+  // Check for exact match (including aliases)
+  for (const bookAlias of bookAliases) {
+    for (const polyAlias of polyAliases) {
+      if (bookAlias === polyAlias) {
+        return 1.0; // Perfect match
+      }
+      // Check if one contains the other
+      if (bookAlias.includes(polyAlias) || polyAlias.includes(bookAlias)) {
+        return 0.95;
+      }
+    }
+  }
+  
+  // Fall back to Levenshtein similarity
+  return levenshteinSimilarity(normBook, normPoly);
+}
+
 interface MatchCandidate {
   market: PolymarketMarket;
   confidence: number;
@@ -201,7 +371,7 @@ interface MatchResult {
   isAmbiguous: boolean;
 }
 
-// Find best Polymarket match using enhanced scoring
+// Find best Polymarket match using enhanced scoring (for H2H)
 function findEnhancedPolymarketMatch(
   eventName: string, 
   outcome: string,
@@ -251,6 +421,75 @@ function findEnhancedPolymarketMatch(
   };
 }
 
+// Find best Polymarket match for championship/futures markets
+function findChampionshipPolymarketMatch(
+  bookmakerTeam: string,
+  bookmakerEventName: string,
+  polymarkets: PolymarketMarket[]
+): MatchResult | null {
+  const candidates: MatchCandidate[] = [];
+  
+  // Extract league from bookmaker event for filtering
+  const bookmakerLeague = extractLeagueFromOutright(bookmakerEventName);
+  
+  // Filter to only championship questions
+  const championshipMarkets = polymarkets.filter(m => isChampionshipQuestion(m.question));
+  
+  for (const market of championshipMarkets) {
+    // Check league compatibility first
+    const polyLeague = extractLeagueFromQuestion(market.question);
+    if (!leaguesCompatible(bookmakerLeague, polyLeague)) {
+      continue; // Skip mismatched leagues (e.g., NHL team vs NBA question)
+    }
+    
+    const polyTeam = extractTeamFromChampionshipQuestion(market.question);
+    if (!polyTeam) continue;
+    
+    const confidence = calculateChampionshipMatchConfidence(bookmakerTeam, polyTeam);
+    
+    // Boost confidence if leagues match exactly
+    const leagueBoost = (bookmakerLeague && polyLeague && bookmakerLeague === polyLeague) ? 0.1 : 0;
+    const adjustedConfidence = Math.min(confidence + leagueBoost, 1.0);
+    
+    if (adjustedConfidence > 0.5) { // Pre-filter low confidence
+      candidates.push({
+        market,
+        confidence: adjustedConfidence,
+        matchedPrice: market.yes_price, // For championship questions, always use YES price
+      });
+    }
+  }
+  
+  if (candidates.length === 0) return null;
+  
+  // Sort by confidence first, then by volume for tie-breaking
+  candidates.sort((a, b) => {
+    const confDiff = b.confidence - a.confidence;
+    if (Math.abs(confDiff) > AMBIGUITY_MARGIN) return confDiff;
+    // If confidence is similar, prefer higher volume market
+    return b.market.volume - a.market.volume;
+  });
+  const best = candidates[0];
+  
+  // Check threshold (lower for championships due to simpler matching)
+  if (best.confidence < CHAMPIONSHIP_MATCH_THRESHOLD) {
+    return null;
+  }
+  
+  // For championship markets, if multiple matches exist but best has high confidence,
+  // don't mark as ambiguous - just pick the highest volume one
+  const isAmbiguous = candidates.length > 1 && 
+    (candidates[1].confidence >= best.confidence - AMBIGUITY_MARGIN) &&
+    best.confidence < 0.95; // Only ambiguous if not a near-perfect match
+  
+  return {
+    market: best.market,
+    confidence: best.confidence,
+    matchedPrice: best.matchedPrice,
+    isAmbiguous,
+  };
+}
+
 interface ValidationResult {
   valid: boolean;
   reason?: string;
@@ -258,10 +497,11 @@ interface ValidationResult {
 }
 
 // Validate Polymarket data freshness and liquidity
-function validatePolymarketData(market: PolymarketMarket): ValidationResult {
+function validatePolymarketData(market: PolymarketMarket, isFutures: boolean = false): ValidationResult {
   const hoursSinceUpdate = (Date.now() - new Date(market.last_updated).getTime()) / (1000 * 60 * 60);
+  const stalenessThreshold = isFutures ? STALENESS_HOURS_FUTURES : STALENESS_HOURS_H2H;
   
-  if (hoursSinceUpdate > STALENESS_HOURS) {
+  if (hoursSinceUpdate > stalenessThreshold) {
     return { valid: false, reason: 'stale_price' };
   }
   
@@ -272,7 +512,8 @@ function validatePolymarketData(market: PolymarketMarket): ValidationResult {
   const lowLiquidity = market.volume < MIN_VOLUME_FLAG;
   
   // Spread sanity check - reject if YES stuck near extremes with low liquidity
-  if ((market.yes_price < 0.05 || market.yes_price > 0.95) && lowLiquidity) {
+  // For futures, be more lenient since low prices are normal for long-shots
+  if (!isFutures && (market.yes_price < 0.05 || market.yes_price > 0.95) && lowLiquidity) {
     return { valid: false, reason: 'extreme_price_low_liquidity' };
   }
   
@@ -326,7 +567,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    console.log('Running enhanced signal detection with Polymarket matching...');
+    console.log('Running enhanced signal detection with H2H + Championship Futures matching...');
     
     let body: RequestBody = {};
     try {
@@ -348,16 +589,24 @@ Deno.serve(async (req) => {
     const minHorizon = new Date(now.getTime() + minEventHorizonHours * 60 * 60 * 1000).toISOString();
     const maxHorizon = new Date(now.getTime() + eventHorizonHours * 60 * 60 * 1000).toISOString();
     const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString();
+    const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
 
-    // Fetch H2H signals and Polymarket markets in parallel
-    const [h2hResponse, polymarketResponse] = await Promise.all([
+    // Fetch H2H signals, outright signals, and Polymarket markets in parallel
+    const [h2hResponse, outrightsResponse, polymarketResponse] = await Promise.all([
       fetch(`${supabaseUrl}/rest/v1/bookmaker_signals?captured_at=gte.${twoHoursAgo}&market_type=eq.h2h&commence_time=gte.${minHorizon}&commence_time=lte.${maxHorizon}&order=implied_probability.desc&limit=500`, {
         headers: {
           'apikey': supabaseKey,
           'Authorization': `Bearer ${supabaseKey}`,
         },
       }),
-      fetch(`${supabaseUrl}/rest/v1/polymarket_markets?status=eq.active&last_updated=gte.${twoHoursAgo}&order=volume.desc&limit=200`, {
+      fetch(`${supabaseUrl}/rest/v1/bookmaker_signals?captured_at=gte.${twoHoursAgo}&market_type=eq.outrights&order=implied_probability.desc&limit=500`, {
+        headers: {
+          'apikey': supabaseKey,
+          'Authorization': `Bearer ${supabaseKey}`,
+        },
+      }),
+      // Use 24h window for Polymarket to catch markets even if fetch-polymarket hasn't run recently
+      fetch(`${supabaseUrl}/rest/v1/polymarket_markets?status=eq.active&last_updated=gte.${twentyFourHoursAgo}&order=volume.desc&limit=500`, {
         headers: {
           'apikey': supabaseKey,
           'Authorization': `Bearer ${supabaseKey}`,
@@ -366,14 +615,19 @@ Deno.serve(async (req) => {
     ]);
 
     const h2hSignals: BookmakerSignal[] = await h2hResponse.json();
+    const outrightSignals: BookmakerSignal[] = await outrightsResponse.json();
     const polymarkets: PolymarketMarket[] = await polymarketResponse.json();
     
-    console.log(`Found ${h2hSignals.length} H2H signals, ${polymarkets.length} active Polymarket markets`);
+    console.log(`Found ${h2hSignals.length} H2H signals, ${outrightSignals.length} outright signals, ${polymarkets.length} active Polymarket markets`);
 
     const opportunities: any[] = [];
     const processedEvents = new Set<string>();
 
-    // Group signals by event
+    // ============================================
+    // PART 1: Process H2H signals (existing logic)
+    // ============================================
+    
+    // Group H2H signals by event
     const eventGroups = new Map<string, BookmakerSignal[]>();
     for (const signal of h2hSignals) {
       const existing = eventGroups.get(signal.event_name) || [];
@@ -383,9 +637,9 @@ Deno.serve(async (req) => {
 
     console.log(`Processing ${eventGroups.size} unique H2H events`);
 
-    let matchedCount = 0;
-    let unmatchedCount = 0;
-    let rejectedCount = 0;
+    let h2hMatchedCount = 0;
+    let h2hUnmatchedCount = 0;
+    let h2hRejectedCount = 0;
 
     for (const [eventName, signals] of eventGroups) {
       if (processedEvents.has(eventName)) continue;
@@ -437,25 +691,25 @@ Deno.serve(async (req) => {
           matchConfidence = polyMatch.confidence;
           polyVolume = polyMatch.market.volume;
           polyUpdatedAt = polyMatch.market.last_updated;
-          matchedCount++;
+          h2hMatchedCount++;
           
-          console.log(`Matched: ${eventName} -> ${polyMatch.market.question.slice(0, 50)}... (conf: ${matchConfidence.toFixed(2)}, edge: ${edgePct.toFixed(1)}%)`);
+          console.log(`H2H Matched: ${eventName} -> ${polyMatch.market.question.slice(0, 50)}... (conf: ${matchConfidence.toFixed(2)}, edge: ${edgePct.toFixed(1)}%)`);
           
           // Must meet minimum edge threshold
           if (edgePct < minEdgeThreshold) {
             console.log(`Edge too low: ${edgePct.toFixed(1)}% < ${minEdgeThreshold}%`);
-            rejectedCount++;
+            h2hRejectedCount++;
             continue;
           }
         } else {
           console.log(`Rejected Polymarket match: ${validation.reason}`);
-          rejectedCount++;
+          h2hRejectedCount++;
           // Fall through to signal-only
           polyPrice = 0.5;
           signalStrength = Math.abs(bookmakerProbFair - 0.5) * 100;
           edgePct = 0; // No edge without valid match
           isTrueArbitrage = false;
-          unmatchedCount++;
+          h2hUnmatchedCount++;
         }
       } else if (polyMatch?.isAmbiguous) {
         console.log(`Ambiguous match for ${eventName}, treating as signal only`);
@@ -463,14 +717,14 @@ Deno.serve(async (req) => {
         signalStrength = Math.abs(bookmakerProbFair - 0.5) * 100;
         edgePct = 0;
         isTrueArbitrage = false;
-        unmatchedCount++;
+        h2hUnmatchedCount++;
       } else {
         // NO MATCH: Calculate signal strength only
         polyPrice = 0.5;
         signalStrength = Math.abs(bookmakerProbFair - 0.5) * 100;
         edgePct = 0; // No edge without match
         isTrueArbitrage = false;
-        unmatchedCount++;
+        h2hUnmatchedCount++;
       }
       
       // Skip signals with low strength if not true arbitrage
@@ -550,7 +804,161 @@ Deno.serve(async (req) => {
       });
     }
 
-    console.log(`Detected ${opportunities.length} opportunities (${matchedCount} matched, ${unmatchedCount} unmatched, ${rejectedCount} rejected)`);
+    // ============================================
+    // PART 2: Process Championship/Futures signals
+    // ============================================
+    
+    console.log(`\nProcessing ${outrightSignals.length} outright/futures signals`);
+
+    let futuresMatchedCount = 0;
+    let futuresUnmatchedCount = 0;
+    let futuresRejectedCount = 0;
+
+    // Group outright signals by team (extracted from event_name)
+    const outrightGroups = new Map<string, BookmakerSignal[]>();
+    for (const signal of outrightSignals) {
+      const teamName = extractTeamFromOutright(signal.event_name);
+      if (!teamName) continue;
+      
+      const key = `${signal.event_name}::${teamName}`;
+      const existing = outrightGroups.get(key) || [];
+      existing.push(signal);
+      outrightGroups.set(key, existing);
+    }
+
+    console.log(`Found ${outrightGroups.size} unique championship futures`);
+
+    for (const [key, signals] of outrightGroups) {
+      const [eventName] = key.split('::');
+      const teamName = extractTeamFromOutright(eventName);
+      if (!teamName) continue;
+      
+      // Skip if already processed
+      if (processedEvents.has(key)) continue;
+      processedEvents.add(key);
+
+      // Find best signal (prefer sharp books)
+      const sortedSignals = signals.sort((a, b) => {
+        if (a.is_sharp_book !== b.is_sharp_book) return a.is_sharp_book ? -1 : 1;
+        return b.confirming_books - a.confirming_books;
+      });
+
+      const bestSignal = sortedSignals[0];
+      const bookmakerProbFair = bestSignal.implied_probability;
+      
+      // Try to find matching Polymarket championship market (with league filtering)
+      const polyMatch = findChampionshipPolymarketMatch(teamName, eventName, polymarkets);
+      
+      let edgePct: number;
+      let polyPrice: number;
+      let isTrueArbitrage: boolean;
+      let matchConfidence: number | null = null;
+      let signalStrength: number | null = null;
+      let polyVolume: number | null = null;
+      let polyUpdatedAt: string | null = null;
+      
+      if (polyMatch && !polyMatch.isAmbiguous) {
+        // Validate Polymarket data (relaxed staleness for futures)
+        const validation = validatePolymarketData(polyMatch.market, true);
+        
+        if (validation.valid) {
+          // TRUE ARBITRAGE: Compare bookmaker fair prob vs Polymarket YES price
+          polyPrice = polyMatch.matchedPrice;
+          edgePct = (bookmakerProbFair - polyPrice) * 100;
+          isTrueArbitrage = true;
+          matchConfidence = polyMatch.confidence;
+          polyVolume = polyMatch.market.volume;
+          polyUpdatedAt = polyMatch.market.last_updated;
+          futuresMatchedCount++;
+          
+          console.log(`FUTURES Matched: ${teamName} -> "${polyMatch.market.question.slice(0, 60)}..." (conf: ${matchConfidence.toFixed(2)}, edge: ${edgePct.toFixed(1)}%)`);
+          
+          // Must meet minimum edge threshold
+          if (edgePct < minEdgeThreshold) {
+            console.log(`Futures edge too low: ${edgePct.toFixed(1)}% < ${minEdgeThreshold}%`);
+            futuresRejectedCount++;
+            continue;
+          }
+        } else {
+          console.log(`Rejected futures Polymarket match: ${validation.reason}`);
+          futuresRejectedCount++;
+          continue; // Skip futures without valid Polymarket match
+        }
+      } else if (polyMatch?.isAmbiguous) {
+        console.log(`Ambiguous futures match for ${teamName}`);
+        futuresUnmatchedCount++;
+        continue; // Skip ambiguous futures
+      } else {
+        // No match - skip futures without Polymarket equivalent
+        futuresUnmatchedCount++;
+        continue;
+      }
+
+      // Calculate confidence score for futures
+      let confidence = 35; // Base (slightly higher for futures due to simpler matching)
+
+      // Edge-based scoring
+      if (edgePct >= 10) confidence += 35;
+      else if (edgePct >= 5) confidence += 25;
+      else if (edgePct >= 3) confidence += 15;
+      else if (edgePct >= 2) confidence += 10;
+      
+      // Match confidence bonus
+      if (matchConfidence) {
+        confidence += Math.round(matchConfidence * 15);
+      }
+
+      // Sharp book presence
+      if (bestSignal.is_sharp_book) confidence += 15;
+
+      // Volume bonus for futures (important for liquidity)
+      if (polyVolume && polyVolume >= 100000) confidence += 10;
+      else if (polyVolume && polyVolume >= 50000) confidence += 5;
+
+      confidence = Math.min(Math.round(confidence), 95);
+
+      // Futures don't have specific end times, use a default horizon
+      const urgency = calculateUrgency(null, edgePct, bestSignal.is_sharp_book, true);
+
+      opportunities.push({
+        polymarket_market_id: polyMatch.market.id,
+        event_name: eventName,
+        recommended_outcome: teamName,
+        side: 'YES',
+        polymarket_price: polyPrice,
+        bookmaker_probability: bookmakerProbFair,
+        edge_percent: Math.round(edgePct * 10) / 10,
+        confidence_score: confidence,
+        urgency,
+        is_true_arbitrage: true,
+        polymarket_match_confidence: matchConfidence,
+        polymarket_yes_price: polyPrice,
+        polymarket_volume: polyVolume,
+        polymarket_updated_at: polyUpdatedAt,
+        bookmaker_prob_fair: bookmakerProbFair,
+        signal_strength: null,
+        signal_factors: {
+          confirming_books: bestSignal.confirming_books,
+          is_sharp_book: bestSignal.is_sharp_book,
+          market_type: 'futures',
+          matched_polymarket: true,
+          match_confidence: matchConfidence,
+          edge_type: 'true_arbitrage',
+          polymarket_question: polyMatch.market.question,
+        },
+        status: 'active',
+        expires_at: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(), // 7 days for futures
+      });
+    }
+
+    const totalMatched = h2hMatchedCount + futuresMatchedCount;
+    const totalUnmatched = h2hUnmatchedCount + futuresUnmatchedCount;
+    const totalRejected = h2hRejectedCount + futuresRejectedCount;
+
+    console.log(`\n=== Summary ===`);
+    console.log(`H2H: ${h2hMatchedCount} matched, ${h2hUnmatchedCount} unmatched, ${h2hRejectedCount} rejected`);
+    console.log(`Futures: ${futuresMatchedCount} matched, ${futuresUnmatchedCount} unmatched, ${futuresRejectedCount} rejected`);
+    console.log(`Total opportunities: ${opportunities.length}`);
 
     // Sort: true arbitrage first, then urgency, then edge/strength
     const urgencyOrder = { critical: 0, high: 1, normal: 2, low: 3 };
@@ -592,23 +1000,30 @@ Deno.serve(async (req) => {
     }
 
     const trueArbCount = topOpportunities.filter(o => o.is_true_arbitrage).length;
+    const futuresCount = topOpportunities.filter(o => o.signal_factors?.market_type === 'futures').length;
 
     return new Response(
       JSON.stringify({
         success: true,
         opportunities: topOpportunities.slice(0, 10),
         h2h_signals: h2hSignals.length,
+        outright_signals: outrightSignals.length,
         polymarket_markets: polymarkets.length,
-        unique_events: eventGroups.size,
+        unique_h2h_events: eventGroups.size,
+        unique_futures: outrightGroups.size,
         signals_surfaced: topOpportunities.length,
         true_arbitrage_count: trueArbCount,
+        futures_arbitrage_count: futuresCount,
         signal_only_count: topOpportunities.length - trueArbCount,
-        matched_to_polymarket: matchedCount,
-        unmatched_signals: unmatchedCount,
-        rejected_for_validation: rejectedCount,
+        h2h_matched: h2hMatchedCount,
+        futures_matched: futuresMatchedCount,
+        total_matched: totalMatched,
+        total_unmatched: totalUnmatched,
+        total_rejected: totalRejected,
         event_horizon: `${minEventHorizonHours}h - ${eventHorizonHours}h`,
         min_edge_threshold: minEdgeThreshold,
         match_threshold: MATCH_THRESHOLD,
+        championship_match_threshold: CHAMPIONSHIP_MATCH_THRESHOLD,
         timestamp: now.toISOString(),
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
