@@ -3,13 +3,10 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-interface OddsApiEvent {
+interface OddsApiOutright {
   id: string;
   sport_key: string;
   sport_title: string;
-  commence_time: string;
-  home_team: string;
-  away_team: string;
   bookmakers: Array<{
     key: string;
     title: string;
@@ -38,46 +35,56 @@ Deno.serve(async (req) => {
       );
     }
 
-    console.log('Fetching bookmaker odds...');
+    console.log('Fetching bookmaker odds (outrights + h2h)...');
 
-    // Sports to monitor
-    const sports = [
+    // Sports with outright/futures markets that match Polymarket
+    const outrightSports = [
       'soccer_epl',
-      'soccer_spain_la_liga',
+      'soccer_spain_la_liga', 
+      'soccer_italy_serie_a',
+      'soccer_germany_bundesliga',
+      'soccer_france_ligue_one',
+      'soccer_uefa_champs_league',
+      'basketball_nba',
+      'americanfootball_nfl',
+      'icehockey_nhl',
+    ];
+
+    // Additional sports for head-to-head matches
+    const h2hSports = [
+      'soccer_epl',
       'basketball_nba',
       'americanfootball_nfl',
       'mma_mixed_martial_arts',
     ];
 
     const allSignals: any[] = [];
-    const previousOddsMap = new Map<string, number>();
 
-    for (const sport of sports) {
+    // Fetch outright/futures odds (championship winners)
+    for (const sport of outrightSports) {
       try {
-        const url = `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${oddsApiKey}&regions=us,eu,uk&markets=h2h&oddsFormat=decimal`;
+        const url = `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${oddsApiKey}&regions=us,eu,uk&markets=outrights&oddsFormat=decimal`;
         const response = await fetch(url);
         
         if (!response.ok) {
-          console.error(`Failed to fetch ${sport}:`, response.status);
+          console.log(`Outrights not available for ${sport}`);
           continue;
         }
 
-        const events: OddsApiEvent[] = await response.json();
-        console.log(`${sport}: ${events.length} events`);
+        const events: OddsApiOutright[] = await response.json();
+        console.log(`${sport} outrights: ${events.length} events`);
 
         for (const event of events) {
           if (!event.bookmakers || event.bookmakers.length < 2) continue;
 
-          const eventName = `${event.home_team} vs ${event.away_team}`;
-          
           // Collect odds from all bookmakers for each outcome
           const outcomeOdds: Record<string, Array<{ odds: number; bookmaker: string }>> = {};
 
           for (const bookmaker of event.bookmakers) {
-            const h2hMarket = bookmaker.markets.find(m => m.key === 'h2h');
-            if (!h2hMarket) continue;
+            const outrightMarket = bookmaker.markets.find(m => m.key === 'outrights');
+            if (!outrightMarket) continue;
 
-            for (const outcome of h2hMarket.outcomes) {
+            for (const outcome of outrightMarket.outcomes) {
               if (!outcomeOdds[outcome.name]) {
                 outcomeOdds[outcome.name] = [];
               }
@@ -92,37 +99,86 @@ Deno.serve(async (req) => {
           for (const [outcomeName, oddsArray] of Object.entries(outcomeOdds)) {
             if (oddsArray.length < 2) continue;
 
-            // Calculate consensus probability (average)
             const avgOdds = oddsArray.reduce((sum, o) => sum + o.odds, 0) / oddsArray.length;
             const impliedProb = 1 / avgOdds;
             
-            // Get previous odds for movement detection
-            const signalKey = `${event.id}-${outcomeName}`;
-            const previousOdds = previousOddsMap.get(signalKey);
-            const movement = previousOdds ? ((avgOdds - previousOdds) / previousOdds) * 100 : 0;
-            
-            // Create signal for each bookmaker (tracking individual prices)
-            for (const oddsData of oddsArray) {
-              allSignals.push({
-                event_name: eventName,
-                market_type: 'h2h',
-                outcome: outcomeName,
-                bookmaker: oddsData.bookmaker,
-                odds: oddsData.odds,
-                implied_probability: 1 / oddsData.odds,
-                previous_odds: previousOdds || null,
-                odds_movement: movement,
-                movement_speed: Math.abs(movement) > 5 ? 1 : 0, // Basic speed indicator
-                confirming_books: oddsArray.length,
-              });
-            }
-
-            // Store for next comparison
-            previousOddsMap.set(signalKey, avgOdds);
+            // Create aggregated signal for this outcome
+            allSignals.push({
+              event_name: `${event.sport_title} Championship: ${outcomeName}`,
+              market_type: 'outrights',
+              outcome: outcomeName,
+              bookmaker: 'consensus',
+              odds: avgOdds,
+              implied_probability: impliedProb,
+              previous_odds: null,
+              odds_movement: 0,
+              movement_speed: 0,
+              confirming_books: oddsArray.length,
+            });
           }
         }
       } catch (err) {
-        console.error(`Error processing ${sport}:`, err);
+        console.error(`Error processing ${sport} outrights:`, err);
+      }
+    }
+
+    // Fetch h2h odds for matches (existing logic)
+    for (const sport of h2hSports) {
+      try {
+        const url = `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${oddsApiKey}&regions=us,eu,uk&markets=h2h&oddsFormat=decimal`;
+        const response = await fetch(url);
+        
+        if (!response.ok) {
+          console.error(`Failed to fetch ${sport}:`, response.status);
+          continue;
+        }
+
+        const events = await response.json();
+        console.log(`${sport} h2h: ${events.length} events`);
+
+        for (const event of events) {
+          if (!event.bookmakers || event.bookmakers.length < 2) continue;
+
+          const eventName = `${event.home_team} vs ${event.away_team}`;
+          const outcomeOdds: Record<string, Array<{ odds: number; bookmaker: string }>> = {};
+
+          for (const bookmaker of event.bookmakers) {
+            const h2hMarket = bookmaker.markets.find((m: any) => m.key === 'h2h');
+            if (!h2hMarket) continue;
+
+            for (const outcome of h2hMarket.outcomes) {
+              if (!outcomeOdds[outcome.name]) {
+                outcomeOdds[outcome.name] = [];
+              }
+              outcomeOdds[outcome.name].push({
+                odds: outcome.price,
+                bookmaker: bookmaker.title
+              });
+            }
+          }
+
+          for (const [outcomeName, oddsArray] of Object.entries(outcomeOdds)) {
+            if (oddsArray.length < 2) continue;
+
+            const avgOdds = oddsArray.reduce((sum, o) => sum + o.odds, 0) / oddsArray.length;
+            const impliedProb = 1 / avgOdds;
+
+            allSignals.push({
+              event_name: eventName,
+              market_type: 'h2h',
+              outcome: outcomeName,
+              bookmaker: 'consensus',
+              odds: avgOdds,
+              implied_probability: impliedProb,
+              previous_odds: null,
+              odds_movement: 0,
+              movement_speed: 0,
+              confirming_books: oddsArray.length,
+            });
+          }
+        }
+      } catch (err) {
+        console.error(`Error processing ${sport} h2h:`, err);
       }
     }
 
@@ -133,8 +189,7 @@ Deno.serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 
     if (allSignals.length > 0) {
-      // Only keep the latest signal per event/outcome/bookmaker combo
-      const latestSignals = allSignals.slice(0, 500); // Limit to avoid overwhelming DB
+      const latestSignals = allSignals.slice(0, 1000);
 
       const insertResponse = await fetch(
         `${supabaseUrl}/rest/v1/bookmaker_signals`,
@@ -161,7 +216,8 @@ Deno.serve(async (req) => {
       JSON.stringify({
         success: true,
         signals_captured: allSignals.length,
-        sports_scanned: sports.length,
+        outright_signals: allSignals.filter(s => s.market_type === 'outrights').length,
+        h2h_signals: allSignals.filter(s => s.market_type === 'h2h').length,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
