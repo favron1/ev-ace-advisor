@@ -143,4 +143,5 @@ export interface ExecutionAnalysis {
 // Extended SignalOpportunity with execution analysis attached
 export interface EnrichedSignal extends SignalOpportunity {
   execution?: ExecutionAnalysis;
+  isNew?: boolean; // For real-time "new signal" animation
 }
