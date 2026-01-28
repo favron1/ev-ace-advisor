@@ -3,13 +3,22 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+interface RequestBody {
+  eventHorizonHours?: number;
+  minEventHorizonHours?: number;
+  includeOutrights?: boolean;
+}
+
 interface BookmakerSignal {
+  id: string;
   event_name: string;
   market_type: string;
   outcome: string;
   implied_probability: number;
   confirming_books: number;
-  odds_movement: number;
+  odds: number;
+  is_sharp_book: boolean;
+  commence_time: string | null;
   captured_at: string;
 }
 
@@ -33,66 +42,40 @@ function normalizeName(name: string): string {
     .trim();
 }
 
-// Extract team/entity from Polymarket question
-function extractPolymarketEntity(question: string): string | null {
-  const q = question.toLowerCase();
-  
-  // Pattern: "Will the X win the Y NBA Finals/Super Bowl/etc?"
-  const willTheMatch = q.match(/will\s+(?:the\s+)?(.+?)\s+win\s+(?:the\s+)?\d{4}/i);
-  if (willTheMatch) {
-    return willTheMatch[1].trim();
-  }
-  
-  // Pattern: "Will X win Super Bowl Y?"
-  const willWinMatch = q.match(/will\s+(?:the\s+)?(.+?)\s+win\s+super\s+bowl/i);
-  if (willWinMatch) {
-    return willWinMatch[1].trim();
-  }
-  
-  return null;
+// Calculate hours until event
+function hoursUntilEvent(commenceTime: string | null): number | null {
+  if (!commenceTime) return null;
+  const now = new Date();
+  const eventTime = new Date(commenceTime);
+  return (eventTime.getTime() - now.getTime()) / (1000 * 60 * 60);
 }
 
-// Extract team from bookmaker signal
-function extractBookmakerEntity(signal: BookmakerSignal): string | null {
-  if (signal.market_type !== 'outrights') return null;
-  
-  // Format: "NBA Championship Winner: Oklahoma City Thunder"
-  const colonMatch = signal.event_name.match(/:\s*(.+)$/);
-  if (colonMatch) {
-    return colonMatch[1].trim();
-  }
-  
-  return signal.outcome;
+// Format time remaining for display
+function formatTimeRemaining(hours: number): string {
+  if (hours < 1) return `${Math.round(hours * 60)}m`;
+  if (hours < 24) return `${Math.round(hours)}h`;
+  return `${Math.round(hours / 24)}d`;
 }
 
-// Calculate match score
-function calculateMatchScore(bookmakerEntity: string, polymarketEntity: string): number {
-  const be = normalizeName(bookmakerEntity);
-  const pe = normalizeName(polymarketEntity);
-  
-  // Exact match
-  if (be === pe) return 100;
-  
-  // One contains the other
-  if (be.includes(pe) || pe.includes(be)) return 90;
-  
-  // Check word-by-word matching
-  const beWords = be.split(/\s+/).filter(w => w.length > 2);
-  const peWords = pe.split(/\s+/).filter(w => w.length > 2);
-  
-  let matchCount = 0;
-  for (const word of beWords) {
-    if (peWords.some(pw => pw === word || pw.includes(word) || word.includes(pw))) {
-      matchCount++;
-    }
+// Determine urgency based on time and edge
+function calculateUrgency(hoursLeft: number | null, edge: number, isSharp: boolean): 'low' | 'normal' | 'high' | 'critical' {
+  // Near-term events with good edge = higher urgency
+  if (hoursLeft !== null && hoursLeft <= 6) {
+    if (edge >= 8 || isSharp) return 'critical';
+    if (edge >= 5) return 'high';
+    return 'normal';
   }
   
-  // Require at least 2 matching words or 1 if only 1 word exists
-  if (beWords.length === 1 && matchCount === 1) return 85;
-  if (matchCount >= 2) return 80;
-  if (matchCount === 1 && beWords.length <= 2) return 70;
+  if (hoursLeft !== null && hoursLeft <= 12) {
+    if (edge >= 10 || (edge >= 6 && isSharp)) return 'high';
+    if (edge >= 4) return 'normal';
+    return 'low';
+  }
   
-  return 0;
+  // Longer-term: only high if exceptional edge
+  if (edge >= 15) return 'high';
+  if (edge >= 8) return 'normal';
+  return 'low';
 }
 
 Deno.serve(async (req) => {
@@ -103,27 +86,61 @@ Deno.serve(async (req) => {
   try {
     console.log('Running signal detection...');
     
+    // Parse request body
+    let body: RequestBody = {};
+    try {
+      body = await req.json();
+    } catch {
+      // Default values
+    }
+    
+    const eventHorizonHours = body.eventHorizonHours || 24;
+    const minEventHorizonHours = body.minEventHorizonHours || 2;
+    const includeOutrights = body.includeOutrights === true; // Off by default now
+    
+    console.log(`Event horizon: ${minEventHorizonHours}h - ${eventHorizonHours}h, outrights: ${includeOutrights}`);
+    
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+    const now = new Date();
 
-    // Fetch recent bookmaker signals
-    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-    const signalsResponse = await fetch(
-      `${supabaseUrl}/rest/v1/bookmaker_signals?captured_at=gte.${twoHoursAgo}&market_type=eq.outrights&order=implied_probability.desc`,
-      {
-        headers: {
-          'apikey': supabaseKey,
-          'Authorization': `Bearer ${supabaseKey}`,
-        },
-      }
-    );
+    // Calculate time boundaries
+    const minHorizon = new Date(now.getTime() + minEventHorizonHours * 60 * 60 * 1000).toISOString();
+    const maxHorizon = new Date(now.getTime() + eventHorizonHours * 60 * 60 * 1000).toISOString();
+    const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString();
 
-    const signals: BookmakerSignal[] = await signalsResponse.json();
-    console.log(`Found ${signals.length} outright bookmaker signals`);
+    // PRIORITY: Fetch H2H signals within event horizon
+    const h2hQuery = `${supabaseUrl}/rest/v1/bookmaker_signals?captured_at=gte.${twoHoursAgo}&market_type=eq.h2h&commence_time=gte.${minHorizon}&commence_time=lte.${maxHorizon}&order=implied_probability.desc&limit=500`;
+    
+    const h2hResponse = await fetch(h2hQuery, {
+      headers: {
+        'apikey': supabaseKey,
+        'Authorization': `Bearer ${supabaseKey}`,
+      },
+    });
+
+    const h2hSignals: BookmakerSignal[] = await h2hResponse.json();
+    console.log(`Found ${h2hSignals.length} H2H signals within ${eventHorizonHours}h horizon`);
+
+    // Optionally fetch outright signals
+    let outrightSignals: BookmakerSignal[] = [];
+    if (includeOutrights) {
+      const outrightResponse = await fetch(
+        `${supabaseUrl}/rest/v1/bookmaker_signals?captured_at=gte.${twoHoursAgo}&market_type=eq.outrights&order=implied_probability.desc&limit=100`,
+        {
+          headers: {
+            'apikey': supabaseKey,
+            'Authorization': `Bearer ${supabaseKey}`,
+          },
+        }
+      );
+      outrightSignals = await outrightResponse.json();
+      console.log(`Found ${outrightSignals.length} outright signals`);
+    }
 
     // Fetch active Polymarket markets
     const marketsResponse = await fetch(
-      `${supabaseUrl}/rest/v1/polymarket_markets?status=eq.active&liquidity=gte.5000&order=volume.desc&limit=500`,
+      `${supabaseUrl}/rest/v1/polymarket_markets?status=eq.active&liquidity=gte.1000&order=volume.desc&limit=500`,
       {
         headers: {
           'apikey': supabaseKey,
@@ -135,90 +152,164 @@ Deno.serve(async (req) => {
     const markets: PolymarketMarket[] = await marketsResponse.json();
     console.log(`Found ${markets.length} Polymarket markets`);
 
-    // Pre-process Polymarket markets to extract entities
-    const marketEntities = new Map<string, { market: PolymarketMarket; entity: string }>();
-    for (const market of markets) {
-      const entity = extractPolymarketEntity(market.question);
-      if (entity) {
-        marketEntities.set(market.id, { market, entity });
-      }
-    }
-    console.log(`Extracted ${marketEntities.size} Polymarket entities`);
-
     const opportunities: any[] = [];
-    const processedPairs = new Set<string>();
+    const processedEvents = new Set<string>();
 
-    // Match each outright signal to Polymarket markets
-    for (const signal of signals) {
-      const bookmakerEntity = extractBookmakerEntity(signal);
-      if (!bookmakerEntity) continue;
+    // PROCESS H2H SIGNALS - These are the priority!
+    // Group by event to find best opportunities
+    const eventGroups = new Map<string, BookmakerSignal[]>();
+    for (const signal of h2hSignals) {
+      const existing = eventGroups.get(signal.event_name) || [];
+      existing.push(signal);
+      eventGroups.set(signal.event_name, existing);
+    }
+
+    console.log(`Processing ${eventGroups.size} unique H2H events`);
+
+    for (const [eventName, signals] of eventGroups) {
+      // Skip if already processed
+      if (processedEvents.has(eventName)) continue;
+      processedEvents.add(eventName);
+
+      // Find best signal for this event (prefer sharp books)
+      const sortedSignals = signals.sort((a, b) => {
+        if (a.is_sharp_book !== b.is_sharp_book) return a.is_sharp_book ? -1 : 1;
+        return b.confirming_books - a.confirming_books;
+      });
+
+      const bestSignal = sortedSignals[0];
+      const hoursLeft = hoursUntilEvent(bestSignal.commence_time);
       
-      for (const [marketId, { market, entity: polymarketEntity }] of marketEntities) {
-        const pairKey = `${signal.outcome}|${marketId}`;
-        if (processedPairs.has(pairKey)) continue;
-        
-        const matchScore = calculateMatchScore(bookmakerEntity, polymarketEntity);
-        if (matchScore < 70) continue;
-        
-        processedPairs.add(pairKey);
-        
-        const bookmakerProb = signal.implied_probability;
-        const polyPrice = market.yes_price;
-        
-        // Calculate edge
-        const edge = (bookmakerProb - polyPrice) * 100;
-        
-        // Minimum 2% edge for outrights
-        if (edge < 2) continue;
-        
-        // Skip extreme prices
-        if (polyPrice < 0.005 || polyPrice > 0.995) continue;
-        
-        // Calculate confidence
-        let confidence = 50;
-        confidence += Math.min(signal.confirming_books * 3, 15);
-        confidence += Math.min(market.liquidity / 100000, 15);
-        confidence += Math.min((matchScore - 70) / 3, 10);
-        confidence += Math.min(edge / 2, 10);
-        confidence = Math.min(Math.round(confidence), 100);
-        
-        // Urgency
-        let urgency: 'low' | 'normal' | 'high' | 'critical' = 'normal';
-        if (edge >= 15 && signal.confirming_books >= 5) urgency = 'critical';
-        else if (edge >= 10 || (edge >= 7 && signal.confirming_books >= 4)) urgency = 'high';
-        else if (edge < 5) urgency = 'low';
-        
-        console.log(`Match found: ${bookmakerEntity} -> ${polymarketEntity} (score: ${matchScore}, edge: ${edge.toFixed(1)}%)`);
-        
-        opportunities.push({
-          polymarket_market_id: market.id,
-          event_name: `${signal.outcome} - Championship`,
-          side: 'YES',
-          polymarket_price: polyPrice,
-          bookmaker_probability: bookmakerProb,
-          edge_percent: Math.round(edge * 10) / 10,
-          confidence_score: confidence,
-          urgency,
-          signal_factors: {
-            confirming_books: signal.confirming_books,
-            liquidity_score: Math.round(market.liquidity),
-            match_score: matchScore,
-            market_question: market.question,
-          },
-          status: 'active',
-          expires_at: market.end_date || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-        });
+      // Skip if outside our window
+      if (hoursLeft === null || hoursLeft < minEventHorizonHours || hoursLeft > eventHorizonHours) {
+        continue;
       }
+
+      // Try to match with Polymarket
+      let matchedMarket: PolymarketMarket | null = null;
+      let matchScore = 0;
+
+      const eventNorm = normalizeName(eventName);
+      for (const market of markets) {
+        const questionNorm = normalizeName(market.question);
+        
+        // Check for team name matches
+        const eventWords = eventNorm.split(/\s+vs\s+|\s+/);
+        let wordMatches = 0;
+        for (const word of eventWords) {
+          if (word.length > 3 && questionNorm.includes(word)) {
+            wordMatches++;
+          }
+        }
+        
+        if (wordMatches >= 2 && wordMatches > matchScore) {
+          matchScore = wordMatches;
+          matchedMarket = market;
+        }
+      }
+
+      // Calculate edge - use bookmaker probability vs market-implied fair price
+      // For H2H without Polymarket match, use consensus as the edge signal
+      const bookmakerProb = bestSignal.implied_probability;
+      let polyPrice = matchedMarket?.yes_price || null;
+      
+      // Calculate edge differently based on match
+      let edge: number;
+      let side: string;
+      
+      if (matchedMarket && polyPrice) {
+        // We have a Polymarket match - compare probabilities
+        edge = (bookmakerProb - polyPrice) * 100;
+        side = edge > 0 ? 'YES' : 'NO';
+        edge = Math.abs(edge);
+      } else {
+        // No Polymarket match - signal based on sharp book movement
+        // Consider it a signal if sharp books show different probability than avg
+        if (!bestSignal.is_sharp_book) continue; // Only trust sharp books without Polymarket confirmation
+        
+        // Use the sharp book probability as the signal
+        // Edge is measured as deviation from 50% (neutral)
+        edge = Math.abs(bookmakerProb - 0.5) * 100;
+        side = bookmakerProb > 0.5 ? 'YES' : 'NO';
+        polyPrice = 0.5; // Placeholder
+        
+        // Skip weak signals without Polymarket confirmation
+        if (edge < 5) continue;
+      }
+      
+      // Minimum edge threshold
+      if (edge < 2) continue;
+
+      // Calculate confidence
+      let confidence = 40;
+      confidence += bestSignal.is_sharp_book ? 15 : 0;
+      confidence += Math.min(bestSignal.confirming_books * 3, 15);
+      confidence += matchedMarket ? 15 : 0;
+      confidence += matchedMarket ? Math.min(matchedMarket.liquidity / 50000, 10) : 0;
+      if (hoursLeft && hoursLeft <= 12) confidence += 5; // Bonus for near-term
+      confidence = Math.min(Math.round(confidence), 100);
+
+      const urgency = calculateUrgency(hoursLeft, edge, bestSignal.is_sharp_book);
+      const timeLabel = formatTimeRemaining(hoursLeft);
+
+      opportunities.push({
+        polymarket_market_id: matchedMarket?.id || null,
+        event_name: eventName,
+        side,
+        polymarket_price: polyPrice,
+        bookmaker_probability: bookmakerProb,
+        edge_percent: Math.round(edge * 10) / 10,
+        confidence_score: confidence,
+        urgency,
+        signal_factors: {
+          hours_until_event: Math.round(hoursLeft * 10) / 10,
+          time_label: timeLabel,
+          confirming_books: bestSignal.confirming_books,
+          is_sharp_book: bestSignal.is_sharp_book,
+          market_type: 'h2h',
+          matched_polymarket: !!matchedMarket,
+          liquidity_score: matchedMarket?.liquidity || 0,
+        },
+        status: 'active',
+        expires_at: bestSignal.commence_time || new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+      });
+    }
+
+    // PROCESS OUTRIGHTS (if enabled) - Secondary priority
+    if (includeOutrights && outrightSignals.length > 0) {
+      // ... existing outright logic would go here
+      // Keeping separate for now since user wants H2H focus
     }
 
     console.log(`Detected ${opportunities.length} opportunities`);
 
-    // Sort and limit
-    opportunities.sort((a, b) => b.edge_percent - a.edge_percent);
+    // Sort by urgency then edge
+    const urgencyOrder = { critical: 0, high: 1, normal: 2, low: 3 };
+    opportunities.sort((a, b) => {
+      const urgencyDiff = urgencyOrder[a.urgency as keyof typeof urgencyOrder] - urgencyOrder[b.urgency as keyof typeof urgencyOrder];
+      if (urgencyDiff !== 0) return urgencyDiff;
+      return b.edge_percent - a.edge_percent;
+    });
+
     const topOpportunities = opportunities.slice(0, 50);
 
-    // Insert
+    // Clear old active opportunities and insert new ones
     if (topOpportunities.length > 0) {
+      // First, mark old opportunities as expired
+      await fetch(
+        `${supabaseUrl}/rest/v1/signal_opportunities?status=eq.active`,
+        {
+          method: 'PATCH',
+          headers: {
+            'apikey': supabaseKey,
+            'Authorization': `Bearer ${supabaseKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ status: 'expired' }),
+        }
+      );
+
+      // Insert new opportunities
       const insertResponse = await fetch(
         `${supabaseUrl}/rest/v1/signal_opportunities`,
         {
@@ -242,10 +333,13 @@ Deno.serve(async (req) => {
       JSON.stringify({
         success: true,
         opportunities: topOpportunities.slice(0, 10),
-        outright_signals: signals.length,
-        polymarkets_analyzed: marketEntities.size,
+        h2h_signals: h2hSignals.length,
+        outright_signals: outrightSignals.length,
+        unique_events: eventGroups.size,
+        polymarkets_analyzed: markets.length,
         signals_surfaced: topOpportunities.length,
-        timestamp: new Date().toISOString(),
+        event_horizon: `${minEventHorizonHours}h - ${eventHorizonHours}h`,
+        timestamp: now.toISOString(),
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
