@@ -20,3 +20,6 @@ verify_jwt = false
 
 [functions.sync-polymarket-h2h]
 verify_jwt = false
+
+[functions.polymarket-first-scan]
+verify_jwt = false
