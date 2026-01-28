@@ -50,7 +50,7 @@ export function AutomationPanel({
   isPaused,
 }: AutomationPanelProps) {
   const isNearLimit = dailyUsagePercent > 90;
-  const automationBlocked = isNearLimit || isPaused;
+  const automationBlocked = isPaused; // Only paused state blocks, not near-limit
 
   return (
     <Card className="border-border/50">
@@ -163,11 +163,14 @@ export function AutomationPanel({
         </div>
 
         {/* Warnings */}
+        {isNearLimit && (
+          <div className="text-xs text-orange-400 bg-orange-500/10 rounded px-2 py-1.5">
+            ⚠️ Approaching daily API limit ({dailyUsagePercent.toFixed(0)}% used)
+          </div>
+        )}
         {automationBlocked && (
           <div className="text-xs text-orange-400 bg-orange-500/10 rounded px-2 py-1.5">
-            {isNearLimit 
-              ? '⚠️ Auto-polling paused: approaching daily API limit'
-              : '⏸️ Auto-polling paused: scanning is paused'}
+            ⏸️ Auto-polling paused: scanning is paused
           </div>
         )}
 
