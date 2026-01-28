@@ -293,31 +293,69 @@ async function surfaceConfirmedSignal(
   if (liveEdge >= 5) urgency = 'critical';
   else if (liveEdge >= 3.5) urgency = 'high';
 
-  await supabase.from('signal_opportunities').upsert({
-    event_name: event.event_name,
-    recommended_outcome: event.bookmaker_market_key,
-    side: 'YES',
-    polymarket_price: livePolyPrice,
-    polymarket_yes_price: livePolyPrice,
-    polymarket_volume: event.polymarket_volume,
-    polymarket_updated_at: new Date().toISOString(),
-    polymarket_match_confidence: 1.0,
-    bookmaker_probability: bookmakerProb,
-    bookmaker_prob_fair: bookmakerProb,
-    edge_percent: liveEdge,
-    is_true_arbitrage: true,
-    confidence_score: Math.min(95, 65 + Math.round(liveEdge * 5)),
-    urgency,
-    status: 'active',
-    signal_factors: {
-      edge_type: 'polymarket_first_confirmed',
-      condition_id: event.polymarket_condition_id,
-      samples_captured: event.samples_since_hold + 1,
-      persistence_confirmed: true,
-    },
-  }, {
-    onConflict: 'event_name',
-  });
+  // First, check if an active signal already exists for this event
+  const { data: existing } = await supabase
+    .from('signal_opportunities')
+    .select('id')
+    .eq('event_name', event.event_name)
+    .eq('status', 'active')
+    .maybeSingle();
+
+  if (existing) {
+    // Update existing signal
+    const { error: updateError } = await supabase
+      .from('signal_opportunities')
+      .update({
+        polymarket_price: livePolyPrice,
+        polymarket_yes_price: livePolyPrice,
+        polymarket_volume: event.polymarket_volume,
+        polymarket_updated_at: new Date().toISOString(),
+        bookmaker_probability: bookmakerProb,
+        bookmaker_prob_fair: bookmakerProb,
+        edge_percent: liveEdge,
+        confidence_score: Math.min(95, 65 + Math.round(liveEdge * 5)),
+        urgency,
+      })
+      .eq('id', existing.id);
+
+    if (updateError) {
+      console.error('[ACTIVE-MODE-POLL] Failed to update signal:', updateError);
+    } else {
+      console.log(`[ACTIVE-MODE-POLL] Updated signal: ${event.event_name?.substring(0, 40)}`);
+    }
+  } else {
+    // Insert new signal
+    const { error: insertError } = await supabase.from('signal_opportunities').insert({
+      event_name: event.event_name,
+      recommended_outcome: event.bookmaker_market_key,
+      side: 'YES',
+      polymarket_price: livePolyPrice,
+      polymarket_yes_price: livePolyPrice,
+      polymarket_volume: event.polymarket_volume,
+      polymarket_updated_at: new Date().toISOString(),
+      polymarket_match_confidence: 1.0,
+      bookmaker_probability: bookmakerProb,
+      bookmaker_prob_fair: bookmakerProb,
+      edge_percent: liveEdge,
+      is_true_arbitrage: true,
+      confidence_score: Math.min(95, 65 + Math.round(liveEdge * 5)),
+      urgency,
+      status: 'active',
+      signal_factors: {
+        edge_type: 'polymarket_first_confirmed',
+        condition_id: event.polymarket_condition_id,
+        samples_captured: event.samples_since_hold + 1,
+        persistence_confirmed: true,
+        polymarket_question: event.polymarket_question,
+      },
+    });
+
+    if (insertError) {
+      console.error('[ACTIVE-MODE-POLL] Failed to insert signal:', insertError);
+    } else {
+      console.log(`[ACTIVE-MODE-POLL] Created signal: ${event.event_name?.substring(0, 40)}`);
+    }
+  }
 }
 
 // ============================================================================
