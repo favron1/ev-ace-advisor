@@ -23,6 +23,61 @@ interface PolymarketMarket {
   end_date: string | null;
 }
 
+// Check if a market question matches a specific match event (not a season/futures market)
+function isMatchEvent(question: string): boolean {
+  const q = question.toLowerCase();
+  // Exclude season-long, futures, and aggregate markets
+  if (q.includes('win the') && (q.includes('league') || q.includes('championship') || q.includes('cup'))) return false;
+  if (q.includes('2025-26') || q.includes('2025–26') || q.includes('2026')) return false;
+  if (q.includes('will') && q.includes('win')) return false; // "Will X win" suggests futures
+  if (q.includes('before') || q.includes('by')) return false; // "by March" etc
+  
+  // Match-specific patterns
+  if (q.includes(' vs ') || q.includes(' vs. ') || q.includes(' v ')) return true;
+  if (q.includes('winner') && q.includes('match')) return true;
+  
+  return false;
+}
+
+// Extract team names from event for matching
+function extractTeams(eventName: string): string[] {
+  // Split on common separators
+  const parts = eventName.split(/\s+vs\.?\s+|\s+v\s+|\s+-\s+/i);
+  return parts.map(p => p.trim().toLowerCase()).filter(p => p.length > 2);
+}
+
+// Score how well a market matches an event (0-100)
+function calculateMatchScore(eventName: string, marketQuestion: string): number {
+  const eventLower = eventName.toLowerCase();
+  const questionLower = marketQuestion.toLowerCase();
+  
+  // Extract teams from event
+  const teams = extractTeams(eventName);
+  if (teams.length < 2) return 0;
+  
+  // Check if both teams are mentioned
+  const team1Match = teams[0] && questionLower.includes(teams[0]);
+  const team2Match = teams[1] && questionLower.includes(teams[1]);
+  
+  // Require both teams to match for a valid pairing
+  if (!team1Match || !team2Match) return 0;
+  
+  // Must be a match-type market, not futures
+  if (!isMatchEvent(marketQuestion)) return 0;
+  
+  let score = 60; // Base score for matching both teams
+  
+  // Bonus for exact format match
+  if (questionLower.includes(' vs ') || questionLower.includes(' v ')) score += 20;
+  
+  // Bonus for similar length (suggests same event type)
+  const lengthDiff = Math.abs(eventName.length - marketQuestion.length);
+  if (lengthDiff < 20) score += 10;
+  if (lengthDiff < 10) score += 10;
+  
+  return Math.min(score, 100);
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -49,9 +104,9 @@ Deno.serve(async (req) => {
     const signals: BookmakerSignal[] = await signalsResponse.json();
     console.log(`Found ${signals.length} recent bookmaker signals`);
 
-    // Fetch active Polymarket markets
+    // Fetch active Polymarket markets with good liquidity
     const marketsResponse = await fetch(
-      `${supabaseUrl}/rest/v1/polymarket_markets?status=eq.active&order=volume.desc&limit=100`,
+      `${supabaseUrl}/rest/v1/polymarket_markets?status=eq.active&liquidity=gte.1000&order=volume.desc&limit=200`,
       {
         headers: {
           'apikey': supabaseKey,
@@ -61,9 +116,10 @@ Deno.serve(async (req) => {
     );
 
     const markets: PolymarketMarket[] = await marketsResponse.json();
-    console.log(`Found ${markets.length} active Polymarket markets`);
+    console.log(`Found ${markets.length} active Polymarket markets with liquidity >= 1000`);
 
     const opportunities: any[] = [];
+    const processedPairs = new Set<string>(); // Avoid duplicates
 
     // Aggregate signals by event
     const eventSignals = new Map<string, BookmakerSignal[]>();
@@ -75,16 +131,26 @@ Deno.serve(async (req) => {
       eventSignals.get(key)!.push(signal);
     }
 
-    // For each event with signals, check for Polymarket matches
-    for (const [eventName, eventSignalList] of eventSignals) {
-      // Find matching Polymarket market (fuzzy match on keywords)
-      const keywords = eventName.toLowerCase().split(/\s+vs\s+|\s+/);
-      const matchingMarket = markets.find(market => {
-        const question = market.question.toLowerCase();
-        return keywords.some(kw => kw.length > 3 && question.includes(kw));
-      });
+    console.log(`Processing ${eventSignals.size} unique events`);
 
-      if (!matchingMarket) continue;
+    // For each event with signals, find matching Polymarket markets
+    for (const [eventName, eventSignalList] of eventSignals) {
+      // Find best matching Polymarket market
+      let bestMatch: { market: PolymarketMarket; score: number } | null = null;
+      
+      for (const market of markets) {
+        const score = calculateMatchScore(eventName, market.question);
+        if (score >= 70 && (!bestMatch || score > bestMatch.score)) {
+          bestMatch = { market, score };
+        }
+      }
+
+      if (!bestMatch) continue;
+      
+      const matchingMarket = bestMatch.market;
+      const pairKey = `${eventName}|${matchingMarket.id}`;
+      if (processedPairs.has(pairKey)) continue;
+      processedPairs.add(pairKey);
 
       // Calculate consensus probability from bookmakers
       const avgProb = eventSignalList.reduce((sum, s) => sum + s.implied_probability, 0) / eventSignalList.length;
@@ -99,19 +165,23 @@ Deno.serve(async (req) => {
       const yesEdge = (avgProb - polyYesProb) * 100;
       const noEdge = ((1 - avgProb) - polyNoProb) * 100;
 
-      // Only surface if edge is significant
-      const minEdge = 3; // 3% minimum edge
+      // Only surface if edge is significant (minimum 3%)
+      const minEdge = 3;
       
       if (yesEdge >= minEdge || noEdge >= minEdge) {
         const side = yesEdge >= noEdge ? 'YES' : 'NO';
         const edge = side === 'YES' ? yesEdge : noEdge;
         const polyPrice = side === 'YES' ? polyYesProb : polyNoProb;
 
+        // Skip if the Polymarket price is extremely low (likely thin/illiquid)
+        if (polyPrice < 0.05 || polyPrice > 0.95) continue;
+
         // Calculate confidence score
         let confidence = 50; // Base
-        confidence += Math.min(maxConfirming * 5, 20); // +5 per confirming book, max 20
-        confidence += Math.min(avgMovement, 15); // Movement adds confidence
-        confidence += Math.min(matchingMarket.liquidity / 10000, 15); // Liquidity adds confidence
+        confidence += Math.min(maxConfirming * 3, 15); // +3 per confirming book, max 15
+        confidence += Math.min(avgMovement * 2, 10); // Movement adds confidence
+        confidence += Math.min(matchingMarket.liquidity / 50000, 15); // Liquidity adds confidence
+        confidence += Math.min(bestMatch.score - 70, 10); // Match quality bonus
         confidence = Math.min(Math.round(confidence), 100);
 
         // Determine urgency
@@ -138,14 +208,15 @@ Deno.serve(async (req) => {
             movement_magnitude: avgMovement,
             confirming_books: maxConfirming,
             liquidity_score: Math.round(matchingMarket.liquidity),
+            match_score: bestMatch.score,
           },
           status: 'active',
-          expires_at: new Date(Date.now() + expiryHours * 60 * 60 * 1000).toISOString(),
+          expires_at: new Date(Date.now() + Math.max(expiryHours, 1) * 60 * 60 * 1000).toISOString(),
         });
       }
     }
 
-    console.log(`Detected ${opportunities.length} opportunities`);
+    console.log(`Detected ${opportunities.length} valid opportunities`);
 
     // Insert opportunities
     if (opportunities.length > 0) {
@@ -172,7 +243,7 @@ Deno.serve(async (req) => {
     return new Response(
       JSON.stringify({
         success: true,
-        opportunities: opportunities,
+        opportunities: opportunities.slice(0, 10), // Return first 10 in response
         movements_detected: signals.length,
         polymarkets_analyzed: markets.length,
         signals_surfaced: opportunities.length,
