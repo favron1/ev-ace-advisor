@@ -6,7 +6,6 @@ const corsHeaders = {
 interface RequestBody {
   eventHorizonHours?: number;
   minEventHorizonHours?: number;
-  includeOutrights?: boolean;
 }
 
 interface BookmakerSignal {
@@ -20,17 +19,6 @@ interface BookmakerSignal {
   is_sharp_book: boolean;
   commence_time: string | null;
   captured_at: string;
-}
-
-interface PolymarketMarket {
-  id: string;
-  market_id: string;
-  question: string;
-  yes_price: number;
-  no_price: number;
-  volume: number;
-  liquidity: number;
-  end_date: string | null;
 }
 
 // Normalize team names for matching
@@ -96,9 +84,8 @@ Deno.serve(async (req) => {
     
     const eventHorizonHours = body.eventHorizonHours || 24;
     const minEventHorizonHours = body.minEventHorizonHours || 2;
-    const includeOutrights = body.includeOutrights === true; // Off by default now
     
-    console.log(`Event horizon: ${minEventHorizonHours}h - ${eventHorizonHours}h, outrights: ${includeOutrights}`);
+    console.log(`Event horizon: ${minEventHorizonHours}h - ${eventHorizonHours}h (H2H only)`);
     
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -121,36 +108,6 @@ Deno.serve(async (req) => {
 
     const h2hSignals: BookmakerSignal[] = await h2hResponse.json();
     console.log(`Found ${h2hSignals.length} H2H signals within ${eventHorizonHours}h horizon`);
-
-    // Optionally fetch outright signals
-    let outrightSignals: BookmakerSignal[] = [];
-    if (includeOutrights) {
-      const outrightResponse = await fetch(
-        `${supabaseUrl}/rest/v1/bookmaker_signals?captured_at=gte.${twoHoursAgo}&market_type=eq.outrights&order=implied_probability.desc&limit=100`,
-        {
-          headers: {
-            'apikey': supabaseKey,
-            'Authorization': `Bearer ${supabaseKey}`,
-          },
-        }
-      );
-      outrightSignals = await outrightResponse.json();
-      console.log(`Found ${outrightSignals.length} outright signals`);
-    }
-
-    // Fetch active Polymarket markets
-    const marketsResponse = await fetch(
-      `${supabaseUrl}/rest/v1/polymarket_markets?status=eq.active&liquidity=gte.1000&order=volume.desc&limit=500`,
-      {
-        headers: {
-          'apikey': supabaseKey,
-          'Authorization': `Bearer ${supabaseKey}`,
-        },
-      }
-    );
-
-    const markets: PolymarketMarket[] = await marketsResponse.json();
-    console.log(`Found ${markets.length} Polymarket markets`);
 
     const opportunities: any[] = [];
     const processedEvents = new Set<string>();
@@ -185,57 +142,12 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      // Try to match with Polymarket
-      let matchedMarket: PolymarketMarket | null = null;
-      let matchScore = 0;
-
-      const eventNorm = normalizeName(eventName);
-      for (const market of markets) {
-        const questionNorm = normalizeName(market.question);
-        
-        // Check for team name matches
-        const eventWords = eventNorm.split(/\s+vs\s+|\s+/);
-        let wordMatches = 0;
-        for (const word of eventWords) {
-          if (word.length > 3 && questionNorm.includes(word)) {
-            wordMatches++;
-          }
-        }
-        
-        if (wordMatches >= 2 && wordMatches > matchScore) {
-          matchScore = wordMatches;
-          matchedMarket = market;
-        }
-      }
-
-      // Calculate edge - use bookmaker probability vs market-implied fair price
-      // For H2H without Polymarket match, use consensus as the edge signal
+      // H2H-only: we do NOT match against long-dated Polymarket markets (this was causing far-future results).
+      // For now, treat "edge" as distance from 50% implied probability (proxy signal strength).
       const bookmakerProb = bestSignal.implied_probability;
-      let polyPrice = matchedMarket?.yes_price || null;
-      
-      // Calculate edge differently based on match
-      let edge: number;
-      let side: string;
-      
-      if (matchedMarket && polyPrice) {
-        // We have a Polymarket match - compare probabilities
-        edge = (bookmakerProb - polyPrice) * 100;
-        side = edge > 0 ? 'YES' : 'NO';
-        edge = Math.abs(edge);
-      } else {
-        // No Polymarket match - signal based on sharp book movement
-        // Consider it a signal if sharp books show different probability than avg
-        if (!bestSignal.is_sharp_book) continue; // Only trust sharp books without Polymarket confirmation
-        
-        // Use the sharp book probability as the signal
-        // Edge is measured as deviation from 50% (neutral)
-        edge = Math.abs(bookmakerProb - 0.5) * 100;
-        side = bookmakerProb > 0.5 ? 'YES' : 'NO';
-        polyPrice = 0.5; // Placeholder
-        
-        // Skip weak signals without Polymarket confirmation
-        if (edge < 5) continue;
-      }
+      const edge = Math.abs(bookmakerProb - 0.5) * 100;
+      const side = bookmakerProb > 0.5 ? 'YES' : 'NO';
+      const polyPrice = 0.5; // placeholder until we add proper H2H market matching
       
       // Minimum edge threshold
       if (edge < 2) continue;
@@ -244,8 +156,6 @@ Deno.serve(async (req) => {
       let confidence = 40;
       confidence += bestSignal.is_sharp_book ? 15 : 0;
       confidence += Math.min(bestSignal.confirming_books * 3, 15);
-      confidence += matchedMarket ? 15 : 0;
-      confidence += matchedMarket ? Math.min(matchedMarket.liquidity / 50000, 10) : 0;
       if (hoursLeft && hoursLeft <= 12) confidence += 5; // Bonus for near-term
       confidence = Math.min(Math.round(confidence), 100);
 
@@ -253,7 +163,7 @@ Deno.serve(async (req) => {
       const timeLabel = formatTimeRemaining(hoursLeft);
 
       opportunities.push({
-        polymarket_market_id: matchedMarket?.id || null,
+        polymarket_market_id: null,
         event_name: eventName,
         side,
         polymarket_price: polyPrice,
@@ -267,18 +177,11 @@ Deno.serve(async (req) => {
           confirming_books: bestSignal.confirming_books,
           is_sharp_book: bestSignal.is_sharp_book,
           market_type: 'h2h',
-          matched_polymarket: !!matchedMarket,
-          liquidity_score: matchedMarket?.liquidity || 0,
+          matched_polymarket: false,
         },
         status: 'active',
         expires_at: bestSignal.commence_time || new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
       });
-    }
-
-    // PROCESS OUTRIGHTS (if enabled) - Secondary priority
-    if (includeOutrights && outrightSignals.length > 0) {
-      // ... existing outright logic would go here
-      // Keeping separate for now since user wants H2H focus
     }
 
     console.log(`Detected ${opportunities.length} opportunities`);
@@ -293,35 +196,26 @@ Deno.serve(async (req) => {
 
     const topOpportunities = opportunities.slice(0, 50);
 
-    // Clear old active opportunities and insert new ones
-    if (topOpportunities.length > 0) {
-      // First, mark old opportunities as expired
-      await fetch(
-        `${supabaseUrl}/rest/v1/signal_opportunities?status=eq.active`,
-        {
-          method: 'PATCH',
-          headers: {
-            'apikey': supabaseKey,
-            'Authorization': `Bearer ${supabaseKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ status: 'expired' }),
-        }
-      );
+    // Always clear active opportunities so the UI can't keep showing far-future leftovers
+    await fetch(`${supabaseUrl}/rest/v1/signal_opportunities?status=eq.active`, {
+      method: 'DELETE',
+      headers: {
+        'apikey': supabaseKey,
+        'Authorization': `Bearer ${supabaseKey}`,
+      },
+    });
 
-      // Insert new opportunities
-      const insertResponse = await fetch(
-        `${supabaseUrl}/rest/v1/signal_opportunities`,
-        {
-          method: 'POST',
-          headers: {
-            'apikey': supabaseKey,
-            'Authorization': `Bearer ${supabaseKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(topOpportunities),
-        }
-      );
+    // Insert the new near-term H2H opportunities
+    if (topOpportunities.length > 0) {
+      const insertResponse = await fetch(`${supabaseUrl}/rest/v1/signal_opportunities`, {
+        method: 'POST',
+        headers: {
+          'apikey': supabaseKey,
+          'Authorization': `Bearer ${supabaseKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(topOpportunities),
+      });
 
       if (!insertResponse.ok) {
         const error = await insertResponse.text();
@@ -334,9 +228,7 @@ Deno.serve(async (req) => {
         success: true,
         opportunities: topOpportunities.slice(0, 10),
         h2h_signals: h2hSignals.length,
-        outright_signals: outrightSignals.length,
         unique_events: eventGroups.size,
-        polymarkets_analyzed: markets.length,
         signals_surfaced: topOpportunities.length,
         event_horizon: `${minEventHorizonHours}h - ${eventHorizonHours}h`,
         timestamp: now.toISOString(),
