@@ -1,15 +1,22 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import type { EventWatchState, ProbabilitySnapshot, MovementLog } from '@/types/scan-config';
 import { useToast } from '@/hooks/use-toast';
 
-export function useWatchState() {
+interface UseWatchStateOptions {
+  onNewConfirmed?: (events: EventWatchState[]) => void;
+}
+
+export function useWatchState(options?: UseWatchStateOptions) {
   const [watchingEvents, setWatchingEvents] = useState<EventWatchState[]>([]);
   const [activeEvents, setActiveEvents] = useState<EventWatchState[]>([]);
   const [confirmedEvents, setConfirmedEvents] = useState<EventWatchState[]>([]);
   const [loading, setLoading] = useState(true);
   const [polling, setPolling] = useState(false);
   const { toast } = useToast();
+
+  // Track previous confirmed IDs for notification detection
+  const previousConfirmedIdsRef = useRef<Set<string>>(new Set());
 
   const fetchWatchStates = useCallback(async () => {
     try {
@@ -24,13 +31,28 @@ export function useWatchState() {
       const events = (data || []) as unknown as EventWatchState[];
       setWatchingEvents(events.filter(e => e.watch_state === 'watching'));
       setActiveEvents(events.filter(e => e.watch_state === 'active'));
-      setConfirmedEvents(events.filter(e => e.watch_state === 'confirmed' || e.watch_state === 'signal'));
+      
+      const newConfirmed = events.filter(e => e.watch_state === 'confirmed' || e.watch_state === 'signal');
+      setConfirmedEvents(newConfirmed);
+
+      // Check for new confirmed events and trigger callback
+      if (options?.onNewConfirmed) {
+        const previousIds = previousConfirmedIdsRef.current;
+        const newlyConfirmed = newConfirmed.filter(e => !previousIds.has(e.id));
+        
+        if (newlyConfirmed.length > 0) {
+          options.onNewConfirmed(newlyConfirmed);
+        }
+      }
+
+      // Update previous IDs ref
+      previousConfirmedIdsRef.current = new Set(newConfirmed.map(e => e.id));
     } catch (err) {
       console.error('Failed to fetch watch states:', err);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [options]);
 
   // Run Watch Mode poll
   const runWatchModePoll = useCallback(async () => {
