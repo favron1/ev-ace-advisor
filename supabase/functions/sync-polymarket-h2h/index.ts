@@ -1,14 +1,18 @@
 // ============================================================================
-// SYNC-POLYMARKET-H2H: Bulk fetch ALL Polymarket sports H2H markets
+// SYNC-POLYMARKET-SPORTS: Bulk fetch ALL Polymarket sports markets
 // ============================================================================
 // This function runs daily (or on-demand) to populate the polymarket_h2h_cache
-// table with all active sports markets. This enables reliable matching by
-// pre-caching markets rather than searching per-event.
+// table with all active sports markets including:
+// - H2H (head-to-head matchups)
+// - Props (player/team propositions)
+// - Totals (over/under)
+// - Spreads (point spreads)
+// - Player-specific markets
 //
 // FLOW:
 // 1. Paginate through ALL active Polymarket events
-// 2. Filter for sports-related H2H markets (NBA, NFL, NHL, UFC, Tennis, Soccer)
-// 3. Extract normalized team names using regex patterns
+// 2. Filter for sports-related markets (NBA, NFL, NHL, UFC, Tennis, Soccer)
+// 3. Classify market type and extract relevant data
 // 4. Store in polymarket_h2h_cache for fast matching by bookmaker detection
 // ============================================================================
 
@@ -59,8 +63,9 @@ const SPORTS_KEYWORDS = [
   'chelsea', 'arsenal', 'tottenham', 'real madrid', 'barcelona', 'bayern',
   'world cup', 'euro 20',
   
-  // Match indicators
-  'vs', 'versus', 'beat', 'win against', 'game', 'match',
+  // Generic sports terms
+  'game', 'match', 'points', 'score', 'goals', 'assists', 'rebounds', 'touchdowns',
+  'yards', 'passing', 'rushing', 'receiving', 'strikeouts', 'home runs',
 ];
 
 // Team alias mapping for normalization
@@ -241,19 +246,48 @@ function isSportsEvent(title: string, question: string): boolean {
   return SPORTS_KEYWORDS.some(keyword => text.includes(keyword));
 }
 
-// Check if market is an H2H (head-to-head) market vs a futures market
-function isH2HMarket(title: string, question: string): boolean {
+// Classify market type based on title/question content
+function classifyMarketType(title: string, question: string): string {
   const text = `${title} ${question}`.toLowerCase();
   
+  // Player props indicators
+  const playerPropIndicators = ['points', 'rebounds', 'assists', 'touchdowns', 'yards', 
+    'passing', 'rushing', 'receiving', 'strikeouts', 'home runs', 'goals scored by',
+    'will score', 'how many', 'over/under player'];
+  if (playerPropIndicators.some(ind => text.includes(ind))) return 'player_prop';
+  
+  // Totals/Over-Under indicators
+  const totalIndicators = ['over', 'under', 'total points', 'total goals', 'combined score',
+    'total score', 'o/u', 'over/under'];
+  if (totalIndicators.some(ind => text.includes(ind))) return 'total';
+  
+  // Spread indicators
+  const spreadIndicators = ['spread', 'handicap', 'by more than', 'margin', 'cover'];
+  if (spreadIndicators.some(ind => text.includes(ind))) return 'spread';
+  
   // H2H indicators
-  const h2hIndicators = ['vs', 'versus', 'beat', 'win against', 'game', 'match'];
-  const hasH2HIndicator = h2hIndicators.some(ind => text.includes(ind));
+  const h2hIndicators = ['vs', 'versus', 'beat', 'win against', 'to win'];
+  if (h2hIndicators.some(ind => text.includes(ind))) return 'h2h';
   
-  // Futures/championship indicators (negative)
-  const futuresIndicators = ['championship', 'finals', 'win the', 'mvp', 'award', 'season'];
-  const hasFuturesIndicator = futuresIndicators.some(ind => text.includes(ind));
+  // Futures/championship (still capture but classify)
+  const futuresIndicators = ['championship', 'finals', 'win the', 'mvp', 'award', 'season', 'playoff'];
+  if (futuresIndicators.some(ind => text.includes(ind))) return 'futures';
   
-  return hasH2HIndicator && !hasFuturesIndicator;
+  // Default to prop for unclassified sports markets
+  return 'prop';
+}
+
+// Check if market should be included (more permissive than before)
+function shouldIncludeMarket(title: string, question: string): boolean {
+  const text = `${title} ${question}`.toLowerCase();
+  
+  // Exclude purely political/non-sports markets
+  const excludeIndicators = ['election', 'president', 'congress', 'senate', 'political',
+    'bitcoin', 'crypto', 'stock', 'fed', 'interest rate', 'cpi', 'gdp'];
+  if (excludeIndicators.some(ind => text.includes(ind))) return false;
+  
+  // Include if it matches any sports keyword
+  return isSportsEvent(title, question);
 }
 
 // Parse date from Polymarket event
@@ -374,13 +408,16 @@ Deno.serve(async (req) => {
 
         const question = market.question || title;
         
-        // Focus on H2H markets (skip futures for now)
-        if (!isH2HMarket(title, question)) {
+        // Check if market should be included (sports-related, not political)
+        if (!shouldIncludeMarket(title, question)) {
           skippedFutures++;
           continue;
         }
 
-        // Extract team names
+        // Classify market type
+        const marketType = classifyMarketType(title, question);
+
+        // Extract team names (will be null for non-H2H markets)
         const teams = extractTeams(title, question);
         if (!teams.home && !teams.away) {
           skippedNoTeams++;
@@ -412,6 +449,7 @@ Deno.serve(async (req) => {
           team_home_normalized: teams.homeNormalized,
           team_away_normalized: teams.awayNormalized,
           sport_category: sportCategory,
+          market_type: marketType,
           event_date: eventDate?.toISOString() || null,
           yes_price: yesPrice,
           no_price: noPrice,
@@ -424,8 +462,15 @@ Deno.serve(async (req) => {
       }
     }
 
-    console.log(`[SYNC-POLYMARKET-H2H] Found ${sportsMarkets.length} sports H2H markets`);
-    console.log(`[SYNC-POLYMARKET-H2H] Skipped: ${skippedNonSports} non-sports, ${skippedFutures} futures, ${skippedNoTeams} no teams`);
+    console.log(`[SYNC-POLYMARKET-SPORTS] Found ${sportsMarkets.length} sports markets`);
+    console.log(`[SYNC-POLYMARKET-SPORTS] Skipped: ${skippedNonSports} non-sports, ${skippedFutures} excluded, ${skippedNoTeams} no data`);
+    
+    // Log market type breakdown
+    const typeBreakdown: Record<string, number> = {};
+    for (const m of sportsMarkets) {
+      typeBreakdown[m.market_type] = (typeBreakdown[m.market_type] || 0) + 1;
+    }
+    console.log(`[SYNC-POLYMARKET-SPORTS] By type:`, JSON.stringify(typeBreakdown));
 
     // Upsert to database
     if (sportsMarkets.length > 0) {
@@ -466,17 +511,18 @@ Deno.serve(async (req) => {
     }
 
     const duration = Date.now() - startTime;
-    console.log(`[SYNC-POLYMARKET-H2H] Complete in ${duration}ms`);
+    console.log(`[SYNC-POLYMARKET-SPORTS] Complete in ${duration}ms`);
 
     return new Response(
       JSON.stringify({
         success: true,
         total_events_fetched: allEvents.length,
-        sports_h2h_markets: sportsMarkets.length,
+        sports_markets: sportsMarkets.length,
+        by_type: typeBreakdown,
         skipped: {
           non_sports: skippedNonSports,
-          futures: skippedFutures,
-          no_teams: skippedNoTeams,
+          excluded: skippedFutures,
+          no_data: skippedNoTeams,
         },
         duration_ms: duration,
       }),
@@ -484,7 +530,7 @@ Deno.serve(async (req) => {
     );
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    console.error('[SYNC-POLYMARKET-H2H] Error:', error);
+    console.error('[SYNC-POLYMARKET-SPORTS] Error:', error);
     return new Response(
       JSON.stringify({ error: errorMessage }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }

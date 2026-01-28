@@ -237,6 +237,7 @@ export type Database = {
           last_bulk_sync: string | null
           last_price_update: string | null
           liquidity: number | null
+          market_type: string | null
           no_price: number
           question: string
           sport_category: string | null
@@ -257,6 +258,7 @@ export type Database = {
           last_bulk_sync?: string | null
           last_price_update?: string | null
           liquidity?: number | null
+          market_type?: string | null
           no_price: number
           question: string
           sport_category?: string | null
@@ -277,6 +279,7 @@ export type Database = {
           last_bulk_sync?: string | null
           last_price_update?: string | null
           liquidity?: number | null
+          market_type?: string | null
           no_price?: number
           question?: string
           sport_category?: string | null
