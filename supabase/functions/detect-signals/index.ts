@@ -53,8 +53,8 @@ interface PolymarketMarket {
 }
 
 // Configuration constants
-const MATCH_THRESHOLD = 0.85;
-const CHAMPIONSHIP_MATCH_THRESHOLD = 0.70; // Lower threshold for championship matching
+const MATCH_THRESHOLD = 0.70; // Lowered from 0.85 to better match nickname-based titles like "Wolves vs Mavs"
+const CHAMPIONSHIP_MATCH_THRESHOLD = 0.65; // Lower threshold for championship matching
 const AMBIGUITY_MARGIN = 0.03;
 // Default staleness (can be overridden during spike mode)
 const DEFAULT_STALENESS_HOURS_H2H = 2; // Strict for H2H (real-time matters)
@@ -745,9 +745,10 @@ async function fetchPolymarketForEvent(eventName: string, outcome: string, maxSt
       liveApiCallsUsed++;
       
       const encodedSearch = encodeURIComponent(searchTerm);
-      const url = `https://gamma-api.polymarket.com/events?active=true&closed=false&limit=20&title_contains=${encodedSearch}`;
+      // Add category_slug=sports to filter for sports markets only, not political/crypto
+      const url = `https://gamma-api.polymarket.com/events?active=true&closed=false&limit=30&category_slug=sports&title_contains=${encodedSearch}`;
       
-      console.log(`[POLY-LIVE] Trying search: ${searchTerm} (call ${liveApiCallsUsed}/${MAX_LIVE_API_LOOKUPS})`);
+      console.log(`[POLY-LIVE] Trying search: "${searchTerm}" in sports category (call ${liveApiCallsUsed}/${MAX_LIVE_API_LOOKUPS})`);
       
       const response = await fetch(url, {
         headers: { 'Accept': 'application/json' },
@@ -831,27 +832,38 @@ function findBestLiveMatch(eventName: string, outcome: string, events: any[], ma
   
   let bestMatch: LivePolymarketMatch | null = null;
   
+  console.log(`[POLY-LIVE-MATCH] Processing ${events.length} events for: ${eventName}`);
+  
   for (const event of events) {
     const eventMarkets = event.markets || [];
+    console.log(`[POLY-LIVE-MATCH] Event "${(event.title || 'untitled').slice(0,40)}" has ${eventMarkets.length} markets`);
     
     for (const market of eventMarkets) {
       // Skip closed or inactive markets
-      if (market.closed || !market.active) continue;
+      if (market.closed || !market.active) {
+        console.log(`[POLY-LIVE-MATCH] Skipping closed/inactive: ${market.question?.slice(0,30)}`);
+        continue;
+      }
       
       // Check volume - minimum $2K for H2H
       const volume = parseFloat(market.volume) || 0;
-      if (volume < MIN_VOLUME_REJECT) continue;
+      if (volume < MIN_VOLUME_REJECT) {
+        console.log(`[POLY-LIVE-MATCH] Skipping low volume ($${volume.toFixed(0)}): ${market.question?.slice(0,30)}`);
+        continue;
+      }
       
-      // Check staleness
+      // Check staleness - but use relaxed 24h for live search (we'll validate freshness later)
       const lastUpdated = market.lastUpdateTimestamp || market.updatedAt || market.lastTradeTimestamp;
       if (lastUpdated) {
         const hoursSinceUpdate = (Date.now() - new Date(lastUpdated).getTime()) / (1000 * 60 * 60);
-        if (hoursSinceUpdate > maxStalenessHours) {
+        // Use 24h for live search to catch more markets, we can filter later
+        if (hoursSinceUpdate > 24) {
+          console.log(`[POLY-LIVE-MATCH] Skipping stale (${hoursSinceUpdate.toFixed(1)}h): ${market.question?.slice(0,30)}`);
           continue;
         }
       }
       
-      // Parse prices
+      // Parse prices - try multiple formats
       let yesPrice = 0.5;
       let noPrice = 0.5;
       
@@ -864,24 +876,47 @@ function findBestLiveMatch(eventName: string, outcome: string, events: any[], ma
             yesPrice = parseFloat(prices[0]) || 0.5;
             noPrice = parseFloat(prices[1]) || 0.5;
           }
-        } catch {
-          // Use defaults
+        } catch (e) {
+          console.log(`[POLY-LIVE-MATCH] Price parse error for ${market.question?.slice(0,30)}: ${e}`);
         }
       }
       
-      // Skip markets with no real price data
-      if (yesPrice === 0.5 && noPrice === 0.5) continue;
+      // Try alternative price fields if outcomePrices failed
+      if (yesPrice === 0.5 && noPrice === 0.5) {
+        if (market.bestAsk !== undefined && market.bestBid !== undefined) {
+          yesPrice = parseFloat(market.bestAsk) || 0.5;
+          noPrice = 1 - yesPrice;
+        } else if (market.lastTradePrice !== undefined) {
+          yesPrice = parseFloat(market.lastTradePrice) || 0.5;
+          noPrice = 1 - yesPrice;
+        }
+      }
+      
+      // Only skip if we truly have no price data AND low volume
+      if (yesPrice === 0.5 && noPrice === 0.5 && volume < MIN_VOLUME_FLAG) {
+        console.log(`[POLY-LIVE-MATCH] Skipping no price data: ${market.question?.slice(0,30)}`);
+        continue;
+      }
       
       const questionNorm = normalizeName(market.question || event.title || '');
       const questionTokens = tokenize(questionNorm);
       
+      // Expand question tokens with aliases to handle "Wolves" matching "Timberwolves"
+      const expandedQuestionTokens = new Set<string>();
+      for (const token of questionTokens) {
+        expandWithAliases(token).forEach(t => expandedQuestionTokens.add(t));
+      }
+      
       // Calculate similarity scores
-      const eventJaccard = jaccardSimilarity(eventTokens, questionTokens);
-      const outcomeJaccard = jaccardSimilarity(outcomeTokens, questionTokens);
+      const eventJaccard = jaccardSimilarity(eventTokens, expandedQuestionTokens);
+      const outcomeJaccard = jaccardSimilarity(outcomeTokens, expandedQuestionTokens);
       const levenSim = levenshteinSimilarity(eventNorm, questionNorm);
       
-      // Combined confidence score
-      const confidence = (eventJaccard * 0.4) + (outcomeJaccard * 0.35) + (levenSim * 0.25);
+      // Combined confidence score - boost Jaccard weight since tokens are expanded
+      const confidence = (eventJaccard * 0.45) + (outcomeJaccard * 0.35) + (levenSim * 0.20);
+      
+      // Debug log match attempts
+      console.log(`[POLY-LIVE-MATCH] "${questionNorm.slice(0,40)}" -> eventJ=${(eventJaccard*100).toFixed(0)}% outcomeJ=${(outcomeJaccard*100).toFixed(0)}% lev=${(levenSim*100).toFixed(0)}% = ${(confidence*100).toFixed(0)}%`);
       
       if (!bestMatch || confidence > bestMatch.confidence) {
         bestMatch = {
