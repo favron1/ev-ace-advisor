@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { arbitrageApi } from '@/lib/api/arbitrage';
-import type { SignalOpportunity, SignalDetectionResult } from '@/types/arbitrage';
+import type { SignalOpportunity, SignalDetectionResult, EnrichedSignal } from '@/types/arbitrage';
 import { useToast } from '@/hooks/use-toast';
+import { analyzeExecution } from '@/lib/execution-engine';
 
 export function useSignals() {
   const [signals, setSignals] = useState<SignalOpportunity[]>([]);
@@ -112,21 +113,36 @@ export function useSignals() {
     fetchSignals();
   }, [fetchSignals]);
 
+  // Enrich signals with execution analysis
+  const enrichedSignals: EnrichedSignal[] = useMemo(() => {
+    return signals.map(signal => ({
+      ...signal,
+      execution: analyzeExecution(signal, 100), // Default $100 stake
+    }));
+  }, [signals]);
+
   // Filter and sort helpers
   const getFilteredSignals = useCallback((filters: {
     minEdge?: number;
     minConfidence?: number;
     urgency?: string[];
     trueEdgesOnly?: boolean;
+    bettableOnly?: boolean; // NEW: Filter by execution decision
   }) => {
-    return signals.filter(s => {
+    return enrichedSignals.filter(s => {
       // Filter by true edges only (matched to Polymarket)
       if (filters.trueEdgesOnly && s.is_true_arbitrage !== true) return false;
       
-      // For true arbitrage, filter by edge; for signals, use signal_strength from factors
+      // NEW: Filter by bettable only (BET or STRONG_BET decisions)
+      if (filters.bettableOnly && s.execution) {
+        const decision = s.execution.execution_decision;
+        if (decision !== 'BET' && decision !== 'STRONG_BET') return false;
+      }
+      
+      // For true arbitrage, filter by NET edge (not raw edge)
       if (filters.minEdge) {
-        if (s.is_true_arbitrage) {
-          if (s.edge_percent < filters.minEdge) return false;
+        if (s.is_true_arbitrage && s.execution) {
+          if (s.execution.net_edge_percent < filters.minEdge) return false;
         } else {
           const signalStrength = (s as any).signal_strength || 0;
           if (signalStrength < filters.minEdge) return false;
@@ -137,10 +153,10 @@ export function useSignals() {
       if (filters.urgency?.length && !filters.urgency.includes(s.urgency)) return false;
       return true;
     });
-  }, [signals]);
+  }, [enrichedSignals]);
 
   return {
-    signals,
+    signals: enrichedSignals,
     loading,
     detecting,
     refreshing,

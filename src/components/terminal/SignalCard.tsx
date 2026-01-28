@@ -3,11 +3,12 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import type { SignalOpportunity } from '@/types/arbitrage';
+import type { EnrichedSignal } from '@/types/arbitrage';
 import type { SignalState } from '@/types/scan-config';
+import { ExecutionDecision } from './ExecutionDecision';
 
 interface SignalCardProps {
-  signal: SignalOpportunity;
+  signal: EnrichedSignal;
   onDismiss: (id: string) => void;
   onExecute: (id: string, price: number) => void;
   watchState?: SignalState;
@@ -191,13 +192,13 @@ export function SignalCard({
               )}
             </p>
             
-            {/* True arbitrage PROFESSIONAL trade display */}
-            {isTrueArbitrage && (
-              <div className="mt-3 p-3 bg-green-500/10 rounded-lg border border-green-500/30">
+            {/* True arbitrage - show execution decision with cost breakdown */}
+            {isTrueArbitrage && signal.execution && (
+              <div className="mt-3">
                 {/* Hero metrics row - trading terminal style */}
-                <div className="grid grid-cols-3 gap-4 mb-3">
+                <div className="grid grid-cols-3 gap-4 mb-3 p-3 bg-muted/30 rounded-lg border border-border">
                   <div className="text-center">
-                    <div className="text-2xl font-bold text-green-400">
+                    <div className="text-2xl font-bold text-primary">
                       {(polyYesPrice * 100).toFixed(0)}¢
                     </div>
                     <div className="text-xs text-muted-foreground">POLY YES</div>
@@ -209,15 +210,15 @@ export function SignalCard({
                     <div className="text-xs text-muted-foreground">FAIR VALUE</div>
                   </div>
                   <div className="text-center">
-                    <Badge className="bg-green-600 hover:bg-green-700 text-white text-lg px-3 py-1">
+                    <div className="text-2xl font-bold text-muted-foreground">
                       +{signal.edge_percent.toFixed(1)}%
-                    </Badge>
-                    <div className="text-xs text-muted-foreground mt-1">EDGE</div>
+                    </div>
+                    <div className="text-xs text-muted-foreground">RAW EDGE</div>
                   </div>
                 </div>
                 
                 {/* Quality indicators row */}
-                <div className="flex justify-between text-xs border-t border-green-500/20 pt-2">
+                <div className="flex justify-between text-xs mb-3 px-1">
                   <span className={cn(
                     "flex items-center gap-1",
                     hasLowVolume ? 'text-orange-400' : 'text-green-400'
@@ -239,6 +240,9 @@ export function SignalCard({
                   </span>
                 </div>
                 
+                {/* Execution Decision with cost breakdown */}
+                <ExecutionDecision analysis={signal.execution} />
+                
                 {/* Warnings */}
                 {(isStale || hasLowVolume) && (
                   <div className="mt-2 text-xs text-orange-400 flex items-center gap-1">
@@ -250,7 +254,7 @@ export function SignalCard({
               </div>
             )}
             
-            {/* Signal-only notice */}
+            {/* Signal-only notice (no Polymarket match) */}
             {!isTrueArbitrage && (
               <div className="text-xs mt-2 p-2 bg-muted/50 rounded border border-border flex items-start gap-2">
                 <AlertCircle className="h-3 w-3 text-muted-foreground mt-0.5 flex-shrink-0" />
@@ -279,24 +283,54 @@ export function SignalCard({
 
         {/* Actions */}
         <div className="flex items-center gap-2 mt-4 pt-3 border-t border-border">
-          <Button 
-            size="sm" 
-            className={cn(
-              "flex-1 gap-1",
-              isTrueArbitrage && "bg-green-600 hover:bg-green-700"
-            )}
-            onClick={() => onExecute(signal.id, signal.polymarket_price)}
-          >
-            <Check className="h-3 w-3" />
-            {isTrueArbitrage ? 'Execute Arb' : 'Log Signal'}
-          </Button>
-          <Button 
-            size="sm" 
-            variant="ghost"
-            onClick={() => onDismiss(signal.id)}
-          >
-            <X className="h-4 w-4" />
-          </Button>
+          {isTrueArbitrage && signal.execution ? (
+            <>
+              <Button 
+                size="sm" 
+                className={cn(
+                  "flex-1 gap-1",
+                  signal.execution.execution_decision === 'STRONG_BET' && "bg-green-600 hover:bg-green-700",
+                  signal.execution.execution_decision === 'BET' && "bg-green-600 hover:bg-green-700",
+                  signal.execution.execution_decision === 'MARGINAL' && "bg-yellow-600 hover:bg-yellow-700",
+                  signal.execution.execution_decision === 'NO_BET' && "bg-muted text-muted-foreground hover:bg-muted"
+                )}
+                onClick={() => onExecute(signal.id, signal.polymarket_price)}
+                disabled={signal.execution.execution_decision === 'NO_BET'}
+              >
+                <Check className="h-3 w-3" />
+                {signal.execution.execution_decision === 'STRONG_BET' && 'Execute (Strong)'}
+                {signal.execution.execution_decision === 'BET' && 'Execute Bet'}
+                {signal.execution.execution_decision === 'MARGINAL' && 'Execute (Caution)'}
+                {signal.execution.execution_decision === 'NO_BET' && 'No Bet'}
+              </Button>
+              <Button 
+                size="sm" 
+                variant="ghost"
+                onClick={() => onDismiss(signal.id)}
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button 
+                size="sm" 
+                variant="outline"
+                className="flex-1 gap-1"
+                onClick={() => onExecute(signal.id, signal.polymarket_price)}
+              >
+                <Check className="h-3 w-3" />
+                Log Signal
+              </Button>
+              <Button 
+                size="sm" 
+                variant="ghost"
+                onClick={() => onDismiss(signal.id)}
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </>
+          )}
         </div>
       </CardContent>
     </Card>
