@@ -22,6 +22,7 @@ export default function Terminal() {
   const [minEdge, setMinEdge] = useState(0);
   const [minConfidence, setMinConfidence] = useState(0);
   const [selectedUrgency, setSelectedUrgency] = useState<string[]>([]);
+  const [showTrueEdgesOnly, setShowTrueEdgesOnly] = useState(false);
 
   const { 
     signals, 
@@ -82,6 +83,7 @@ export default function Terminal() {
     minEdge: minEdge > 0 ? minEdge : undefined,
     minConfidence: minConfidence > 0 ? minConfidence : undefined,
     urgency: selectedUrgency.length > 0 ? selectedUrgency : undefined,
+    trueEdgesOnly: showTrueEdgesOnly,
   });
 
   if (!user) {
@@ -101,9 +103,11 @@ export default function Terminal() {
           minEdge={minEdge}
           minConfidence={minConfidence}
           selectedUrgency={selectedUrgency}
+          showTrueEdgesOnly={showTrueEdgesOnly}
           onMinEdgeChange={setMinEdge}
           onMinConfidenceChange={setMinConfidence}
           onUrgencyChange={setSelectedUrgency}
+          onShowTrueEdgesOnlyChange={setShowTrueEdgesOnly}
         />
 
         {/* Main Content */}

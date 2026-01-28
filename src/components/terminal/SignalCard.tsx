@@ -1,4 +1,4 @@
-import { Clock, X, Check, Target, TrendingUp, Activity } from 'lucide-react';
+import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -10,6 +10,24 @@ interface SignalCardProps {
   signal: SignalOpportunity;
   onDismiss: (id: string) => void;
   onExecute: (id: string, price: number) => void;
+}
+
+// Format volume for display
+function formatVolume(volume: number | null | undefined): string {
+  if (!volume) return 'N/A';
+  if (volume >= 1000000) return `$${(volume / 1000000).toFixed(1)}M`;
+  if (volume >= 1000) return `$${(volume / 1000).toFixed(0)}K`;
+  return `$${volume.toFixed(0)}`;
+}
+
+// Format time ago
+function formatTimeAgo(dateStr: string | null | undefined): string {
+  if (!dateStr) return 'N/A';
+  const date = new Date(dateStr);
+  const mins = Math.floor((Date.now() - date.getTime()) / 60000);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  return `${hours}h ago`;
 }
 
 export function SignalCard({ signal, onDismiss, onExecute }: SignalCardProps) {
@@ -32,10 +50,25 @@ export function SignalCard({ signal, onDismiss, onExecute }: SignalCardProps) {
   
   const betTarget = signal.recommended_outcome || signal.event_name;
   
-  // Check if this is a true arbitrage (matched to Polymarket) or just signal strength
-  const signalFactors = signal.signal_factors as { matched_polymarket?: boolean; match_confidence?: number } | null;
-  const isTrueArbitrage = signalFactors?.matched_polymarket === true;
-  const matchConfidence = signalFactors?.match_confidence;
+  // Extract enhanced data from signal_factors
+  const signalFactors = signal.signal_factors as { 
+    matched_polymarket?: boolean; 
+    match_confidence?: number;
+    edge_type?: string;
+    time_label?: string;
+    confirming_books?: number;
+    is_sharp_book?: boolean;
+  } | null;
+  
+  const isTrueArbitrage = signal.is_true_arbitrage === true;
+  const matchConfidence = signal.polymarket_match_confidence;
+  
+  // Get extended fields (may be on signal or signal_factors)
+  const bookmakerProbFair = (signal as any).bookmaker_prob_fair || signal.bookmaker_probability;
+  const signalStrength = (signal as any).signal_strength;
+  const polyVolume = (signal as any).polymarket_volume;
+  const polyUpdatedAt = (signal as any).polymarket_updated_at;
+  const polyYesPrice = (signal as any).polymarket_yes_price || signal.polymarket_price;
 
   return (
     <Card className={cn(
@@ -66,21 +99,35 @@ export function SignalCard({ signal, onDismiss, onExecute }: SignalCardProps) {
                       {isTrueArbitrage ? (
                         <>
                           <TrendingUp className="h-3 w-3 mr-1" />
-                          ARBITRAGE
+                          EDGE: +{signal.edge_percent.toFixed(1)}%
                         </>
                       ) : (
                         <>
                           <Activity className="h-3 w-3 mr-1" />
-                          SIGNAL
+                          SIGNAL: {signalStrength ? `+${signalStrength.toFixed(1)}%` : 'N/A'}
                         </>
                       )}
                     </Badge>
                   </TooltipTrigger>
-                  <TooltipContent>
-                    {isTrueArbitrage 
-                      ? `Matched to Polymarket (${matchConfidence ? (matchConfidence * 100).toFixed(0) + '% confidence' : 'verified'})`
-                      : "No Polymarket match - shows signal strength vs 50% baseline"
-                    }
+                  <TooltipContent className="max-w-xs">
+                    {isTrueArbitrage ? (
+                      <div className="space-y-1">
+                        <div className="font-semibold">True Arbitrage Opportunity</div>
+                        <div>Bookmaker Fair: {(bookmakerProbFair * 100).toFixed(1)}%</div>
+                        <div>Polymarket: {(polyYesPrice * 100).toFixed(0)}¢</div>
+                        <div>Match Confidence: {matchConfidence ? `${(matchConfidence * 100).toFixed(0)}%` : 'N/A'}</div>
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        <div className="font-semibold">Signal Strength Only</div>
+                        <div>No Polymarket match found</div>
+                        <div>Shows distance from 50% baseline</div>
+                        <div className="text-yellow-500 flex items-center gap-1 mt-1">
+                          <AlertCircle className="h-3 w-3" />
+                          Not a tradeable edge
+                        </div>
+                      </div>
+                    )}
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
@@ -88,7 +135,7 @@ export function SignalCard({ signal, onDismiss, onExecute }: SignalCardProps) {
               {timeUntilExpiry !== null && (
                 <span className="text-xs text-muted-foreground flex items-center gap-1">
                   <Clock className="h-3 w-3" />
-                  {timeUntilExpiry}m
+                  {signalFactors?.time_label || `${timeUntilExpiry}m`}
                 </span>
               )}
             </div>
@@ -106,46 +153,66 @@ export function SignalCard({ signal, onDismiss, onExecute }: SignalCardProps) {
             
             <p className="text-xs text-muted-foreground">
               Back <span className="font-medium text-foreground">{betTarget}</span> to win
-              <span className="ml-1">• {(signal.bookmaker_probability * 100).toFixed(1)}% implied</span>
-              {isTrueArbitrage && signal.polymarket_price > 0 && (
-                <span className="ml-1">• Poly: {(signal.polymarket_price * 100).toFixed(0)}¢</span>
+              <span className="ml-1">• {(bookmakerProbFair * 100).toFixed(1)}% fair prob</span>
+              {signalFactors?.confirming_books && (
+                <span className="ml-1">• {signalFactors.confirming_books} books</span>
               )}
             </p>
+            
+            {/* True arbitrage detailed breakdown */}
+            {isTrueArbitrage && (
+              <div className="text-xs space-y-1 mt-2 p-2 bg-green-500/10 rounded border border-green-500/20">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Bookmaker Fair:</span>
+                  <span className="font-mono">{(bookmakerProbFair * 100).toFixed(1)}%</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Polymarket:</span>
+                  <span className="font-mono">{(polyYesPrice * 100).toFixed(0)}¢</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Match Conf:</span>
+                  <span className="font-mono">{matchConfidence ? `${(matchConfidence * 100).toFixed(0)}%` : 'N/A'}</span>
+                </div>
+                {polyVolume && (
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Volume:</span>
+                    <span className="font-mono">{formatVolume(polyVolume)}</span>
+                  </div>
+                )}
+                {polyUpdatedAt && (
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Updated:</span>
+                    <span className="font-mono">{formatTimeAgo(polyUpdatedAt)}</span>
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {/* Signal-only notice */}
+            {!isTrueArbitrage && (
+              <div className="text-xs mt-2 p-2 bg-muted/50 rounded border border-border flex items-start gap-2">
+                <AlertCircle className="h-3 w-3 text-muted-foreground mt-0.5 flex-shrink-0" />
+                <span className="text-muted-foreground">
+                  No Polymarket match — informational signal only
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Right: Metrics */}
           <div className="flex flex-col items-end gap-1">
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-muted-foreground">
-                      {isTrueArbitrage ? 'Edge' : 'Strength'}
-                    </span>
-                    <span className={cn(
-                      'font-mono font-bold text-lg',
-                      isTrueArbitrage 
-                        ? (signal.edge_percent >= 5 ? 'text-green-500' : signal.edge_percent >= 2 ? 'text-yellow-500' : 'text-foreground')
-                        : (signal.edge_percent >= 20 ? 'text-orange-500' : 'text-muted-foreground')
-                    )}>
-                      +{signal.edge_percent.toFixed(1)}%
-                    </span>
-                  </div>
-                </TooltipTrigger>
-                <TooltipContent>
-                  {isTrueArbitrage 
-                    ? `Real edge: Bookmaker ${(signal.bookmaker_probability * 100).toFixed(1)}% vs Polymarket ${(signal.polymarket_price * 100).toFixed(0)}%`
-                    : `Signal strength: Distance from 50% baseline (not real arbitrage)`
-                  }
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
             <div className="flex items-center gap-2">
               <span className="text-xs text-muted-foreground">Confidence</span>
               <span className={cn('font-mono font-semibold', confidenceColor)}>
                 {signal.confidence_score}
               </span>
             </div>
+            {signalFactors?.is_sharp_book && (
+              <Badge variant="outline" className="text-xs bg-purple-500/10 text-purple-500 border-purple-500/30">
+                SHARP
+              </Badge>
+            )}
           </div>
         </div>
 

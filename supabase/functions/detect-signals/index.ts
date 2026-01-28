@@ -6,6 +6,7 @@ const corsHeaders = {
 interface RequestBody {
   eventHorizonHours?: number;
   minEventHorizonHours?: number;
+  minEdgeThreshold?: number;
 }
 
 interface BookmakerSignal {
@@ -31,6 +32,52 @@ interface PolymarketMarket {
   last_updated: string;
 }
 
+// Configuration constants
+const MATCH_THRESHOLD = 0.85;
+const AMBIGUITY_MARGIN = 0.03;
+const STALENESS_HOURS = 2;
+const MIN_VOLUME_FLAG = 10000;
+const MIN_VOLUME_REJECT = 2000;
+const MIN_EDGE_THRESHOLD = 2.0;
+
+// Team name alias mapping for better matching
+const TEAM_ALIASES: Record<string, string[]> = {
+  'los angeles lakers': ['la lakers', 'lakers', 'lal'],
+  'golden state warriors': ['gsw', 'warriors', 'gs warriors', 'golden state'],
+  'boston celtics': ['celtics', 'boston'],
+  'miami heat': ['heat', 'miami'],
+  'phoenix suns': ['suns', 'phoenix'],
+  'denver nuggets': ['nuggets', 'denver'],
+  'milwaukee bucks': ['bucks', 'milwaukee'],
+  'philadelphia 76ers': ['76ers', 'sixers', 'philly'],
+  'new york knicks': ['knicks', 'ny knicks', 'new york'],
+  'brooklyn nets': ['nets', 'brooklyn'],
+  'dallas mavericks': ['mavs', 'mavericks', 'dallas'],
+  'los angeles clippers': ['la clippers', 'clippers', 'lac'],
+  'oklahoma city thunder': ['thunder', 'okc'],
+  'minnesota timberwolves': ['wolves', 'timberwolves', 'minnesota'],
+  'sacramento kings': ['kings', 'sacramento'],
+  'new orleans pelicans': ['pelicans', 'nola'],
+  'cleveland cavaliers': ['cavs', 'cavaliers', 'cleveland'],
+  'manchester united': ['man united', 'man utd', 'mufc', 'united'],
+  'manchester city': ['man city', 'mcfc', 'city'],
+  'liverpool': ['liverpool fc', 'lfc'],
+  'arsenal': ['arsenal fc', 'gunners'],
+  'chelsea': ['chelsea fc', 'cfc'],
+  'tottenham': ['tottenham hotspur', 'spurs', 'thfc'],
+  'real madrid': ['real', 'madrid', 'rmcf'],
+  'barcelona': ['barca', 'fcb', 'fc barcelona'],
+  'bayern munich': ['bayern', 'fcb', 'fc bayern'],
+  'los angeles dodgers': ['la dodgers', 'dodgers'],
+  'new york yankees': ['ny yankees', 'yankees', 'nyy'],
+  'chicago cubs': ['cubs', 'chicago'],
+  'kansas city chiefs': ['chiefs', 'kc chiefs'],
+  'san francisco 49ers': ['49ers', 'niners', 'sf 49ers'],
+  'dallas cowboys': ['cowboys', 'dallas'],
+  'new england patriots': ['patriots', 'pats', 'new england'],
+  'green bay packers': ['packers', 'green bay'],
+};
+
 // Normalize team/player names for fuzzy matching
 function normalizeName(name: string): string {
   return name
@@ -39,6 +86,36 @@ function normalizeName(name: string): string {
     .replace(/[^a-z0-9\s]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// Expand name with aliases
+function expandWithAliases(name: string): string[] {
+  const normalized = normalizeName(name);
+  const aliases = [normalized];
+  
+  for (const [canonical, alts] of Object.entries(TEAM_ALIASES)) {
+    if (normalized.includes(canonical) || alts.some(a => normalized.includes(a))) {
+      aliases.push(canonical, ...alts);
+    }
+  }
+  
+  return [...new Set(aliases)];
+}
+
+// Tokenize text for Jaccard similarity
+function tokenize(text: string): Set<string> {
+  return new Set(
+    normalizeName(text)
+      .split(' ')
+      .filter(t => t.length > 2)
+  );
+}
+
+// Jaccard similarity between two sets
+function jaccardSimilarity(setA: Set<string>, setB: Set<string>): number {
+  const intersection = new Set([...setA].filter(x => setB.has(x)));
+  const union = new Set([...setA, ...setB]);
+  return union.size === 0 ? 0 : intersection.size / union.size;
 }
 
 // Simple Levenshtein distance for fuzzy matching
@@ -57,7 +134,7 @@ function levenshteinDistance(a: string, b: string): number {
 }
 
 // Calculate similarity score (0-1)
-function similarityScore(a: string, b: string): number {
+function levenshteinSimilarity(a: string, b: string): number {
   const normA = normalizeName(a);
   const normB = normalizeName(b);
   const maxLen = Math.max(normA.length, normB.length);
@@ -66,7 +143,7 @@ function similarityScore(a: string, b: string): number {
   return 1 - distance / maxLen;
 }
 
-// Extract team names from event string like "Utah Jazz vs Golden State Warriors"
+// Extract team names from event string
 function extractTeams(eventName: string): string[] {
   const separators = [' vs ', ' vs. ', ' v ', ' @ ', ' at '];
   for (const sep of separators) {
@@ -77,50 +154,129 @@ function extractTeams(eventName: string): string[] {
   return [eventName];
 }
 
-// Try to match bookmaker event to Polymarket market
-function findPolymarketMatch(
+// Calculate combined match confidence using Jaccard + Levenshtein
+function calculateMatchConfidence(
+  bookmakerEvent: string,
+  bookmakerOutcome: string,
+  polymarketQuestion: string
+): number {
+  const bookTokens = tokenize(bookmakerEvent);
+  const outcomeTokens = tokenize(bookmakerOutcome);
+  const polyTokens = tokenize(polymarketQuestion);
+  
+  // Expand with aliases
+  const expandedBookTokens = new Set<string>();
+  for (const token of bookTokens) {
+    expandWithAliases(token).forEach(t => expandedBookTokens.add(t));
+  }
+  
+  const expandedOutcomeTokens = new Set<string>();
+  for (const token of outcomeTokens) {
+    expandWithAliases(token).forEach(t => expandedOutcomeTokens.add(t));
+  }
+  
+  // Jaccard overlap (0-1)
+  const eventJaccard = jaccardSimilarity(expandedBookTokens, polyTokens);
+  const outcomeJaccard = jaccardSimilarity(expandedOutcomeTokens, polyTokens);
+  
+  // Levenshtein similarity (0-1)
+  const levenSimilarity = levenshteinSimilarity(bookmakerEvent, polymarketQuestion);
+  
+  // Combined score with weights
+  const confidence = (eventJaccard * 0.4) + (outcomeJaccard * 0.35) + (levenSimilarity * 0.25);
+  
+  return confidence;
+}
+
+interface MatchCandidate {
+  market: PolymarketMarket;
+  confidence: number;
+  matchedPrice: number;
+}
+
+interface MatchResult {
+  market: PolymarketMarket;
+  confidence: number;
+  matchedPrice: number;
+  isAmbiguous: boolean;
+}
+
+// Find best Polymarket match using enhanced scoring
+function findEnhancedPolymarketMatch(
   eventName: string, 
   outcome: string,
   polymarkets: PolymarketMarket[]
-): { market: PolymarketMarket; confidence: number; matchedPrice: number } | null {
+): MatchResult | null {
+  const candidates: MatchCandidate[] = [];
   const teams = extractTeams(eventName);
   const normalizedOutcome = normalizeName(outcome);
   
-  let bestMatch: { market: PolymarketMarket; confidence: number; matchedPrice: number } | null = null;
-  
   for (const market of polymarkets) {
-    const question = normalizeName(market.question);
+    const confidence = calculateMatchConfidence(eventName, outcome, market.question);
     
-    // Check if any team name appears in the Polymarket question
-    for (const team of teams) {
-      const teamNorm = normalizeName(team);
-      const similarity = similarityScore(teamNorm, question.slice(0, teamNorm.length + 20));
+    if (confidence > 0.3) { // Pre-filter low confidence
+      // Determine which price to use
+      const questionNorm = normalizeName(market.question);
+      const outcomeInQuestion = questionNorm.includes(normalizedOutcome) || 
+        teams.some(t => questionNorm.includes(normalizeName(t)));
       
-      // Also check if team is directly mentioned
-      const teamInQuestion = question.includes(teamNorm);
-      const outcomeInQuestion = question.includes(normalizedOutcome);
-      
-      if (teamInQuestion || outcomeInQuestion || similarity > 0.7) {
-        // Calculate match confidence
-        let confidence = 0;
-        if (teamInQuestion) confidence += 0.4;
-        if (outcomeInQuestion) confidence += 0.4;
-        confidence += similarity * 0.2;
-        
-        // Determine which price to use based on outcome
-        // If outcome matches team that should win, use yes_price
-        // Otherwise use no_price
-        const matchedPrice = outcomeInQuestion || teamInQuestion ? market.yes_price : market.no_price;
-        
-        if (!bestMatch || confidence > bestMatch.confidence) {
-          bestMatch = { market, confidence, matchedPrice };
-        }
-      }
+      candidates.push({
+        market,
+        confidence,
+        matchedPrice: outcomeInQuestion ? market.yes_price : market.no_price,
+      });
     }
   }
   
-  // Only return if confidence is above threshold
-  return bestMatch && bestMatch.confidence >= 0.5 ? bestMatch : null;
+  if (candidates.length === 0) return null;
+  
+  // Sort by confidence
+  candidates.sort((a, b) => b.confidence - a.confidence);
+  const best = candidates[0];
+  
+  // Check threshold
+  if (best.confidence < MATCH_THRESHOLD) {
+    return null;
+  }
+  
+  // Check for ambiguity
+  const isAmbiguous = candidates.length > 1 && 
+    (candidates[1].confidence >= best.confidence - AMBIGUITY_MARGIN);
+  
+  return {
+    market: best.market,
+    confidence: best.confidence,
+    matchedPrice: best.matchedPrice,
+    isAmbiguous,
+  };
+}
+
+interface ValidationResult {
+  valid: boolean;
+  reason?: string;
+  lowLiquidity?: boolean;
+}
+
+// Validate Polymarket data freshness and liquidity
+function validatePolymarketData(market: PolymarketMarket): ValidationResult {
+  const hoursSinceUpdate = (Date.now() - new Date(market.last_updated).getTime()) / (1000 * 60 * 60);
+  
+  if (hoursSinceUpdate > STALENESS_HOURS) {
+    return { valid: false, reason: 'stale_price' };
+  }
+  
+  if (market.volume < MIN_VOLUME_REJECT) {
+    return { valid: false, reason: 'insufficient_liquidity' };
+  }
+  
+  const lowLiquidity = market.volume < MIN_VOLUME_FLAG;
+  
+  // Spread sanity check - reject if YES stuck near extremes with low liquidity
+  if ((market.yes_price < 0.05 || market.yes_price > 0.95) && lowLiquidity) {
+    return { valid: false, reason: 'extreme_price_low_liquidity' };
+  }
+  
+  return { valid: true, lowLiquidity };
 }
 
 // Calculate hours until event
@@ -131,18 +287,24 @@ function hoursUntilEvent(commenceTime: string | null): number | null {
   return (eventTime.getTime() - now.getTime()) / (1000 * 60 * 60);
 }
 
-// Format time remaining for display
+// Format time remaining
 function formatTimeRemaining(hours: number): string {
   if (hours < 1) return `${Math.round(hours * 60)}m`;
   if (hours < 24) return `${Math.round(hours)}h`;
   return `${Math.round(hours / 24)}d`;
 }
 
-// Determine urgency based on time and edge
-function calculateUrgency(hoursLeft: number | null, edge: number, isSharp: boolean): 'low' | 'normal' | 'high' | 'critical' {
-  // Near-term events with good edge = higher urgency
+// Determine urgency
+function calculateUrgency(hoursLeft: number | null, edge: number, isSharp: boolean, isTrueArb: boolean): 'low' | 'normal' | 'high' | 'critical' {
+  // True arbitrage gets priority
+  if (isTrueArb && edge >= 5) {
+    if (hoursLeft !== null && hoursLeft <= 6) return 'critical';
+    if (hoursLeft !== null && hoursLeft <= 12) return 'high';
+    return 'normal';
+  }
+  
   if (hoursLeft !== null && hoursLeft <= 6) {
-    if (edge >= 8 || isSharp) return 'critical';
+    if (edge >= 8 || (isTrueArb && edge >= 3)) return 'critical';
     if (edge >= 5) return 'high';
     return 'normal';
   }
@@ -153,7 +315,6 @@ function calculateUrgency(hoursLeft: number | null, edge: number, isSharp: boole
     return 'low';
   }
   
-  // Longer-term: only high if exceptional edge
   if (edge >= 15) return 'high';
   if (edge >= 8) return 'normal';
   return 'low';
@@ -165,9 +326,8 @@ Deno.serve(async (req) => {
   }
 
   try {
-    console.log('Running signal detection with Polymarket matching...');
+    console.log('Running enhanced signal detection with Polymarket matching...');
     
-    // Parse request body
     let body: RequestBody = {};
     try {
       body = await req.json();
@@ -177,14 +337,14 @@ Deno.serve(async (req) => {
     
     const eventHorizonHours = body.eventHorizonHours || 24;
     const minEventHorizonHours = body.minEventHorizonHours || 2;
+    const minEdgeThreshold = body.minEdgeThreshold || MIN_EDGE_THRESHOLD;
     
-    console.log(`Event horizon: ${minEventHorizonHours}h - ${eventHorizonHours}h`);
+    console.log(`Event horizon: ${minEventHorizonHours}h - ${eventHorizonHours}h, min edge: ${minEdgeThreshold}%`);
     
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const now = new Date();
 
-    // Calculate time boundaries
     const minHorizon = new Date(now.getTime() + minEventHorizonHours * 60 * 60 * 1000).toISOString();
     const maxHorizon = new Date(now.getTime() + eventHorizonHours * 60 * 60 * 1000).toISOString();
     const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString();
@@ -225,12 +385,19 @@ Deno.serve(async (req) => {
 
     let matchedCount = 0;
     let unmatchedCount = 0;
+    let rejectedCount = 0;
 
     for (const [eventName, signals] of eventGroups) {
       if (processedEvents.has(eventName)) continue;
       processedEvents.add(eventName);
 
-      // Find best signal for this event (prefer sharp books)
+      // Skip 3-way markets (soccer with Draw)
+      if (signals.some(s => normalizeName(s.outcome) === 'draw')) {
+        console.log(`Skipping 3-way market: ${eventName}`);
+        continue;
+      }
+
+      // Find best signal (prefer sharp books)
       const sortedSignals = signals.sort((a, b) => {
         if (a.is_sharp_book !== b.is_sharp_book) return a.is_sharp_book ? -1 : 1;
         return b.confirming_books - a.confirming_books;
@@ -243,82 +410,112 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      const bookmakerProb = bestSignal.implied_probability;
+      // This is now vig-removed fair probability from ingest-odds
+      const bookmakerProbFair = bestSignal.implied_probability;
       const recommendedOutcome = bestSignal.outcome;
       
-      // Try to find matching Polymarket market
-      const polyMatch = findPolymarketMatch(eventName, recommendedOutcome, polymarkets);
+      // Try to find matching Polymarket market with enhanced matching
+      const polyMatch = findEnhancedPolymarketMatch(eventName, recommendedOutcome, polymarkets);
       
-      let edge: number;
+      let edgePct: number;
       let polyPrice: number;
       let isTrueArbitrage: boolean;
       let matchConfidence: number | null = null;
+      let signalStrength: number | null = null;
+      let polyVolume: number | null = null;
+      let polyUpdatedAt: string | null = null;
       
-      if (polyMatch) {
-        // TRUE ARBITRAGE: Compare bookmaker prob vs Polymarket price
-        polyPrice = polyMatch.matchedPrice;
-        edge = (bookmakerProb - polyPrice) * 100; // Real edge as percentage
-        isTrueArbitrage = true;
-        matchConfidence = polyMatch.confidence;
-        matchedCount++;
+      if (polyMatch && !polyMatch.isAmbiguous) {
+        // Validate Polymarket data
+        const validation = validatePolymarketData(polyMatch.market);
         
-        console.log(`Matched: ${eventName} -> Polymarket: ${polyMatch.market.question.slice(0, 50)}... (confidence: ${matchConfidence.toFixed(2)})`);
+        if (validation.valid) {
+          // TRUE ARBITRAGE: Compare bookmaker fair prob vs Polymarket price
+          polyPrice = polyMatch.matchedPrice;
+          edgePct = (bookmakerProbFair - polyPrice) * 100;
+          isTrueArbitrage = true;
+          matchConfidence = polyMatch.confidence;
+          polyVolume = polyMatch.market.volume;
+          polyUpdatedAt = polyMatch.market.last_updated;
+          matchedCount++;
+          
+          console.log(`Matched: ${eventName} -> ${polyMatch.market.question.slice(0, 50)}... (conf: ${matchConfidence.toFixed(2)}, edge: ${edgePct.toFixed(1)}%)`);
+          
+          // Must meet minimum edge threshold
+          if (edgePct < minEdgeThreshold) {
+            console.log(`Edge too low: ${edgePct.toFixed(1)}% < ${minEdgeThreshold}%`);
+            rejectedCount++;
+            continue;
+          }
+        } else {
+          console.log(`Rejected Polymarket match: ${validation.reason}`);
+          rejectedCount++;
+          // Fall through to signal-only
+          polyPrice = 0.5;
+          signalStrength = Math.abs(bookmakerProbFair - 0.5) * 100;
+          edgePct = 0; // No edge without valid match
+          isTrueArbitrage = false;
+          unmatchedCount++;
+        }
+      } else if (polyMatch?.isAmbiguous) {
+        console.log(`Ambiguous match for ${eventName}, treating as signal only`);
+        polyPrice = 0.5;
+        signalStrength = Math.abs(bookmakerProbFair - 0.5) * 100;
+        edgePct = 0;
+        isTrueArbitrage = false;
+        unmatchedCount++;
       } else {
-        // NO MATCH: Calculate signal strength (distance from 50%)
-        // This is NOT true arbitrage - just informational
-        polyPrice = 0.5; // Placeholder
-        edge = Math.abs(bookmakerProb - 0.5) * 100; // Signal strength, not edge
+        // NO MATCH: Calculate signal strength only
+        polyPrice = 0.5;
+        signalStrength = Math.abs(bookmakerProbFair - 0.5) * 100;
+        edgePct = 0; // No edge without match
         isTrueArbitrage = false;
         unmatchedCount++;
       }
       
-      // Minimum edge/signal threshold
-      if (edge < 2) continue;
+      // Skip signals with low strength if not true arbitrage
+      if (!isTrueArbitrage && (signalStrength === null || signalStrength < 5)) {
+        continue;
+      }
 
-      // Calculate confidence using tiered scoring system
-      let confidence = 30; // Base score
+      // Calculate confidence score
+      let confidence = 30; // Base
 
-      // Edge magnitude scoring (adjusted for realistic edges)
       if (isTrueArbitrage) {
-        // True arbitrage edges are smaller but more meaningful
-        if (edge >= 10) confidence += 35;
-        else if (edge >= 5) confidence += 25;
-        else if (edge >= 3) confidence += 15;
-        else if (edge >= 1) confidence += 5;
+        // True arbitrage scoring
+        if (edgePct >= 10) confidence += 35;
+        else if (edgePct >= 5) confidence += 25;
+        else if (edgePct >= 3) confidence += 15;
+        else if (edgePct >= 2) confidence += 10;
+        
+        // Match confidence bonus
+        if (matchConfidence) {
+          confidence += Math.round(matchConfidence * 15);
+        }
       } else {
-        // Signal strength scoring (unmatched)
-        if (edge >= 20) confidence += 20;
-        else if (edge >= 10) confidence += 15;
-        else if (edge >= 5) confidence += 10;
+        // Signal strength scoring
+        if (signalStrength && signalStrength >= 30) confidence += 20;
+        else if (signalStrength && signalStrength >= 20) confidence += 15;
+        else if (signalStrength && signalStrength >= 10) confidence += 10;
       }
 
-      // Sharp book presence scoring
-      const hasPinnacle = signals.some(s => s.outcome.includes('Pinnacle') || s.is_sharp_book);
-      const hasBetfair = signals.some(s => s.outcome.includes('Betfair'));
-      if (bestSignal.is_sharp_book || hasPinnacle) {
-        confidence += 15;
-      } else if (hasBetfair) {
-        confidence += 10;
-      }
+      // Sharp book presence
+      if (bestSignal.is_sharp_book) confidence += 15;
 
-      // Confirming books scoring
+      // Confirming books
       const confirmingCount = bestSignal.confirming_books || 1;
       if (confirmingCount >= 10) confidence += 15;
       else if (confirmingCount >= 6) confidence += 10;
       else if (confirmingCount >= 3) confidence += 5;
 
-      // Time factor scoring
+      // Time factor
       if (hoursLeft && hoursLeft <= 6) confidence += 5;
       else if (hoursLeft && hoursLeft <= 12) confidence += 3;
 
-      // Boost confidence for true arbitrage matches
-      if (isTrueArbitrage && matchConfidence) {
-        confidence += Math.round(matchConfidence * 10);
-      }
-
       confidence = Math.min(Math.round(confidence), 95);
 
-      const urgency = calculateUrgency(hoursLeft, edge, bestSignal.is_sharp_book);
+      const displayEdge = isTrueArbitrage ? edgePct : (signalStrength || 0);
+      const urgency = calculateUrgency(hoursLeft, displayEdge, bestSignal.is_sharp_book, isTrueArbitrage);
       const timeLabel = formatTimeRemaining(hoursLeft);
 
       opportunities.push({
@@ -327,12 +524,17 @@ Deno.serve(async (req) => {
         recommended_outcome: recommendedOutcome,
         side: 'YES',
         polymarket_price: polyPrice,
-        bookmaker_probability: bookmakerProb,
-        edge_percent: Math.round(edge * 10) / 10,
+        bookmaker_probability: bookmakerProbFair,
+        edge_percent: isTrueArbitrage ? Math.round(edgePct * 10) / 10 : 0,
         confidence_score: confidence,
         urgency,
         is_true_arbitrage: isTrueArbitrage,
         polymarket_match_confidence: matchConfidence,
+        polymarket_yes_price: isTrueArbitrage ? polyPrice : null,
+        polymarket_volume: polyVolume,
+        polymarket_updated_at: polyUpdatedAt,
+        bookmaker_prob_fair: bookmakerProbFair,
+        signal_strength: signalStrength,
         signal_factors: {
           hours_until_event: Math.round(hoursLeft * 10) / 10,
           time_label: timeLabel,
@@ -341,27 +543,29 @@ Deno.serve(async (req) => {
           market_type: 'h2h',
           matched_polymarket: isTrueArbitrage,
           match_confidence: matchConfidence,
+          edge_type: isTrueArbitrage ? 'true_arbitrage' : 'signal_strength',
         },
         status: 'active',
         expires_at: bestSignal.commence_time || new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
       });
     }
 
-    console.log(`Detected ${opportunities.length} opportunities (${matchedCount} matched, ${unmatchedCount} unmatched)`);
+    console.log(`Detected ${opportunities.length} opportunities (${matchedCount} matched, ${unmatchedCount} unmatched, ${rejectedCount} rejected)`);
 
-    // Sort by: true arbitrage first, then urgency, then edge
+    // Sort: true arbitrage first, then urgency, then edge/strength
     const urgencyOrder = { critical: 0, high: 1, normal: 2, low: 3 };
     opportunities.sort((a, b) => {
-      // Prioritize true arbitrage
       if (a.is_true_arbitrage !== b.is_true_arbitrage) return a.is_true_arbitrage ? -1 : 1;
       const urgencyDiff = urgencyOrder[a.urgency as keyof typeof urgencyOrder] - urgencyOrder[b.urgency as keyof typeof urgencyOrder];
       if (urgencyDiff !== 0) return urgencyDiff;
-      return b.edge_percent - a.edge_percent;
+      const aValue = a.is_true_arbitrage ? a.edge_percent : (a.signal_strength || 0);
+      const bValue = b.is_true_arbitrage ? b.edge_percent : (b.signal_strength || 0);
+      return bValue - aValue;
     });
 
     const topOpportunities = opportunities.slice(0, 50);
 
-    // Clear active opportunities
+    // Clear and insert
     await fetch(`${supabaseUrl}/rest/v1/signal_opportunities?status=eq.active`, {
       method: 'DELETE',
       headers: {
@@ -370,7 +574,6 @@ Deno.serve(async (req) => {
       },
     });
 
-    // Insert new opportunities
     if (topOpportunities.length > 0) {
       const insertResponse = await fetch(`${supabaseUrl}/rest/v1/signal_opportunities`, {
         method: 'POST',
@@ -388,6 +591,8 @@ Deno.serve(async (req) => {
       }
     }
 
+    const trueArbCount = topOpportunities.filter(o => o.is_true_arbitrage).length;
+
     return new Response(
       JSON.stringify({
         success: true,
@@ -396,9 +601,14 @@ Deno.serve(async (req) => {
         polymarket_markets: polymarkets.length,
         unique_events: eventGroups.size,
         signals_surfaced: topOpportunities.length,
+        true_arbitrage_count: trueArbCount,
+        signal_only_count: topOpportunities.length - trueArbCount,
         matched_to_polymarket: matchedCount,
         unmatched_signals: unmatchedCount,
+        rejected_for_validation: rejectedCount,
         event_horizon: `${minEventHorizonHours}h - ${eventHorizonHours}h`,
+        min_edge_threshold: minEdgeThreshold,
+        match_threshold: MATCH_THRESHOLD,
         timestamp: now.toISOString(),
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }

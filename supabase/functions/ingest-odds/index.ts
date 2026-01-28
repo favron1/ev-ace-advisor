@@ -18,6 +18,59 @@ interface RequestBody {
   sharpBookWeight?: number;
 }
 
+interface OutcomeOdds {
+  odds: number;
+  bookmaker: string;
+  isSharp: boolean;
+}
+
+// Calculate vig-removed fair probability for 2-way markets
+function calculateFairProbability(
+  outcomeOdds: Record<string, OutcomeOdds[]>,
+  targetOutcome: string,
+  sharpBookWeighting: boolean,
+  sharpBookWeight: number
+): { fairProb: number; rawProb: number; avgOdds: number } {
+  const outcomes = Object.keys(outcomeOdds);
+  
+  // Calculate weighted average odds for each outcome
+  const avgOddsMap: Record<string, number> = {};
+  
+  for (const outcome of outcomes) {
+    const oddsArray = outcomeOdds[outcome];
+    if (sharpBookWeighting) {
+      let totalWeight = 0;
+      let weightedSum = 0;
+      for (const o of oddsArray) {
+        const weight = o.isSharp ? sharpBookWeight : 1;
+        weightedSum += o.odds * weight;
+        totalWeight += weight;
+      }
+      avgOddsMap[outcome] = weightedSum / totalWeight;
+    } else {
+      avgOddsMap[outcome] = oddsArray.reduce((sum, o) => sum + o.odds, 0) / oddsArray.length;
+    }
+  }
+  
+  // Calculate raw implied probabilities
+  const rawProbs: Record<string, number> = {};
+  let totalRawProb = 0;
+  for (const outcome of outcomes) {
+    rawProbs[outcome] = 1 / avgOddsMap[outcome];
+    totalRawProb += rawProbs[outcome];
+  }
+  
+  // Normalize to remove vig (sum of fair probs = 1)
+  const targetRawProb = rawProbs[targetOutcome] || 0;
+  const targetFairProb = totalRawProb > 0 ? targetRawProb / totalRawProb : 0;
+  
+  return {
+    fairProb: targetFairProb,
+    rawProb: targetRawProb,
+    avgOdds: avgOddsMap[targetOutcome] || 0,
+  };
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -95,7 +148,7 @@ Deno.serve(async (req) => {
           if (!event.bookmakers || event.bookmakers.length < 2) continue;
 
           const sportTitle = event.sport_title || sport.replace(/_/g, ' ');
-          const outcomeOdds: Record<string, Array<{ odds: number; bookmaker: string; isSharp: boolean }>> = {};
+          const outcomeOdds: Record<string, OutcomeOdds[]> = {};
 
           for (const bookmaker of event.bookmakers) {
             const outrightMarket = bookmaker.markets?.find((m: any) => m.key === 'outrights');
@@ -118,22 +171,14 @@ Deno.serve(async (req) => {
           for (const [outcomeName, oddsArray] of Object.entries(outcomeOdds)) {
             if (oddsArray.length < 2) continue;
 
-            // Calculate weighted average if sharp book weighting enabled
-            let avgOdds: number;
-            if (sharpBookWeighting) {
-              let totalWeight = 0;
-              let weightedSum = 0;
-              for (const o of oddsArray) {
-                const weight = o.isSharp ? sharpBookWeight : 1;
-                weightedSum += o.odds * weight;
-                totalWeight += weight;
-              }
-              avgOdds = weightedSum / totalWeight;
-            } else {
-              avgOdds = oddsArray.reduce((sum, o) => sum + o.odds, 0) / oddsArray.length;
-            }
+            // Calculate vig-removed fair probability
+            const { fairProb, avgOdds } = calculateFairProbability(
+              outcomeOdds,
+              outcomeName,
+              sharpBookWeighting,
+              sharpBookWeight
+            );
 
-            const impliedProb = 1 / avgOdds;
             const hasSharpBook = oddsArray.some(o => o.isSharp);
 
             allSignals.push({
@@ -142,7 +187,7 @@ Deno.serve(async (req) => {
               outcome: outcomeName,
               bookmaker: 'consensus',
               odds: avgOdds,
-              implied_probability: impliedProb,
+              implied_probability: fairProb, // Now using vig-removed fair probability
               previous_odds: null,
               odds_movement: 0,
               movement_speed: 0,
@@ -181,7 +226,7 @@ Deno.serve(async (req) => {
           }
 
           const eventName = `${event.home_team} vs ${event.away_team}`;
-          const outcomeOdds: Record<string, Array<{ odds: number; bookmaker: string; isSharp: boolean }>> = {};
+          const outcomeOdds: Record<string, OutcomeOdds[]> = {};
 
           for (const bookmaker of event.bookmakers) {
             const h2hMarket = bookmaker.markets?.find((m: any) => m.key === 'h2h');
@@ -204,22 +249,14 @@ Deno.serve(async (req) => {
           for (const [outcomeName, oddsArray] of Object.entries(outcomeOdds)) {
             if (oddsArray.length < 2) continue;
 
-            // Calculate weighted average if sharp book weighting enabled
-            let avgOdds: number;
-            if (sharpBookWeighting) {
-              let totalWeight = 0;
-              let weightedSum = 0;
-              for (const o of oddsArray) {
-                const weight = o.isSharp ? sharpBookWeight : 1;
-                weightedSum += o.odds * weight;
-                totalWeight += weight;
-              }
-              avgOdds = weightedSum / totalWeight;
-            } else {
-              avgOdds = oddsArray.reduce((sum, o) => sum + o.odds, 0) / oddsArray.length;
-            }
+            // Calculate vig-removed fair probability for H2H
+            const { fairProb, avgOdds } = calculateFairProbability(
+              outcomeOdds,
+              outcomeName,
+              sharpBookWeighting,
+              sharpBookWeight
+            );
 
-            const impliedProb = 1 / avgOdds;
             const hasSharpBook = oddsArray.some(o => o.isSharp);
 
             allSignals.push({
@@ -228,7 +265,7 @@ Deno.serve(async (req) => {
               outcome: outcomeName,
               bookmaker: 'consensus',
               odds: avgOdds,
-              implied_probability: impliedProb,
+              implied_probability: fairProb, // Now using vig-removed fair probability
               previous_odds: null,
               odds_movement: 0,
               movement_speed: 0,
@@ -243,7 +280,7 @@ Deno.serve(async (req) => {
       }
     }
 
-    console.log(`Generated ${allSignals.length} total signals`);
+    console.log(`Generated ${allSignals.length} total signals with vig-removed probabilities`);
 
     // Store signals in database
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
@@ -290,6 +327,7 @@ Deno.serve(async (req) => {
         near_term_events: nearTermCount,
         event_horizon_hours: eventHorizonHours,
         sharp_weighting_enabled: sharpBookWeighting,
+        vig_removal: true,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );

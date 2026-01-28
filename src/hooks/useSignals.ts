@@ -119,9 +119,22 @@ export function useSignals() {
     minEdge?: number;
     minConfidence?: number;
     urgency?: string[];
+    trueEdgesOnly?: boolean;
   }) => {
     return signals.filter(s => {
-      if (filters.minEdge && s.edge_percent < filters.minEdge) return false;
+      // Filter by true edges only (matched to Polymarket)
+      if (filters.trueEdgesOnly && s.is_true_arbitrage !== true) return false;
+      
+      // For true arbitrage, filter by edge; for signals, use signal_strength from factors
+      if (filters.minEdge) {
+        if (s.is_true_arbitrage) {
+          if (s.edge_percent < filters.minEdge) return false;
+        } else {
+          const signalStrength = (s as any).signal_strength || 0;
+          if (signalStrength < filters.minEdge) return false;
+        }
+      }
+      
       if (filters.minConfidence && s.confidence_score < filters.minConfidence) return false;
       if (filters.urgency?.length && !filters.urgency.includes(s.urgency)) return false;
       return true;
