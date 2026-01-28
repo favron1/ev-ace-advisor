@@ -1,157 +1,211 @@
 
-# Fix Polymarket NBA Market Detection
 
-## Root Cause Analysis
+# Flip Architecture: Polymarket-First Signal Detection
 
-From the logs and your screenshot, I identified **two critical issues** preventing the system from finding NBA H2H markets like Timberwolves vs Mavericks:
+## Current Problem
 
-### Issue 1: Rate Limit Exhaustion
-The function hits `MAX_LIVE_API_LOOKUPS = 5` before it even tries to look up the Mavericks game. Looking at the logs:
+The current system follows **Bookmakers Lead, Polymarket Reacts**:
+1. Scans bookmaker odds every 5 minutes for movement
+2. Tries to find matching Polymarket markets per-event via live API calls
+3. Fails frequently because:
+   - Polymarket's `title_contains` API search returns political markets instead of sports
+   - Market titles don't match (e.g., "Timberwolves vs. Mavericks" vs "Dallas Mavericks vs Minnesota Timberwolves")
+   - Rate limits exhausted on failed lookups before reaching target games
+
+## Proposed Solution
+
+**Flip to Polymarket-First Scanning:**
+
+```text
++---------------------+     +--------------------+     +------------------+
+|  1. Fetch ALL      |---->| 2. Store in       |---->| 3. For each     |
+|  Polymarket Sports |     | polymarket_h2h_   |     | Polymarket      |
+|  H2H Markets Daily |     | cache table       |     | event, fetch    |
+|                    |     |                    |     | bookmaker odds  |
++---------------------+     +--------------------+     +------------------+
+                                                              |
+                                                              v
+                                                      +------------------+
+                                                      | 4. Compare       |
+                                                      | Poly price vs    |
+                                                      | Bookmaker fair   |
+                                                      | probability      |
+                                                      +------------------+
+                                                              |
+                                                              v
+                                                      +------------------+
+                                                      | 5. Surface       |
+                                                      | actionable       |
+                                                      | edges (>2%)      |
+                                                      +------------------+
 ```
-[POLY-LIVE] Skipping Dallas Mavericks vs Minnesota Timberwolves - max live lookups (5) reached
-```
 
-The function is processing Euroleague basketball games (Partizan, Olimpia Milano, Valencia Basket, Maccabi) before NBA games, exhausting the API quota on less relevant markets.
+## Benefits
 
-### Issue 2: Search Term Mismatch
-Your Polymarket screenshot shows the market as:
-- **"Timberwolves vs. Mavericks"** (nicknames only)
-
-But our bookmaker signals have:
-- **"Dallas Mavericks vs Minnesota Timberwolves"** (full city + team name)
-
-When we search the Polymarket API with "Dallas Mavericks", we may not match "Timberwolves vs. Mavericks" because the search API is title-based.
-
----
-
-## Solution Overview
-
-| Change | File | Description |
-|--------|------|-------------|
-| 1. Prioritize NBA/major sports | `detect-signals/index.ts` | Sort signals to process NBA games FIRST before Euroleague |
-| 2. Increase API budget | `detect-signals/index.ts` | Raise `MAX_LIVE_API_LOOKUPS` from 5 to 10 |
-| 3. Smarter search terms | `detect-signals/index.ts` | Use team nicknames from TEAM_ALIASES for search queries |
-| 4. Skip low-priority leagues | `detect-signals/index.ts` | Deprioritize Euroleague/minor leagues in H2H mode |
-
----
+| Current System | Flipped System |
+|---------------|----------------|
+| Search-based matching (unreliable) | Pre-cached markets (guaranteed match) |
+| Rate-limited per-event lookups | Bulk fetch once daily + live price refresh |
+| Missing most NBA games | Every Polymarket sports market captured |
+| Manual price entry workaround | Automated end-to-end |
 
 ## Technical Implementation
 
-### Change 1: Prioritize NBA Games
-Add priority scoring to process NBA/NFL/UFC games before Euroleague/minor leagues:
+### Phase 1: New Polymarket Cache Table
 
-```typescript
-function getLeaguePriority(eventName: string): number {
-  const lower = eventName.toLowerCase();
-  // NBA gets highest priority
-  if (['lakers', 'celtics', 'warriors', 'heat', 'bulls', 'mavericks', 'nuggets', 'cavaliers', 'knicks', 'nets', 'clippers', 'rockets', 'suns', 'bucks', 'sixers', 'pacers', 'hawks', 'magic', 'pelicans', 'grizzlies', 'kings', 'thunder', 'timberwolves', 'spurs', 'blazers', 'jazz', 'wizards', 'raptors', 'hornets', 'pistons'].some(t => lower.includes(t))) {
-    return 1; // NBA = top priority
-  }
-  // Tennis grand slams
-  if (['australian open', 'wimbledon', 'us open', 'french open'].some(t => lower.includes(t))) {
-    return 2;
-  }
-  // UFC
-  if (lower.includes('ufc') || ['makhachev', 'jones', 'pereira'].some(t => lower.includes(t))) {
-    return 3;
-  }
-  // Euroleague - lower priority
-  if (['euroleague', 'olimpia', 'partizan', 'fenerbahce', 'maccabi', 'barcelona basket', 'real madrid basket'].some(t => lower.includes(t))) {
-    return 10; // Low priority
-  }
-  return 5; // Default
-}
-```
+Create a new table specifically for sports H2H markets with better structure:
 
-Sort signals by priority before processing:
-```typescript
-h2hSignals.sort((a, b) => getLeaguePriority(a.event_name) - getLeaguePriority(b.event_name));
-```
-
-### Change 2: Increase API Budget
-```typescript
-// Raise from 5 to 10 to handle more events
-const MAX_LIVE_API_LOOKUPS = 10;
-```
-
-### Change 3: Smarter Search Terms with Nicknames
-Update `extractLiveSearchTerms` to use the alias table:
-
-```typescript
-function extractLiveSearchTerms(eventName: string): string[] {
-  const terms: string[] = [];
+```sql
+CREATE TABLE polymarket_h2h_cache (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  condition_id text UNIQUE NOT NULL,
+  event_title text NOT NULL,
+  question text NOT NULL,
   
-  // Extract team names
-  const vsMatch = eventName.match(/(.+?)\s+vs\.?\s+(.+)/i);
-  if (vsMatch) {
-    const team1 = vsMatch[1].trim();
-    const team2 = vsMatch[2].trim();
-    
-    // Get nickname from aliases (first alias is usually the short name)
-    const team1Nickname = getTeamNickname(team1);
-    const team2Nickname = getTeamNickname(team2);
-    
-    // Try nicknames first (more likely to match Polymarket titles)
-    if (team1Nickname) terms.push(team1Nickname);
-    if (team2Nickname) terms.push(team2Nickname);
-    
-    // Then try full names as fallback
-    terms.push(team1);
-    terms.push(team2);
-  } else {
-    terms.push(eventName);
-  }
+  -- Extracted match data
+  team_home text,
+  team_away text,
+  sport_category text,
+  event_date timestamp with time zone,
   
-  return [...new Set(terms)].slice(0, 4);
-}
-
-function getTeamNickname(teamName: string): string | null {
-  const normalized = normalizeName(teamName);
-  for (const [canonical, aliases] of Object.entries(TEAM_ALIASES)) {
-    if (normalized.includes(canonical) || aliases.some(a => normalized.includes(a))) {
-      // Return the shortest alias (typically the nickname)
-      return aliases.sort((a, b) => a.length - b.length)[0];
-    }
-  }
-  return null;
-}
+  -- Pricing (updated frequently)
+  yes_price numeric NOT NULL,
+  no_price numeric NOT NULL,
+  volume numeric DEFAULT 0,
+  liquidity numeric DEFAULT 0,
+  
+  -- Metadata
+  status text DEFAULT 'active',
+  last_price_update timestamp with time zone DEFAULT now(),
+  last_bulk_sync timestamp with time zone DEFAULT now(),
+  created_at timestamp with time zone DEFAULT now()
+);
 ```
 
-This means for "Dallas Mavericks vs Minnesota Timberwolves":
-- Search 1: "mavs" (nickname)
-- Search 2: "wolves" (nickname)
-- Search 3: "Dallas Mavericks" (full)
-- Search 4: "Minnesota Timberwolves" (full)
+### Phase 2: New Edge Function - `sync-polymarket-h2h`
 
-### Change 4: Skip Euroleague During Live Lookup
-If budget is limited, skip Euroleague events entirely:
+A new function that:
+1. Fetches ALL sports markets from Polymarket Gamma API (paginated)
+2. Extracts team names from event titles using regex patterns
+3. Stores in `polymarket_h2h_cache` with normalized team names
+4. Runs once per day (or on-demand) via pg_cron at 6 AM
 
 ```typescript
-// In the signal processing loop
-if (liveApiCallsUsed >= MAX_LIVE_API_LOOKUPS / 2) {
-  // Budget running low - only process NBA/UFC/Tennis
-  const priority = getLeaguePriority(signal.event_name);
-  if (priority > 3) {
-    console.log(`[POLY-LIVE] Budget low, skipping lower-priority: ${signal.event_name}`);
-    continue;
+// Fetch pattern for comprehensive sports coverage
+const endpoints = [
+  '/events?active=true&closed=false&limit=100&offset=0',
+  '/events?active=true&closed=false&limit=100&offset=100',
+  // ... paginate until exhausted
+];
+
+// Parse team names from various title formats:
+// "Timberwolves vs. Mavericks" → team_home: "Timberwolves", team_away: "Mavericks"
+// "Will the Warriors beat the Lakers?" → team_home: "Warriors", team_away: "Lakers"
+function extractTeams(title: string, question: string): { home: string, away: string } | null
+```
+
+### Phase 3: Modify Watch Mode Poll
+
+Change `watch-mode-poll` to:
+1. First check which events exist in `polymarket_h2h_cache`
+2. Only fetch bookmaker odds for events that have a Polymarket market
+3. Calculate edge immediately using cached Polymarket price
+
+```typescript
+// New flow in watch-mode-poll:
+// 1. Get all active Polymarket H2H markets
+const { data: polyMarkets } = await supabase
+  .from('polymarket_h2h_cache')
+  .select('*')
+  .eq('status', 'active')
+  .gte('event_date', now)
+  .lte('event_date', maxHorizon);
+
+// 2. For each Polymarket market, fetch bookmaker odds
+for (const polyMarket of polyMarkets) {
+  const bookmakerOdds = await fetchBookmakerOdds(polyMarket.team_home, polyMarket.team_away);
+  
+  // 3. Calculate edge immediately
+  const bookmakerFairProb = calculateVigFreeProb(bookmakerOdds);
+  const polyPrice = polyMarket.yes_price;
+  const edge = (bookmakerFairProb - polyPrice) * 100;
+  
+  if (edge >= MIN_EDGE) {
+    // Surface signal immediately
   }
 }
 ```
 
----
+### Phase 4: Live Price Refresh
 
-## Expected Result
+Add a lightweight price-only refresh for active signals:
+1. When a signal is surfaced, fetch fresh Polymarket price via API
+2. Use `condition_id` for direct market lookup (no search needed)
+3. Update `polymarket_h2h_cache` with fresh price before edge calculation
 
-After these changes:
-1. NBA games (Mavericks vs Timberwolves, Celtics vs Hawks, etc.) will be processed FIRST
-2. Searches will use nicknames ("wolves", "mavs") which match Polymarket titles better
-3. The system will find your Timberwolves vs Mavericks market with $750K volume
-4. If there's a price discrepancy vs bookmaker odds, it will show as a true arbitrage opportunity with a "BET" or "STRONG_BET" decision
+```typescript
+// Direct price lookup using condition_id
+const url = `https://gamma-api.polymarket.com/markets/${conditionId}`;
+const market = await fetch(url).then(r => r.json());
+const freshYesPrice = parseFloat(market.outcomePrices[0]);
+```
 
----
+### Phase 5: Update Signal Detection Flow
 
-## Files Modified
+Modify `detect-signals` to:
+1. Join bookmaker signals against `polymarket_h2h_cache` using team name matching
+2. Calculate edge for all matched pairs
+3. Apply quality filters (volume, staleness, edge threshold)
+4. Surface actionable signals only
+
+## Matching Strategy
+
+Use fuzzy matching with the TEAM_ALIASES already in the codebase:
+
+```text
+Polymarket: "Timberwolves vs. Mavericks"
+  → normalized: ["timberwolves", "wolves", "minnesota"] + ["mavericks", "mavs", "dallas"]
+
+Bookmaker: "Dallas Mavericks vs Minnesota Timberwolves"
+  → normalized: ["dallas", "mavericks", "mavs"] + ["minnesota", "timberwolves", "wolves"]
+
+Match confidence: High (multiple alias overlaps)
+```
+
+## Scheduling
+
+| Function | Schedule | Purpose |
+|----------|----------|---------|
+| `sync-polymarket-h2h` | Daily at 6 AM | Bulk refresh all sports markets |
+| `watch-mode-poll` | Every 5 min | Check bookmaker odds for cached Poly markets |
+| `active-mode-poll` | Every 60 sec | Refresh Poly price + confirm edges |
+
+## Files to Create
+
+| File | Purpose |
+|------|---------|
+| `supabase/functions/sync-polymarket-h2h/index.ts` | New bulk sync function |
+
+## Files to Modify
 
 | File | Changes |
 |------|---------|
-| `supabase/functions/detect-signals/index.ts` | Add priority sorting, nickname search, increase API budget |
+| `supabase/functions/watch-mode-poll/index.ts` | Check Polymarket cache first before fetching bookmaker odds |
+| `supabase/functions/detect-signals/index.ts` | Use cache for matching instead of live search |
+| `supabase/functions/active-mode-poll/index.ts` | Use condition_id for direct price lookup |
+
+## Database Changes
+
+1. Create `polymarket_h2h_cache` table with team extraction columns
+2. Add pg_cron job for daily sync at 6 AM
+3. Add index on `(team_home, team_away, event_date)` for fast matching
+
+## Expected Outcome
+
+After implementation:
+- Every Polymarket sports H2H market will be captured and cached
+- Matching will be reliable (pre-computed, not search-based)
+- Edge detection will work automatically without manual price entry
+- Signal cards will show accurate Polymarket prices from verified matches
+- No more "no match found" failures for games that clearly exist on Polymarket
+
