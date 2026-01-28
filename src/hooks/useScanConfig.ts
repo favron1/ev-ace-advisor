@@ -139,11 +139,31 @@ export function useScanConfig() {
     if (scanning) return null;
     if (!config) return null;
 
+    // Always refresh latest config from backend before enforcing limits.
+    // This prevents stale in-memory values (e.g. after admin/manual resets) from blocking scans.
+    let cfg: ScanConfig = config;
+    try {
+      const { data: freshCfg, error: freshErr } = await supabase
+        .from('scan_config')
+        .select('*')
+        .eq('id', config.id)
+        .single();
+
+      if (!freshErr && freshCfg) {
+        cfg = freshCfg as unknown as ScanConfig;
+        setConfig(cfg);
+        updateStatus(cfg);
+      }
+    } catch (e) {
+      // Non-fatal: proceed with in-memory config
+      console.warn('Failed to refresh scan config before scan:', e);
+    }
+
     // Check API limits
-    if (config.daily_requests_used >= config.max_daily_requests) {
+    if (cfg.daily_requests_used >= cfg.max_daily_requests) {
       toast({
         title: 'Daily Limit Reached',
-        description: `You've used ${config.daily_requests_used}/${config.max_daily_requests} requests today.`,
+        description: `You've used ${cfg.daily_requests_used}/${cfg.max_daily_requests} requests today.`,
         variant: 'destructive',
       });
       return null;
@@ -194,10 +214,10 @@ export function useScanConfig() {
       // Update usage counters
       const requestsUsed = 15; // Approximate: sync + monitor + API calls
       await updateConfig({
-        daily_requests_used: config.daily_requests_used + requestsUsed,
-        monthly_requests_used: config.monthly_requests_used + requestsUsed,
+        daily_requests_used: cfg.daily_requests_used + requestsUsed,
+        monthly_requests_used: cfg.monthly_requests_used + requestsUsed,
         last_scan_at: new Date().toISOString(),
-        total_scans_today: config.total_scans_today + 1,
+        total_scans_today: cfg.total_scans_today + 1,
       });
 
       const result: AdaptiveScanResult = {
