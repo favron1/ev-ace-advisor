@@ -152,12 +152,49 @@ Deno.serve(async (req) => {
       // Minimum edge threshold
       if (edge < 2) continue;
 
-      // Calculate confidence
-      let confidence = 40;
-      confidence += bestSignal.is_sharp_book ? 15 : 0;
-      confidence += Math.min(bestSignal.confirming_books * 3, 15);
-      if (hoursLeft && hoursLeft <= 12) confidence += 5; // Bonus for near-term
-      confidence = Math.min(Math.round(confidence), 100);
+      // Calculate confidence using tiered scoring system
+      let confidence = 30; // Base score
+
+      // Edge magnitude scoring (5-35 points)
+      if (edge >= 20) {
+        confidence += 35;
+      } else if (edge >= 10) {
+        confidence += 25;
+      } else if (edge >= 5) {
+        confidence += 15;
+      } else if (edge >= 2) {
+        confidence += 5;
+      }
+
+      // Sharp book presence scoring (0-15 points)
+      // Check if any sharp books are in the signals for this event
+      const eventSignals = signals;
+      const hasPinnacle = eventSignals.some(s => s.outcome.includes('Pinnacle') || s.is_sharp_book);
+      const hasBetfair = eventSignals.some(s => s.outcome.includes('Betfair'));
+      if (bestSignal.is_sharp_book || hasPinnacle) {
+        confidence += 15;
+      } else if (hasBetfair) {
+        confidence += 10;
+      }
+
+      // Confirming books scoring (0-15 points based on actual agreement)
+      const confirmingCount = bestSignal.confirming_books || 1;
+      if (confirmingCount >= 10) {
+        confidence += 15;
+      } else if (confirmingCount >= 6) {
+        confidence += 10;
+      } else if (confirmingCount >= 3) {
+        confidence += 5;
+      }
+
+      // Time factor scoring (0-5 points)
+      if (hoursLeft && hoursLeft <= 6) {
+        confidence += 5;
+      } else if (hoursLeft && hoursLeft <= 12) {
+        confidence += 3;
+      }
+
+      confidence = Math.min(Math.round(confidence), 95);
 
       const urgency = calculateUrgency(hoursLeft, edge, bestSignal.is_sharp_book);
       const timeLabel = formatTimeRemaining(hoursLeft);
