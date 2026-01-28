@@ -9,10 +9,12 @@ interface FiltersBarProps {
   minConfidence: number;
   selectedUrgency: string[];
   showTrueEdgesOnly: boolean;
+  showBettableOnly: boolean;
   onMinEdgeChange: (value: number) => void;
   onMinConfidenceChange: (value: number) => void;
   onUrgencyChange: (value: string[]) => void;
   onShowTrueEdgesOnlyChange: (value: boolean) => void;
+  onShowBettableOnlyChange: (value: boolean) => void;
 }
 
 export function FiltersBar({
@@ -20,30 +22,48 @@ export function FiltersBar({
   minConfidence,
   selectedUrgency,
   showTrueEdgesOnly,
+  showBettableOnly,
   onMinEdgeChange,
   onMinConfidenceChange,
   onUrgencyChange,
   onShowTrueEdgesOnlyChange,
+  onShowBettableOnlyChange,
 }: FiltersBarProps) {
   return (
     <Card className="bg-card/50">
       <CardContent className="p-4">
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-          {/* True Edges Only Toggle */}
-          <div className="space-y-2">
+          {/* Signal Type Toggles */}
+          <div className="space-y-3">
             <Label className="text-xs">Signal Type</Label>
-            <div className="flex items-center space-x-2">
-              <Switch
-                id="true-edges-only"
-                checked={showTrueEdgesOnly}
-                onCheckedChange={onShowTrueEdgesOnlyChange}
-              />
-              <Label htmlFor="true-edges-only" className="text-xs cursor-pointer">
-                True Edges Only
-              </Label>
+            <div className="space-y-2">
+              <div className="flex items-center space-x-2">
+                <Switch
+                  id="true-edges-only"
+                  checked={showTrueEdgesOnly}
+                  onCheckedChange={onShowTrueEdgesOnlyChange}
+                />
+                <Label htmlFor="true-edges-only" className="text-xs cursor-pointer">
+                  True Edges Only
+                </Label>
+              </div>
+              <div className="flex items-center space-x-2">
+                <Switch
+                  id="bettable-only"
+                  checked={showBettableOnly}
+                  onCheckedChange={onShowBettableOnlyChange}
+                />
+                <Label htmlFor="bettable-only" className="text-xs cursor-pointer">
+                  Bettable Only
+                </Label>
+              </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              {showTrueEdgesOnly ? 'Showing matched arbitrage only' : 'Showing all signals'}
+              {showBettableOnly 
+                ? 'Showing BET/STRONG_BET only' 
+                : showTrueEdgesOnly 
+                  ? 'Showing matched arbitrage only' 
+                  : 'Showing all signals'}
             </p>
           </div>
 
