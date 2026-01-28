@@ -8,6 +8,7 @@ import { FiltersBar } from '@/components/terminal/FiltersBar';
 import { MarketsSidebar } from '@/components/terminal/MarketsSidebar';
 import { ScanControlPanel } from '@/components/terminal/ScanControlPanel';
 import { AutomationPanel } from '@/components/terminal/AutomationPanel';
+import { PolymarketAvailability } from '@/components/terminal/PolymarketAvailability';
 import { useSignals } from '@/hooks/useSignals';
 import { usePolymarket } from '@/hooks/usePolymarket';
 import { useScanConfig } from '@/hooks/useScanConfig';
@@ -249,9 +250,12 @@ export default function Terminal() {
               cooldownCountdown={cooldownCountdown}
             />
             
-            {/* Polymarket Sidebar */}
+            {/* Polymarket NBA Availability - NEW */}
+            <PolymarketAvailability />
+            
+            {/* Polymarket Sidebar (cached general markets) */}
             <div>
-              <h2 className="text-lg font-semibold mb-4">Polymarket</h2>
+              <h2 className="text-lg font-semibold mb-4">Polymarket (Cached)</h2>
               <MarketsSidebar markets={markets} loading={marketsLoading} />
             </div>
           </div>
