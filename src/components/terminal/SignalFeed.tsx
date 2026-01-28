@@ -54,6 +54,7 @@ export function SignalFeed({ signals, loading, refreshing, onDismiss, onExecute,
             signal={signal}
             onDismiss={onDismiss}
             onExecute={onExecute}
+            onRefresh={onRefresh}
           />
         ))}
       </div>
