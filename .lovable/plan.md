@@ -1,109 +1,100 @@
 
-# Plan: Fix Confidence Score Variability
+# Plan: Add Clear Bet Recommendation Display
 
-## Problem Summary
-All signals display **70% confidence** because the scoring inputs lack variance:
-- Every signal has `is_sharp_book: true` (no differentiation)
-- Every signal has `confirming_books: 47` (counting all books, not agreement)
-- The formula caps out at 70 regardless of edge quality
+## Problem
+Currently, signal cards show event names like "Utah Jazz vs Golden State Warriors" with just "YES" or "NO" as the side, but users don't know **which team to actually bet on**.
+
+The `outcome` field (containing the actual team name like "Utah Jazz") exists in `bookmaker_signals` but is discarded during signal detection.
 
 ## Solution Overview
-Refactor the confidence calculation to incorporate meaningful, variable factors that produce a realistic distribution of scores (typically 40-95%).
+Store the specific team/player pick in the signal data and display it prominently in the UI so users clearly see "Bet on **Utah Jazz** to win" rather than just "YES".
 
 ---
 
 ## Implementation Steps
 
-### 1. Update Odds Ingestion (`ingest-odds`)
-Properly classify bookmakers:
+### 1. Database Migration
+Add a `recommended_outcome` column to store the actual pick:
 
-| Category | Bookmakers | Weight |
-|----------|------------|--------|
-| Sharp | Pinnacle, Betfair, Matchbook | 1.5x |
-| Soft | DraftKings, FanDuel, BetMGM, etc. | 1.0x |
+```sql
+ALTER TABLE signal_opportunities 
+ADD COLUMN recommended_outcome text;
 
-Track per-outcome confirming books (books pricing the same side as favorable) rather than total book count.
-
-### 2. Refactor Confidence Calculation (`detect-signals`)
-New formula incorporating:
-
-```text
-Base Score:        30 points
-
-Edge Magnitude:    
-  - Edge 2-5%:     +5
-  - Edge 5-10%:    +15
-  - Edge 10-20%:   +25
-  - Edge 20%+:     +35
-
-Sharp Book Signal:
-  - Has Pinnacle:  +15
-  - Has Betfair:   +10
-  - Soft only:     +0
-
-Confirming Books:
-  - 1-2 books:     +0
-  - 3-5 books:     +5
-  - 6-10 books:    +10
-  - 10+ books:     +15
-
-Time Factor:
-  - Under 6h:      +5
-  - Under 12h:     +3
-  - Over 12h:      +0
-
-Liquidity Bonus:   (future - requires market data)
-  - High volume:   +5
+COMMENT ON COLUMN signal_opportunities.recommended_outcome IS 
+  'The specific team/player/outcome to bet on';
 ```
 
-This produces a range from **30** (weak signal) to **85** (strong multi-factor signal).
+### 2. Update Signal Detection (`detect-signals/index.ts`)
+Pass through the `outcome` field from bookmaker signals:
 
-### 3. Store Individual Book Data
-Add a `contributing_bookmakers` JSONB field to track which specific books are pricing favorably, enabling:
-- Sharp/soft classification
-- True consensus counting
-- Future odds movement tracking
+```text
+Current:
+  side = bookmakerProb > 0.5 ? 'YES' : 'NO'
+
+Updated:
+  recommended_outcome = bestSignal.outcome  // "Utah Jazz"
+  side = 'YES'  // Always YES for H2H favorites
+```
+
+The detection will now include:
+- `recommended_outcome`: The actual team/player name (e.g., "Utah Jazz")
+- `side`: Still tracks YES/NO for Polymarket-style logic
+- `event_name`: The full matchup (e.g., "Utah Jazz vs Golden State Warriors")
+
+### 3. Update TypeScript Types
+Add the new field to `SignalOpportunity` interface:
+
+```typescript
+// src/types/arbitrage.ts
+export interface SignalOpportunity {
+  // ... existing fields
+  recommended_outcome?: string;  // The specific pick
+}
+```
+
+### 4. Update Signal Card UI (`SignalCard.tsx`)
+Display the recommendation prominently:
+
+```text
+Before:
+  [HIGH] Utah Jazz vs Golden State Warriors
+  [YES ↑] @ 50.0¢
+
+After:
+  [HIGH] Utah Jazz vs Golden State Warriors
+  [BET: Utah Jazz] ↑ 79.7% implied
+  "Back Utah Jazz to win"
+```
+
+Visual changes:
+- Replace ambiguous "YES/NO" badge with team name
+- Add clear action text: "Back [Team] to win"
+- Show the bookmaker implied probability for the pick
+- Color-code based on confidence level
 
 ---
 
 ## Technical Changes
 
-### Files to Modify
-
-1. **`supabase/functions/ingest-odds/index.ts`**
-   - Define `SHARP_BOOKS` constant array
-   - Set `is_sharp_book` based on actual bookmaker name matching
-   - Calculate `confirming_books` as count of books pricing the same outcome favorably
-
-2. **`supabase/functions/detect-signals/index.ts`**
-   - Replace flat confidence formula with tiered scoring
-   - Add edge magnitude tiers
-   - Weight sharp book presence properly
-   - Add time-decay factor
-
-### Database Migration (Optional Enhancement)
-Add column to `bookmaker_signals`:
-```sql
-ALTER TABLE bookmaker_signals 
-ADD COLUMN contributing_bookmakers jsonb DEFAULT '[]';
-```
+| File | Change |
+|------|--------|
+| Database migration | Add `recommended_outcome` column |
+| `supabase/functions/detect-signals/index.ts` | Store `bestSignal.outcome` as `recommended_outcome` |
+| `src/types/arbitrage.ts` | Add `recommended_outcome?: string` to interface |
+| `src/components/terminal/SignalCard.tsx` | Display recommended outcome prominently with clear action text |
 
 ---
 
-## Expected Outcome
-After implementation, confidence scores will show realistic variance:
-- **40-50%**: Weak signals (soft books only, low edge)
-- **55-70%**: Moderate signals (some sharp agreement, decent edge)
-- **75-85%**: Strong signals (sharp book confirmation, high edge, near-term)
-- **90%+**: Exceptional signals (multiple sharp books, large edge, imminent event)
+## Expected Result
 
----
+**Before:**
+> Utah Jazz vs Golden State Warriors  
+> [YES] @ 50.0¢  
+> Edge: +29.7%
 
-## Summary
-| Task | Complexity |
-|------|------------|
-| Update sharp book detection in ingestion | Low |
-| Refactor confidence scoring tiers | Medium |
-| Add contributing bookmakers tracking | Low |
-| Deploy and test | Low |
+**After:**
+> Utah Jazz vs Golden State Warriors  
+> **Bet: Utah Jazz** (79.7% implied)  
+> Edge: +29.7% | Confidence: 95
 
+Users will instantly know they should place a bet on Utah Jazz to win, rather than guessing what "YES" means.
