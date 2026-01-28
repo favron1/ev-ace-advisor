@@ -111,32 +111,32 @@ The old system followed **Bookmakers Lead, Polymarket Reacts**:
 
 ---
 
-## Known Issues & Improvements Needed
+## Known Issues & Findings
 
-### 1. Sport Category Detection
-Current sync found 75 markets but `sport_category` is NULL for most. Need to improve detection logic for NBA, NFL, NHL specifically.
+### 1. NBA/NFL Game H2H Markets Don't Exist on Polymarket
+**CRITICAL FINDING**: Polymarket does NOT offer individual game H2H betting for major US sports (NBA, NFL, NHL). Their sports offerings are limited to:
+- **Championship Futures**: "Will the Lakers win the 2026 NBA Finals?"
+- **Player Award Futures**: "Will LeBron win MVP?"
+- **College Basketball**: Limited H2H for NCAA tournament
+- **Soccer**: Some European and Saudi league H2H matches
 
-### 2. NBA Game Coverage
-First sync didn't find NBA games - may be categorized as "futures" or not available on Polymarket. Need to investigate Polymarket's actual NBA H2H coverage.
+**Implication**: The system cannot match bookmaker H2H signals (e.g., "Lakers vs Celtics tonight") to Polymarket because those markets simply don't exist. The arbitrage opportunity between sharp books and Polymarket only applies to:
+1. Championship futures (compare bookmaker outright odds vs Polymarket)
+2. Player props (when available)
 
-### 3. Pagination Limit
-Currently stops at 1000 events. May need to increase for comprehensive coverage.
-
----
-
-## First Sync Results (Jan 28, 2026)
-
-```json
-{
-  "total_events_fetched": 1100,
-  "sports_h2h_markets": 75,
-  "skipped": {
-    "non_sports": 908,
-    "futures": 2603,
-    "no_teams": 13
-  },
-  "duration_ms": 2997
-}
+### 2. Current Cache Contents (Jan 28, 2026)
+```
+Total: 1,577 markets
+- Futures: 1,365 (championship, player awards)
+- H2H: 86 (mostly soccer, college basketball)
+- Props: 80
+- Totals: 34
+- Player Props: 12
 ```
 
-Most markets found are soccer matches (Premier League, La Liga, etc.). NBA H2H markets may not be available on Polymarket or need different detection.
+### 3. Recommendation
+Switch focus from H2H game matching to **Futures arbitrage**:
+- Compare bookmaker championship odds vs Polymarket
+- Much more viable since both sources offer these markets
+- Example: Bookmaker has Lakers +350 to win title (22.2%), Polymarket YES at $0.18 → 4.2% edge
+
