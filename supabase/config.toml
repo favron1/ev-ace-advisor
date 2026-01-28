@@ -1,40 +1,10 @@
 project_id = "tjwqkbyyplaycvnjwqbh"
 
-[functions.analyze-bet]
+[functions.fetch-polymarket]
 verify_jwt = false
 
-[functions.fetch-odds]
+[functions.ingest-odds]
 verify_jwt = false
 
-[functions.check-results]
-verify_jwt = false
-
-[functions.fetch-live-scores]
-verify_jwt = false
-
-[functions.analyze-value-bets]
-verify_jwt = false
-
-[functions.analyze-racing-bets]
-verify_jwt = false
-
-[functions.fetch-historical-odds]
-verify_jwt = false
-
-[functions.ai-analyze-bets]
-verify_jwt = false
-
-[functions.fetch-odds-v2]
-verify_jwt = false
-
-[functions.run-betting-model]
-verify_jwt = false
-
-[functions.racing-engine]
-verify_jwt = false
-
-[functions.fetch-racing-odds]
-verify_jwt = false
-
-[functions.run-racing-model]
+[functions.detect-signals]
 verify_jwt = false

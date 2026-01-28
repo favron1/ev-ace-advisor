@@ -1,0 +1,117 @@
+import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { supabase } from '@/integrations/supabase/client';
+import { Header } from '@/components/terminal/Header';
+import { SignalFeed } from '@/components/terminal/SignalFeed';
+import { StatsBar } from '@/components/terminal/StatsBar';
+import { FiltersBar } from '@/components/terminal/FiltersBar';
+import { MarketsSidebar } from '@/components/terminal/MarketsSidebar';
+import { useSignals } from '@/hooks/useSignals';
+import { usePolymarket } from '@/hooks/usePolymarket';
+import { arbitrageApi } from '@/lib/api/arbitrage';
+import type { SignalLog } from '@/types/arbitrage';
+
+export default function Terminal() {
+  const navigate = useNavigate();
+  const [user, setUser] = useState<any>(null);
+  const [logs, setLogs] = useState<SignalLog[]>([]);
+  
+  // Filters state
+  const [minEdge, setMinEdge] = useState(0);
+  const [minConfidence, setMinConfidence] = useState(0);
+  const [selectedUrgency, setSelectedUrgency] = useState<string[]>([]);
+
+  const { 
+    signals, 
+    loading: signalsLoading, 
+    detecting,
+    runDetection, 
+    dismissSignal, 
+    executeSignal,
+    getFilteredSignals 
+  } = useSignals();
+  
+  const { markets, loading: marketsLoading } = usePolymarket();
+
+  // Auth check
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!session) {
+        navigate('/auth');
+      } else {
+        setUser(session.user);
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!session) {
+        navigate('/auth');
+      } else {
+        setUser(session.user);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, [navigate]);
+
+  // Fetch logs for stats
+  useEffect(() => {
+    arbitrageApi.getSignalLogs(100).then(setLogs).catch(console.error);
+  }, []);
+
+  const filteredSignals = getFilteredSignals({
+    minEdge: minEdge > 0 ? minEdge : undefined,
+    minConfidence: minConfidence > 0 ? minConfidence : undefined,
+    urgency: selectedUrgency.length > 0 ? selectedUrgency : undefined,
+  });
+
+  if (!user) {
+    return null;
+  }
+
+  return (
+    <div className="min-h-screen bg-background">
+      <Header onRunDetection={runDetection} detecting={detecting} />
+      
+      <main className="container py-6 space-y-6">
+        {/* Stats Overview */}
+        <StatsBar signals={signals} logs={logs} />
+        
+        {/* Filters */}
+        <FiltersBar
+          minEdge={minEdge}
+          minConfidence={minConfidence}
+          selectedUrgency={selectedUrgency}
+          onMinEdgeChange={setMinEdge}
+          onMinConfidenceChange={setMinConfidence}
+          onUrgencyChange={setSelectedUrgency}
+        />
+
+        {/* Main Content */}
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+          {/* Signal Feed */}
+          <div className="lg:col-span-3">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold">Signal Feed</h2>
+              <span className="text-sm text-muted-foreground">
+                {filteredSignals.length} signal{filteredSignals.length !== 1 ? 's' : ''}
+              </span>
+            </div>
+            <SignalFeed
+              signals={filteredSignals}
+              loading={signalsLoading}
+              onDismiss={dismissSignal}
+              onExecute={executeSignal}
+            />
+          </div>
+
+          {/* Polymarket Sidebar */}
+          <div className="hidden lg:block">
+            <h2 className="text-lg font-semibold mb-4">Polymarket</h2>
+            <MarketsSidebar markets={markets} loading={marketsLoading} />
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+}
