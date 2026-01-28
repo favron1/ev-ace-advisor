@@ -137,13 +137,51 @@ export const SHARP_BOOKMAKERS = [
 
 export type SharpBookmaker = typeof SHARP_BOOKMAKERS[number];
 
-// Available sports for polling
+// Focus mode for signal detection
+export type FocusMode = 'h2h_only' | 'all' | 'futures_only';
+
+// Available sports for polling - PRIORITIZED ORDER
+// Top priority: NBA, UFC, Tennis (year-round coverage)
 export const AVAILABLE_SPORTS = [
+  // TOP PRIORITY
   { key: 'basketball_nba', label: 'NBA Basketball', icon: '🏀' },
+  { key: 'mma_mixed_martial_arts', label: 'MMA / UFC', icon: '🥊' },
+  
+  // TENNIS GRAND SLAMS
+  { key: 'tennis_atp_aus_open_singles', label: 'ATP Australian Open', icon: '🎾' },
+  { key: 'tennis_wta_aus_open_singles', label: 'WTA Australian Open', icon: '🎾' },
+  { key: 'tennis_atp_french_open', label: 'ATP French Open', icon: '🎾' },
+  { key: 'tennis_wta_french_open', label: 'WTA French Open', icon: '🎾' },
+  { key: 'tennis_atp_wimbledon', label: 'ATP Wimbledon', icon: '🎾' },
+  { key: 'tennis_wta_wimbledon', label: 'WTA Wimbledon', icon: '🎾' },
+  { key: 'tennis_atp_us_open', label: 'ATP US Open', icon: '🎾' },
+  { key: 'tennis_wta_us_open', label: 'WTA US Open', icon: '🎾' },
+  
+  // TENNIS MASTERS 1000 / WTA 1000
+  { key: 'tennis_atp_indian_wells', label: 'ATP Indian Wells', icon: '🎾' },
+  { key: 'tennis_wta_indian_wells', label: 'WTA Indian Wells', icon: '🎾' },
+  { key: 'tennis_atp_miami_open', label: 'ATP Miami Open', icon: '🎾' },
+  { key: 'tennis_wta_miami_open', label: 'WTA Miami Open', icon: '🎾' },
+  { key: 'tennis_atp_monte_carlo_masters', label: 'ATP Monte Carlo Masters', icon: '🎾' },
+  { key: 'tennis_atp_madrid_open', label: 'ATP Madrid Open', icon: '🎾' },
+  { key: 'tennis_wta_madrid_open', label: 'WTA Madrid Open', icon: '🎾' },
+  { key: 'tennis_atp_italian_open', label: 'ATP Italian Open', icon: '🎾' },
+  { key: 'tennis_wta_italian_open', label: 'WTA Italian Open', icon: '🎾' },
+  { key: 'tennis_atp_canadian_open', label: 'ATP Canadian Open', icon: '🎾' },
+  { key: 'tennis_wta_canadian_open', label: 'WTA Canadian Open', icon: '🎾' },
+  { key: 'tennis_atp_cincinnati_open', label: 'ATP Cincinnati Open', icon: '🎾' },
+  { key: 'tennis_wta_cincinnati_open', label: 'WTA Cincinnati Open', icon: '🎾' },
+  { key: 'tennis_atp_shanghai_masters', label: 'ATP Shanghai Masters', icon: '🎾' },
+  { key: 'tennis_atp_paris_masters', label: 'ATP Paris Masters', icon: '🎾' },
+  
+  // OTHER SPORTS
   { key: 'americanfootball_nfl', label: 'NFL Football', icon: '🏈' },
   { key: 'icehockey_nhl', label: 'NHL Hockey', icon: '🏒' },
   { key: 'soccer_epl', label: 'English Premier League', icon: '⚽' },
-  { key: 'mma_mixed_martial_arts', label: 'MMA / UFC', icon: '🥊' },
+  { key: 'soccer_spain_la_liga', label: 'La Liga', icon: '⚽' },
+  { key: 'soccer_germany_bundesliga', label: 'Bundesliga', icon: '⚽' },
+  { key: 'soccer_italy_serie_a', label: 'Serie A', icon: '⚽' },
+  { key: 'soccer_france_ligue_one', label: 'Ligue 1', icon: '⚽' },
 ] as const;
 
 export type AvailableSport = typeof AVAILABLE_SPORTS[number]['key'];

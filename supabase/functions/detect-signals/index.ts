@@ -3,10 +3,15 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+type FocusMode = 'h2h_only' | 'all' | 'futures_only';
+
 interface RequestBody {
   eventHorizonHours?: number;
   minEventHorizonHours?: number;
   minEdgeThreshold?: number;
+  focusMode?: FocusMode;  // NEW: default 'h2h_only'
+  stalenessHoursOverride?: number;  // NEW: for spike mode (1h during spike)
+  minEdgeOverride?: number;  // NEW: for spike mode (1.5% during spike)
 }
 
 interface BookmakerSignal {
@@ -37,7 +42,8 @@ interface PolymarketMarket {
 const MATCH_THRESHOLD = 0.85;
 const CHAMPIONSHIP_MATCH_THRESHOLD = 0.70; // Lower threshold for championship matching
 const AMBIGUITY_MARGIN = 0.03;
-const STALENESS_HOURS_H2H = 2; // Strict for H2H (real-time matters)
+// Default staleness (can be overridden during spike mode)
+const DEFAULT_STALENESS_HOURS_H2H = 2; // Strict for H2H (real-time matters)
 const STALENESS_HOURS_FUTURES = 24; // Relaxed for futures (prices move slowly)
 const MIN_VOLUME_FLAG = 10000;
 const MIN_VOLUME_REJECT = 2000;
@@ -497,9 +503,9 @@ interface ValidationResult {
 }
 
 // Validate Polymarket data freshness and liquidity
-function validatePolymarketData(market: PolymarketMarket, isFutures: boolean = false): ValidationResult {
+function validatePolymarketData(market: PolymarketMarket, isFutures: boolean = false, stalenessOverride?: number): ValidationResult {
   const hoursSinceUpdate = (Date.now() - new Date(market.last_updated).getTime()) / (1000 * 60 * 60);
-  const stalenessThreshold = isFutures ? STALENESS_HOURS_FUTURES : STALENESS_HOURS_H2H;
+  const stalenessThreshold = isFutures ? STALENESS_HOURS_FUTURES : (stalenessOverride || DEFAULT_STALENESS_HOURS_H2H);
   
   if (hoursSinceUpdate > stalenessThreshold) {
     return { valid: false, reason: 'stale_price' };
@@ -567,7 +573,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    console.log('Running enhanced signal detection with H2H + Championship Futures matching...');
+    console.log('Running signal detection (H2H Focus Mode available)...');
     
     let body: RequestBody = {};
     try {
@@ -578,9 +584,13 @@ Deno.serve(async (req) => {
     
     const eventHorizonHours = body.eventHorizonHours || 24;
     const minEventHorizonHours = body.minEventHorizonHours || 2;
-    const minEdgeThreshold = body.minEdgeThreshold || MIN_EDGE_THRESHOLD;
+    const focusMode: FocusMode = body.focusMode || 'h2h_only';  // NEW: default h2h_only
     
-    console.log(`Event horizon: ${minEventHorizonHours}h - ${eventHorizonHours}h, min edge: ${minEdgeThreshold}%`);
+    // Apply overrides for spike mode, otherwise use defaults
+    const stalenessHoursH2H = body.stalenessHoursOverride || DEFAULT_STALENESS_HOURS_H2H;
+    const minEdgeThreshold = body.minEdgeOverride || body.minEdgeThreshold || MIN_EDGE_THRESHOLD;
+    
+    console.log(`Focus mode: ${focusMode}, Event horizon: ${minEventHorizonHours}h - ${eventHorizonHours}h, min edge: ${minEdgeThreshold}%, staleness: ${stalenessHoursH2H}h`);
     
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -681,7 +691,7 @@ Deno.serve(async (req) => {
       
       if (polyMatch && !polyMatch.isAmbiguous) {
         // Validate Polymarket data
-        const validation = validatePolymarketData(polyMatch.market);
+        const validation = validatePolymarketData(polyMatch.market, false, stalenessHoursH2H);
         
         if (validation.valid) {
           // TRUE ARBITRAGE: Compare bookmaker fair prob vs Polymarket price
@@ -806,16 +816,18 @@ Deno.serve(async (req) => {
 
     // ============================================
     // PART 2: Process Championship/Futures signals
+    // (SKIP if focusMode is 'h2h_only')
     // ============================================
     
-    console.log(`\nProcessing ${outrightSignals.length} outright/futures signals`);
-
     let futuresMatchedCount = 0;
     let futuresUnmatchedCount = 0;
     let futuresRejectedCount = 0;
-
-    // Group outright signals by team (extracted from event_name)
     const outrightGroups = new Map<string, BookmakerSignal[]>();
+
+    if (focusMode === 'h2h_only') {
+      console.log(`\nSkipping futures processing (focusMode: ${focusMode})`);
+    } else {
+      console.log(`\nProcessing ${outrightSignals.length} outright/futures signals`);
     for (const signal of outrightSignals) {
       const teamName = extractTeamFromOutright(signal.event_name);
       if (!teamName) continue;
@@ -950,6 +962,7 @@ Deno.serve(async (req) => {
         expires_at: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString(), // 7 days for futures
       });
     }
+    } // End of focusMode !== 'h2h_only' block
 
     const totalMatched = h2hMatchedCount + futuresMatchedCount;
     const totalUnmatched = h2hUnmatchedCount + futuresUnmatchedCount;

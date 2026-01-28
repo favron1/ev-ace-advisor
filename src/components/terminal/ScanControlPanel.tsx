@@ -9,7 +9,8 @@ import {
   Activity,
   Gauge,
   Eye,
-  RefreshCw
+  RefreshCw,
+  Flame
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -22,6 +23,12 @@ import {
   PopoverContent, 
   PopoverTrigger 
 } from '@/components/ui/popover';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 import type { ScanConfig, ScanStatus } from '@/types/scan-config';
 import { formatDistanceToNow } from 'date-fns';
 
@@ -33,12 +40,18 @@ interface ScanControlPanelProps {
   onTogglePause: () => void;
   onToggleTurbo: () => void;
   onOpenSettings: () => void;
-  // New two-tier polling props
+  // Two-tier polling props
   onWatchModePoll?: () => void;
   onActiveModePoll?: () => void;
   watchPolling?: boolean;
   watchingCount?: number;
   activeCount?: number;
+  // News Spike Mode props
+  onTriggerNewsSpike?: () => void;
+  newsSpikeActive?: boolean;
+  spikeCountdown?: string;
+  cooldownActive?: boolean;
+  cooldownCountdown?: string;
 }
 
 export function ScanControlPanel({
@@ -54,12 +67,26 @@ export function ScanControlPanel({
   watchPolling,
   watchingCount = 0,
   activeCount = 0,
+  // News Spike Mode
+  onTriggerNewsSpike,
+  newsSpikeActive = false,
+  spikeCountdown = '--:--',
+  cooldownActive = false,
+  cooldownCountdown = '--:--',
 }: ScanControlPanelProps) {
   const dailyUsagePercent = (status.dailyRequestsUsed / status.dailyRequestsLimit) * 100;
   const monthlyUsagePercent = (status.monthlyRequestsUsed / status.monthlyRequestsLimit) * 100;
   
   const isNearDailyLimit = dailyUsagePercent > 80;
   const isNearMonthlyLimit = monthlyUsagePercent > 80;
+
+  // News Spike button state
+  const spikeDisabled = newsSpikeActive || cooldownActive || scanning || watchPolling || dailyUsagePercent > 90;
+  const spikeButtonLabel = newsSpikeActive 
+    ? `Spike: ${spikeCountdown}` 
+    : cooldownActive 
+      ? `Cooldown: ${cooldownCountdown}` 
+      : '🔥 News Spike';
 
   return (
     <Card className="border-border/50">
@@ -70,6 +97,12 @@ export function ScanControlPanel({
             Scan Control
           </CardTitle>
           <div className="flex items-center gap-2">
+            {newsSpikeActive && (
+              <Badge className="text-xs bg-orange-500/20 text-orange-400 animate-pulse">
+                <Flame className="h-3 w-3 mr-1" />
+                SPIKE
+              </Badge>
+            )}
             {watchingCount > 0 && (
               <Badge variant="outline" className="text-xs bg-yellow-500/10 text-yellow-500 border-yellow-500/30">
                 <Eye className="h-3 w-3 mr-1" />
@@ -94,6 +127,41 @@ export function ScanControlPanel({
       </CardHeader>
       
       <CardContent className="space-y-4">
+        {/* News Spike Mode Button - TOP PRIORITY */}
+        {onTriggerNewsSpike && (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  onClick={onTriggerNewsSpike}
+                  disabled={spikeDisabled}
+                  variant={newsSpikeActive ? 'default' : cooldownActive ? 'secondary' : 'outline'}
+                  className={`w-full gap-2 ${
+                    !spikeDisabled && !newsSpikeActive && !cooldownActive
+                      ? 'bg-orange-500/10 border-orange-500/50 text-orange-500 hover:bg-orange-500/20 hover:border-orange-500'
+                      : newsSpikeActive
+                        ? 'bg-orange-500 text-white animate-pulse'
+                        : ''
+                  }`}
+                  size="sm"
+                >
+                  <Flame className={`h-4 w-4 ${newsSpikeActive ? 'animate-bounce' : ''}`} />
+                  {spikeButtonLabel}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="max-w-xs">
+                <p className="text-xs">
+                  {cooldownActive 
+                    ? 'Cooldown active. Wait before triggering another spike.'
+                    : newsSpikeActive
+                      ? 'High-frequency polling active (60s). Watching for rapid movements!'
+                      : 'Trigger 5-min high-frequency polling after news breaks (injuries, lineups, etc.)'}
+                </p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
+
         {/* Two-tier polling buttons */}
         {(onWatchModePoll || onActiveModePoll) && (
           <div className="flex gap-2">

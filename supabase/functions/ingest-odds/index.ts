@@ -112,20 +112,66 @@ Deno.serve(async (req) => {
       'icehockey_nhl_championship_winner',
     ];
 
-    // H2H sports for individual match betting - THIS IS KEY FOR SHORT-TERM SIGNALS
+    // H2H sports for individual match betting - PRIORITIZED FOR SHORT-TERM SIGNALS
+    // Order matters: Top priority first (NBA, UFC, Tennis)
     const h2hSports = [
+      // TOP PRIORITY: Short-term, news-sensitive markets
+      'basketball_nba',
+      'mma_mixed_martial_arts',
+      
+      // TENNIS: All available tournaments for year-round coverage
+      // Grand Slams
+      'tennis_atp_aus_open_singles',
+      'tennis_wta_aus_open_singles',
+      'tennis_atp_french_open',
+      'tennis_wta_french_open',
+      'tennis_atp_wimbledon',
+      'tennis_wta_wimbledon',
+      'tennis_atp_us_open',
+      'tennis_wta_us_open',
+      // Masters 1000 / WTA 1000
+      'tennis_atp_indian_wells',
+      'tennis_wta_indian_wells',
+      'tennis_atp_miami_open',
+      'tennis_wta_miami_open',
+      'tennis_atp_monte_carlo_masters',
+      'tennis_atp_madrid_open',
+      'tennis_wta_madrid_open',
+      'tennis_atp_italian_open',
+      'tennis_wta_italian_open',
+      'tennis_atp_canadian_open',
+      'tennis_wta_canadian_open',
+      'tennis_atp_cincinnati_open',
+      'tennis_wta_cincinnati_open',
+      'tennis_atp_shanghai_masters',
+      'tennis_atp_paris_masters',
+      // ATP 500 / WTA 500
+      'tennis_atp_qatar_open',
+      'tennis_atp_dubai',
+      'tennis_atp_acapulco_open',
+      'tennis_atp_barcelona_open',
+      'tennis_atp_halle_open',
+      'tennis_atp_queens_club',
+      'tennis_atp_hamburg_open',
+      'tennis_atp_washington_open',
+      'tennis_atp_tokyo_open',
+      'tennis_atp_basel_open',
+      'tennis_atp_vienna_open',
+      'tennis_wta_qatar_open',
+      'tennis_wta_dubai',
+      'tennis_wta_china_open',
+      'tennis_wta_wuhan_open',
+      'tennis_wta_tokyo_open',
+      
+      // OTHER H2H SPORTS
+      'americanfootball_nfl',
+      'icehockey_nhl',
+      'basketball_euroleague',
       'soccer_epl',
       'soccer_spain_la_liga',
       'soccer_germany_bundesliga',
       'soccer_italy_serie_a',
       'soccer_france_ligue_one',
-      'basketball_nba',
-      'basketball_euroleague',
-      'americanfootball_nfl',
-      'icehockey_nhl',
-      'mma_mixed_martial_arts',
-      'tennis_atp_aus_open_singles',
-      'tennis_wta_aus_open_singles',
     ];
 
     const allSignals: any[] = [];
