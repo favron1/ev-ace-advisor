@@ -678,6 +678,40 @@ function calculateUrgency(hoursLeft: number | null, edge: number, isSharp: boole
 // POLYMARKET LIVE FETCH - Targeted per-event API calls for unmatched H2H
 // ============================================================================
 
+// Get league priority for NBA/major sports over Euroleague/minor leagues
+function getLeaguePriority(eventName: string): number {
+  const lower = eventName.toLowerCase();
+  // NBA gets highest priority
+  if (['lakers', 'celtics', 'warriors', 'heat', 'bulls', 'mavericks', 'mavs', 'nuggets', 'cavaliers', 'knicks', 'nets', 'clippers', 'rockets', 'suns', 'bucks', 'sixers', 'pacers', 'hawks', 'magic', 'pelicans', 'grizzlies', 'kings', 'thunder', 'timberwolves', 'wolves', 'spurs', 'blazers', 'jazz', 'wizards', 'raptors', 'hornets', 'pistons'].some(t => lower.includes(t))) {
+    return 1; // NBA = top priority
+  }
+  // Tennis grand slams
+  if (['australian open', 'wimbledon', 'us open', 'french open'].some(t => lower.includes(t))) {
+    return 2;
+  }
+  // UFC
+  if (lower.includes('ufc') || ['makhachev', 'jones', 'pereira'].some(t => lower.includes(t))) {
+    return 3;
+  }
+  // Euroleague - lower priority
+  if (['euroleague', 'olimpia', 'partizan', 'fenerbahce', 'maccabi', 'barcelona basket', 'real madrid basket', 'hapoel', 'anadolu', 'valencia basket', 'olympiacos', 'baskonia'].some(t => lower.includes(t))) {
+    return 10; // Low priority
+  }
+  return 5; // Default
+}
+
+// Get team nickname from alias table
+function getTeamNickname(teamName: string): string | null {
+  const normalized = normalizeName(teamName);
+  for (const [canonical, aliases] of Object.entries(TEAM_ALIASES)) {
+    if (normalized.includes(canonical) || aliases.some(a => normalized.includes(a))) {
+      // Return the shortest alias (typically the nickname like "wolves", "mavs")
+      return aliases.sort((a, b) => a.length - b.length)[0];
+    }
+  }
+  return null;
+}
+
 interface LivePolymarketMatch {
   market_id: string;
   question: string;
@@ -689,7 +723,7 @@ interface LivePolymarketMatch {
 }
 
 // Maximum live API lookups per invocation to prevent timeout
-const MAX_LIVE_API_LOOKUPS = 5;
+const MAX_LIVE_API_LOOKUPS = 10;
 
 // Track live API call count globally within this invocation
 let liveApiCallsUsed = 0;
@@ -758,15 +792,27 @@ function extractLiveSearchTerms(eventName: string): string[] {
   // Extract team names from "Team A vs Team B" format
   const vsMatch = eventName.match(/(.+?)\s+vs\.?\s+(.+)/i);
   if (vsMatch) {
-    // Start with individual team names - more specific, better matches
-    terms.push(vsMatch[1].trim());
-    terms.push(vsMatch[2].trim());
+    const team1 = vsMatch[1].trim();
+    const team2 = vsMatch[2].trim();
+    
+    // Get nicknames from aliases (e.g., "Timberwolves" -> "wolves", "Mavericks" -> "mavs")
+    const team1Nickname = getTeamNickname(team1);
+    const team2Nickname = getTeamNickname(team2);
+    
+    // Try nicknames FIRST (more likely to match Polymarket titles like "Wolves vs Mavs")
+    if (team1Nickname) terms.push(team1Nickname);
+    if (team2Nickname) terms.push(team2Nickname);
+    
+    // Then try full names as fallback
+    terms.push(team1);
+    terms.push(team2);
   } else {
     // Full event name as fallback
     terms.push(eventName);
   }
   
-  return [...new Set(terms)]; // Remove duplicates
+  // Return unique terms, limit to 4
+  return [...new Set(terms)].slice(0, 4);
 }
 
 function findBestLiveMatch(eventName: string, outcome: string, events: any[], maxStalenessHours: number): LivePolymarketMatch | null {
@@ -932,15 +978,30 @@ Deno.serve(async (req) => {
       eventGroups.set(signal.event_name, existing);
     }
 
-    console.log(`Processing ${eventGroups.size} unique H2H events`);
+    // Sort event groups by priority: NBA first, then Tennis/UFC, then Euroleague last
+    const sortedEventNames = [...eventGroups.keys()].sort((a, b) => 
+      getLeaguePriority(a) - getLeaguePriority(b)
+    );
+    
+    console.log(`Processing ${eventGroups.size} unique H2H events (sorted by priority)`);
 
     let h2hMatchedCount = 0;
     let h2hUnmatchedCount = 0;
     let h2hRejectedCount = 0;
 
-    for (const [eventName, signals] of eventGroups) {
+    for (const eventName of sortedEventNames) {
+      const signals = eventGroups.get(eventName)!;
       if (processedEvents.has(eventName)) continue;
       processedEvents.add(eventName);
+      
+      // Budget-aware skipping: when API budget is half used, skip low-priority leagues
+      if (liveApiCallsUsed >= MAX_LIVE_API_LOOKUPS / 2) {
+        const priority = getLeaguePriority(eventName);
+        if (priority > 5) {
+          console.log(`[POLY-LIVE] Budget low, skipping lower-priority: ${eventName}`);
+          continue;
+        }
+      }
 
       // Skip 3-way markets (soccer with Draw)
       if (signals.some(s => normalizeName(s.outcome) === 'draw')) {
