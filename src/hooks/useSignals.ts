@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { arbitrageApi } from '@/lib/api/arbitrage';
 import type { SignalOpportunity, SignalDetectionResult, EnrichedSignal } from '@/types/arbitrage';
@@ -11,7 +11,9 @@ export function useSignals() {
   const [detecting, setDetecting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [newSignalIds, setNewSignalIds] = useState<Set<string>>(new Set());
   const { toast } = useToast();
+  const initialLoadDone = useRef(false);
 
   const fetchSignals = useCallback(async () => {
     try {
@@ -110,16 +112,96 @@ export function useSignals() {
   }, [toast]);
 
   useEffect(() => {
-    fetchSignals();
+    fetchSignals().then(() => {
+      initialLoadDone.current = true;
+    });
   }, [fetchSignals]);
+
+  // Real-time subscription for signal_opportunities
+  useEffect(() => {
+    const channel = supabase
+      .channel('signal_opportunities_realtime')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'signal_opportunities',
+        },
+        (payload) => {
+          const newSignal = payload.new as SignalOpportunity;
+          if (newSignal.status === 'active') {
+            setSignals(prev => {
+              // Avoid duplicates
+              if (prev.some(s => s.id === newSignal.id)) return prev;
+              return [newSignal, ...prev];
+            });
+            // Mark as new for animation (only after initial load)
+            if (initialLoadDone.current) {
+              setNewSignalIds(prev => new Set(prev).add(newSignal.id));
+              toast({
+                title: '🎯 New Signal Detected!',
+                description: newSignal.event_name,
+              });
+            }
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'signal_opportunities',
+        },
+        (payload) => {
+          const updated = payload.new as SignalOpportunity;
+          setSignals(prev => {
+            // If status changed to non-active, remove it
+            if (updated.status !== 'active') {
+              return prev.filter(s => s.id !== updated.id);
+            }
+            // Otherwise update in place
+            return prev.map(s => s.id === updated.id ? updated : s);
+          });
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'signal_opportunities',
+        },
+        (payload) => {
+          const deleted = payload.old as { id: string };
+          setSignals(prev => prev.filter(s => s.id !== deleted.id));
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [toast]);
+
+  // Clear "new" status after 5 seconds
+  useEffect(() => {
+    if (newSignalIds.size === 0) return;
+    const timer = setTimeout(() => {
+      setNewSignalIds(new Set());
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [newSignalIds]);
 
   // Enrich signals with execution analysis
   const enrichedSignals: EnrichedSignal[] = useMemo(() => {
     return signals.map(signal => ({
       ...signal,
       execution: analyzeExecution(signal, 100), // Default $100 stake
+      isNew: newSignalIds.has(signal.id),
     }));
-  }, [signals]);
+  }, [signals, newSignalIds]);
 
   // Filter and sort helpers
   const getFilteredSignals = useCallback((filters: {

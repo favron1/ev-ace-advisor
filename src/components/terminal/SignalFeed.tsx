@@ -49,13 +49,17 @@ export function SignalFeed({ signals, loading, refreshing, onDismiss, onExecute,
     return (
       <div className="space-y-4">
         {sortedSignals.map(signal => (
-          <SignalCard
+          <div
             key={signal.id}
-            signal={signal}
-            onDismiss={onDismiss}
-            onExecute={onExecute}
-            onRefresh={onRefresh}
-          />
+            className={signal.isNew ? 'animate-pulse ring-2 ring-green-500 rounded-lg' : ''}
+          >
+            <SignalCard
+              signal={signal}
+              onDismiss={onDismiss}
+              onExecute={onExecute}
+              onRefresh={onRefresh}
+            />
+          </div>
         ))}
       </div>
     );
