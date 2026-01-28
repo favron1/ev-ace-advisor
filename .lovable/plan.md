@@ -1,223 +1,124 @@
 
-# Plan: Add SMS Text Notifications for Confirmed Signals
 
-## Summary
+# Implementation Plan: Event-Driven Arbitrage Detection Alignment
 
-This plan adds SMS text notifications via Twilio so you receive alerts on your phone even when your browser is closed overnight. When an event transitions to **confirmed** status, the system will send an SMS to your configured phone number.
+## Current State Analysis
+
+After reviewing the codebase, I found several **gaps between the current implementation and your system design spec**:
+
+### What's Already Correct
+1. **Clock 1 (Watch Mode Poll)** - runs every 5 minutes via pg_cron, detects bookmaker movement
+2. **Clock 2 (Active Mode Poll)** - runs every 60 seconds via pg_cron, confirms edges
+3. **Event States** - WATCHING, ACTIVE, CONFIRMED, SIGNAL states exist
+4. **SMS Alerts** - working for confirmed edges
+5. **Movement Detection** - 6% threshold, velocity checks, hold window
+
+### Critical Gap: Polymarket Is Polled Globally
+The `fetch-polymarket` function exists but **is NOT integrated into the event-driven architecture**:
+- It fetches ALL Polymarket markets globally (100 at a time)
+- `active-mode-poll` only queries the `polymarket_markets` table for matching
+- **No fresh Polymarket poll happens per-escalated-event**
+
+Per your spec:
+> "We ONLY compare Polymarket prices AFTER bookmaker movement is detected."
+> "Polymarket comparison ONLY runs for events escalated by Clock 1"
+
+**Current behavior**: Polymarket data is stale (fetched once, stored in DB), not fetched on-demand when events escalate.
 
 ---
 
-## What You'll Need to Provide
+## Proposed Changes
 
-**Twilio Account Setup** (5 minutes):
-1. Go to [twilio.com](https://twilio.com) and create a free account (includes trial credits)
-2. Get your **Account SID** and **Auth Token** from the Twilio console
-3. Get a Twilio phone number (free in trial mode)
-4. Provide these 3 values when prompted:
-   - `TWILIO_ACCOUNT_SID`
-   - `TWILIO_AUTH_TOKEN`  
-   - `TWILIO_PHONE_NUMBER` (the Twilio number, e.g., +15551234567)
+### 1. Remove Global Polymarket Polling
+Delete or disable the `fetch-polymarket` edge function as a scheduled job. Polymarket should NOT be polled continuously.
+
+### 2. Inline Polymarket Fetch in Active-Mode-Poll
+Modify `active-mode-poll` to:
+- **For each ACTIVE event**: fetch Polymarket prices directly (targeted API call)
+- Only call Polymarket API when an event is in ACTIVE state
+- Skip events with no detectable Polymarket market
+
+This aligns with:
+> "ONLY runs for events escalated by Clock 1"
+> "NEVER runs globally"
+
+### 3. Add Targeted Polymarket Search Function
+Create a helper that searches Polymarket for a specific event:
+```text
+Input: event_name, outcome (e.g., "Utah Jazz vs Golden State Warriors", "Golden State Warriors")
+Output: matched_market with yes_price, no_price, volume, or null
+```
+
+Uses Polymarket's search API or filters from Gamma API.
+
+### 4. Update Active-Mode-Poll Logic Flow
+```text
+For each ACTIVE event:
+  1. Fetch latest bookmaker probability (from snapshots)
+  2. Check persistence (hold window + samples)
+  3. IF confirmed:
+     a. Fetch Polymarket price NOW (targeted API call)
+     b. Calculate edge = bookmaker_prob - polymarket_yes
+     c. If edge >= 2%: CONFIRMED EDGE → SMS + signal
+     d. Else: SIGNAL ONLY
+```
+
+### 5. Remove Stale polymarket_markets Table Dependency
+Active-mode-poll should NOT rely on pre-cached Polymarket data. Each confirmation check fetches live Polymarket prices.
 
 ---
 
-## Files to Create/Modify
+## Technical Changes Summary
 
-| File | Purpose |
-|------|---------|
-| `supabase/functions/send-sms-alert/index.ts` | **NEW** - Edge function to send SMS via Twilio |
-| `supabase/functions/active-mode-poll/index.ts` | Call SMS function when event confirmed |
-| Database migration | Add `user_phone` column to profiles table |
-| `src/pages/Settings.tsx` | Add phone number input field |
+| File | Change |
+|------|--------|
+| `supabase/functions/active-mode-poll/index.ts` | Add inline Polymarket fetch per-event |
+| `supabase/functions/fetch-polymarket/index.ts` | Deprecate or remove global polling |
+| `supabase/config.toml` | Remove fetch-polymarket if no longer scheduled |
+| Database cron jobs | Ensure no scheduled call to `fetch-polymarket` |
 
 ---
 
 ## Implementation Details
 
-### 1. Create send-sms-alert Edge Function
+### active-mode-poll Modifications
 
-```typescript
-// supabase/functions/send-sms-alert/index.ts
-
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-};
-
-Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders });
-  }
-
-  try {
-    const { to, message } = await req.json();
-    
-    const accountSid = Deno.env.get('TWILIO_ACCOUNT_SID');
-    const authToken = Deno.env.get('TWILIO_AUTH_TOKEN');
-    const fromNumber = Deno.env.get('TWILIO_PHONE_NUMBER');
-    
-    if (!accountSid || !authToken || !fromNumber) {
-      throw new Error('Twilio credentials not configured');
-    }
-
-    const url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
-    
-    const credentials = btoa(`${accountSid}:${authToken}`);
-    
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Authorization': `Basic ${credentials}`,
-      },
-      body: new URLSearchParams({
-        To: to,
-        From: fromNumber,
-        Body: message,
-      }),
-    });
-
-    const result = await response.json();
-    
-    return new Response(
-      JSON.stringify({ success: true, sid: result.sid }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    );
-  } catch (error) {
-    console.error('[SEND-SMS-ALERT] Error:', error);
-    return new Response(
-      JSON.stringify({ error: error.message }),
-      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    );
-  }
-});
+Add a new function `fetchPolymarketForEvent()`:
+```text
+async function fetchPolymarketForEvent(eventName: string): Promise<PolyMatch | null>
+  - Query Gamma API: /events?active=true&closed=false&search={encoded_event}
+  - Match using Jaccard + Levenshtein (existing logic)
+  - Return { market_id, yes_price, no_price, volume } or null
 ```
 
----
+Replace the current `findPolymarketMatch()` that queries the database with this live-fetch approach.
 
-### 2. Update active-mode-poll to Send SMS on Confirmation
+### Cron Job Review
 
-Add SMS notification after creating the signal opportunity (around line 187):
-
-```typescript
-// After confirming an edge...
-console.log(`[ACTIVE-MODE-POLL] CONFIRMED EDGE: ${event.event_name} - ${edgePct.toFixed(1)}%`);
-
-// Send SMS alert
-try {
-  const smsMessage = `EDGE DETECTED: ${event.event_name}\n+${edgePct.toFixed(1)}% edge. Poly: ${(polyPrice * 100).toFixed(0)}c. Execute now!`;
-  
-  // Get user phone from profiles (assumes single user for now)
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('phone_number')
-    .limit(1)
-    .single();
-    
-  if (profile?.phone_number) {
-    await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/send-sms-alert`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${Deno.env.get('SUPABASE_ANON_KEY')}`,
-      },
-      body: JSON.stringify({
-        to: profile.phone_number,
-        message: smsMessage,
-      }),
-    });
-    console.log(`[ACTIVE-MODE-POLL] SMS sent to ${profile.phone_number}`);
-  }
-} catch (smsErr) {
-  console.error('[ACTIVE-MODE-POLL] SMS error:', smsErr);
-  // Don't fail the whole operation if SMS fails
-}
-```
-
----
-
-### 3. Database Migration - Add Phone Number
-
-Add `phone_number` column to profiles table:
-
+Verify no cron job calls `fetch-polymarket` on a schedule. If one exists, remove it:
 ```sql
-ALTER TABLE profiles 
-ADD COLUMN phone_number text DEFAULT NULL;
-
-COMMENT ON COLUMN profiles.phone_number IS 
-  'User phone number in E.164 format for SMS alerts';
+SELECT * FROM cron.job WHERE command LIKE '%fetch-polymarket%';
+-- If found:
+SELECT cron.unschedule('fetch-polymarket-job-name');
 ```
 
 ---
 
-### 4. Settings Page - Add Phone Input
+## Expected Behavior After Implementation
 
-Add a phone number field to the Settings page:
-
-```text
-+------------------------------------------+
-|  SMS Notifications                        |
-|  ----------------------------------------|
-|  Phone Number: [+61 412 345 678]          |
-|  Format: Include country code (+61...)   |
-|  [Save]                                  |
-+------------------------------------------+
-```
-
-- Input validation for E.164 format (starts with +, 10-15 digits)
-- Save to `profiles.phone_number`
-- Show confirmation when saved
+1. **Watch Poll (every 5 min)**: Detects bookmaker movement only. Zero Polymarket calls.
+2. **Active Poll (every 60s for ACTIVE events)**: 
+   - Fetches Polymarket LIVE for each escalated event
+   - Calculates TRUE edge in real-time
+   - SMS alert on confirmed edge
+3. **Polymarket API usage**: Only 1 call per ACTIVE event per minute (max 5 simultaneous = max 5 calls/min)
+4. **No stale data**: Edge calculation uses live Polymarket prices, not cached values
 
 ---
 
-## How It Works Overnight
+## Estimated API Impact
 
-```text
-You go to bed with Auto-Polling ON
-        ↓
-Browser tab stays open (laptop plugged in)
-        ↓
-3:47 AM - Watch Poll detects NBA injury movement
-        ↓
-Event escalated to ACTIVE state
-        ↓
-Active Poll runs every 60s
-        ↓
-3:52 AM - Movement holds, edge confirmed!
-        ↓
-active-mode-poll calls send-sms-alert
-        ↓
-Your phone buzzes: "EDGE DETECTED: Lakers vs Celtics +4.2% edge..."
-        ↓
-You wake up, grab phone, execute on Polymarket
-```
+- Polymarket API: ~0-5 calls/minute (only when ACTIVE events exist)
+- Odds API: unchanged (watch poll only)
+- No wasted Polymarket polling when no movement detected
 
----
-
-## Secrets Required
-
-| Secret | Description |
-|--------|-------------|
-| `TWILIO_ACCOUNT_SID` | Your Twilio Account SID (starts with AC...) |
-| `TWILIO_AUTH_TOKEN` | Your Twilio Auth Token |
-| `TWILIO_PHONE_NUMBER` | Your Twilio phone number (+15551234567 format) |
-
----
-
-## Cost
-
-Twilio SMS pricing:
-- **Australia**: ~$0.08 AUD per SMS
-- **US**: ~$0.01 USD per SMS
-- Trial accounts get $15 free credit (~150+ messages)
-
-With ~2-5 confirmed signals per week, monthly cost would be under $2.
-
----
-
-## Expected Outcome
-
-After implementation:
-- Your phone buzzes whenever an edge is confirmed (even at 3 AM)
-- SMS includes event name, edge percentage, and Polymarket price
-- You can set your phone number in Settings
-- Works independently of browser - true "set and forget" overnight monitoring
