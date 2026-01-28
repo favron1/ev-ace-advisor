@@ -237,31 +237,39 @@ Deno.serve(async (req) => {
     const maxActive = configData?.max_simultaneous_active || MAX_SIMULTANEOUS_ACTIVE;
 
     // ========================================================================
-    // STEP 1: Load Polymarket markets from cache
+    // STEP 1: Load Polymarket markets from cache - H2H ONLY, 24hr max
     // ========================================================================
+    // Calculate 24-hour horizon cutoff
+    const maxEventDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    
+    // CRITICAL: Only H2H markets, NOT futures - futures are championship winner bets
     const { data: polyMarkets, error: fetchError } = await supabase
       .from('polymarket_h2h_cache')
       .select('*')
       .eq('status', 'active')
+      .eq('market_type', 'h2h')  // ONLY H2H - no futures
       .gte('volume', minVolume)
-      .in('market_type', enabledTypes)
+      .not('event_date', 'is', null)  // Must have event date
+      .lte('event_date', maxEventDate)  // Within 24 hours
       .order('volume', { ascending: false })
       .limit(MAX_MARKETS_PER_SCAN);
 
     if (fetchError) throw fetchError;
 
     if (!polyMarkets || polyMarkets.length === 0) {
-      console.log('[WATCH-MODE-POLL] No markets in cache');
+      console.log('[WATCH-MODE-POLL] No H2H markets within 24hr horizon');
       return new Response(
         JSON.stringify({ 
           success: true, 
-          message: 'No Polymarket markets in cache',
+          message: 'No H2H markets within 24hr horizon',
           snapshots_stored: 0,
           edges_found: 0,
         }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
+    
+    console.log(`[WATCH-MODE-POLL] Loaded ${polyMarkets.length} H2H markets within 24hr`);
 
     console.log(`[WATCH-MODE-POLL] Loaded ${polyMarkets.length} Polymarket markets`);
 
