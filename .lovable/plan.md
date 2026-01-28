@@ -1,100 +1,134 @@
 
-# Plan: Add Clear Bet Recommendation Display
+# Plan: Add Signal Refresh Button
 
-## Problem
-Currently, signal cards show event names like "Utah Jazz vs Golden State Warriors" with just "YES" or "NO" as the side, but users don't know **which team to actually bet on**.
+## Why This Is a Good Idea
 
-The `outcome` field (containing the actual team name like "Utah Jazz") exists in `bookmaker_signals` but is discarded during signal detection.
+A refresh button that re-evaluates existing signals **without calling external APIs** is an excellent optimization:
 
-## Solution Overview
-Store the specific team/player pick in the signal data and display it prominently in the UI so users clearly see "Bet on **Utah Jazz** to win" rather than just "YES".
+| Action | API Requests | Database Queries |
+|--------|-------------|------------------|
+| Full Scan | 15-20 (Odds API + Polymarket) | Many writes |
+| Refresh | 0 | Read + conditional updates |
+
+With the 500 requests/month limit on The Odds API, this approach lets users:
+- Clean up expired signals (events that have started)
+- Remove signals that no longer meet filters
+- Update time-based urgency calculations
+- All without consuming API quota
 
 ---
 
-## Implementation Steps
+## Implementation Overview
 
-### 1. Database Migration
-Add a `recommended_outcome` column to store the actual pick:
+### 1. Create Refresh Edge Function
+A lightweight function that:
+- Fetches current active signals from database
+- Checks each signal against current criteria:
+  - Has the event started? (expire if `commence_time` has passed)
+  - Does edge still meet minimum threshold?
+  - Recalculate urgency based on updated time-to-event
+- Updates or removes signals that no longer qualify
 
-```sql
-ALTER TABLE signal_opportunities 
-ADD COLUMN recommended_outcome text;
+### 2. Update useSignals Hook
+Add a `refreshSignals` function that:
+- Calls the new edge function
+- Updates local state with refreshed data
+- Shows toast with refresh results
 
-COMMENT ON COLUMN signal_opportunities.recommended_outcome IS 
-  'The specific team/player/outcome to bet on';
-```
+### 3. Update SignalFeed Component
+Add a refresh button in the header area:
+- Shows between the title and count
+- Displays loading state during refresh
+- Disabled during full scans
 
-### 2. Update Signal Detection (`detect-signals/index.ts`)
-Pass through the `outcome` field from bookmaker signals:
+---
+
+## Technical Details
+
+### New Edge Function: `refresh-signals/index.ts`
 
 ```text
-Current:
-  side = bookmakerProb > 0.5 ? 'YES' : 'NO'
+Purpose: Re-evaluate existing active signals without external API calls
 
-Updated:
-  recommended_outcome = bestSignal.outcome  // "Utah Jazz"
-  side = 'YES'  // Always YES for H2H favorites
-```
+Input: None (reads from database)
 
-The detection will now include:
-- `recommended_outcome`: The actual team/player name (e.g., "Utah Jazz")
-- `side`: Still tracks YES/NO for Polymarket-style logic
-- `event_name`: The full matchup (e.g., "Utah Jazz vs Golden State Warriors")
+Logic:
+1. Fetch all active signals from signal_opportunities
+2. For each signal:
+   - Check if event has started (expires_at < now)
+   - Recalculate hours_until_event
+   - Update urgency based on new time
+   - Mark expired if event has passed
+3. Batch update changed signals
+4. Return summary of changes
 
-### 3. Update TypeScript Types
-Add the new field to `SignalOpportunity` interface:
-
-```typescript
-// src/types/arbitrage.ts
-export interface SignalOpportunity {
-  // ... existing fields
-  recommended_outcome?: string;  // The specific pick
+Output:
+{
+  refreshed: 13,
+  expired: 2,
+  updated: 5,
+  unchanged: 6
 }
 ```
 
-### 4. Update Signal Card UI (`SignalCard.tsx`)
-Display the recommendation prominently:
-
-```text
-Before:
-  [HIGH] Utah Jazz vs Golden State Warriors
-  [YES ↑] @ 50.0¢
-
-After:
-  [HIGH] Utah Jazz vs Golden State Warriors
-  [BET: Utah Jazz] ↑ 79.7% implied
-  "Back Utah Jazz to win"
-```
-
-Visual changes:
-- Replace ambiguous "YES/NO" badge with team name
-- Add clear action text: "Back [Team] to win"
-- Show the bookmaker implied probability for the pick
-- Color-code based on confidence level
-
----
-
-## Technical Changes
+### Files to Create/Modify
 
 | File | Change |
 |------|--------|
-| Database migration | Add `recommended_outcome` column |
-| `supabase/functions/detect-signals/index.ts` | Store `bestSignal.outcome` as `recommended_outcome` |
-| `src/types/arbitrage.ts` | Add `recommended_outcome?: string` to interface |
-| `src/components/terminal/SignalCard.tsx` | Display recommended outcome prominently with clear action text |
+| `supabase/functions/refresh-signals/index.ts` | New lightweight refresh function |
+| `src/lib/api/arbitrage.ts` | Add `refreshSignals()` API method |
+| `src/hooks/useSignals.ts` | Add `refreshSignals` function and `refreshing` state |
+| `src/components/terminal/SignalFeed.tsx` | Add header with refresh button |
+| `src/pages/Terminal.tsx` | Wire up refresh handler |
 
 ---
 
-## Expected Result
+## UI Design
 
-**Before:**
-> Utah Jazz vs Golden State Warriors  
-> [YES] @ 50.0¢  
-> Edge: +29.7%
+```text
+┌─────────────────────────────────────────────────┐
+│ Signal Feed              [↻ Refresh]  13 signals│
+├─────────────────────────────────────────────────┤
+│                                                 │
+│  [Signal Card 1]                                │
+│  [Signal Card 2]                                │
+│  ...                                            │
+│                                                 │
+└─────────────────────────────────────────────────┘
+```
 
-**After:**
-> Utah Jazz vs Golden State Warriors  
-> **Bet: Utah Jazz** (79.7% implied)  
-> Edge: +29.7% | Confidence: 95
+The refresh button:
+- Uses `RefreshCw` icon from lucide-react
+- Shows spinning animation while refreshing
+- Tooltip: "Re-check signals without using API quota"
 
-Users will instantly know they should place a bet on Utah Jazz to win, rather than guessing what "YES" means.
+---
+
+## Refresh Logic Details
+
+The refresh function will:
+
+1. **Expire stale signals**: Events where `commence_time` has passed
+2. **Update urgency tiers**: Recalculate based on new time-to-event
+3. **Preserve all data**: No external API calls, just database operations
+
+```text
+Example transformations:
+- Signal with 2h left → urgency changes from "normal" to "high"
+- Signal where game started → status changes to "expired"
+- Signal still valid → just updates time_label in signal_factors
+```
+
+---
+
+## Summary
+
+| Task | Complexity |
+|------|------------|
+| Create refresh-signals edge function | Low |
+| Add API method | Low |
+| Update useSignals hook | Low |
+| Add refresh button to SignalFeed | Low |
+| Wire up in Terminal page | Low |
+
+This feature saves API quota while keeping the signal feed clean and up-to-date.
