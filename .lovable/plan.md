@@ -1,170 +1,87 @@
 
-# Universal Polymarket Scanner - Simplified Architecture
 
-## The Problem
+# Signal Feed Not Updating in Real-Time
 
-The current implementation has overly restrictive filters:
-1. **polymarket-sync-24h**: Requires H2H patterns ("vs", "beat", "win") and specific team names
-2. **polymarket-monitor**: Only fetches NBA H2H odds from bookmakers
-3. **Result**: Missing totals, player props, UFC fights, tennis matches, soccer, and any market that doesn't match narrow H2H patterns
+## Problem Identified
 
-## The Solution
+You received an SMS alert about the Rangers vs. Islanders edge, and the signal **does exist** in the database with `status: active`. But it's not appearing in the feed because:
 
-### Simple Rule: Capture ALL Polymarket Sports Events Within 24 Hours
+**The Signal Feed has no real-time updates.** It only loads signals:
+1. When the page first loads
+2. When you manually click the Refresh button
+3. After running a manual scan
 
-No pattern matching. No H2H detection. Just:
-- Is it tagged as Sports (or related category)?
-- Does it have an end date within the next 24 hours?
+When the server-side polling (cron job) detects an edge and sends an SMS, it creates the signal in the database—but the frontend doesn't know to fetch it.
 
-Then let the monitor function figure out how to match it against bookmaker data.
+## Evidence
 
----
-
-## Implementation Plan
-
-### 1. Rewrite polymarket-sync-24h (Discovery Function)
-
-**Remove all these filters:**
-- `isSportsEvent()` H2H pattern matching
-- Team name extraction requirements
-- `extractTeams()` function dependency
-- `normalizeTeamName()` for filtering
-
-**Keep only:**
-```text
-FILTER: isSportsCategory=true AND endDate <= NOW + 24 hours
+The signal is definitely in the database:
+```
+event_name: Rangers vs. Islanders
+edge_percent: 9.34%
+polymarket_volume: $979K
+urgency: critical
+status: active
 ```
 
-**Store everything:**
-- Market type detected from question (h2h, total, prop, etc.)
-- Entity extracted (team name, player name)
-- Sport detected (NBA, NFL, UFC, Tennis, Soccer)
-- Full question/title for later matching
+## Solution: Add Real-Time Signal Updates
 
-### 2. Rewrite polymarket-monitor (Polling Function)
+### Changes Required
 
-**Current problem:** Only fetches `basketball_nba/odds/?markets=h2h`
+**1. Enable Realtime on `signal_opportunities` table**
 
-**New approach:**
-1. Group monitored events by detected sport
-2. Fetch ALL relevant bookmaker endpoints:
-   - NBA: `basketball_nba/odds/?markets=h2h,spreads,totals`
-   - NFL: `americanfootball_nfl/odds/?markets=h2h,spreads,totals`
-   - UFC: `mma_mixed_martial_arts/odds/?markets=h2h`
-   - Tennis: `tennis_*/odds/?markets=h2h`
-   - Soccer: `soccer_*/odds/?markets=h2h`
-3. Match Polymarket questions against bookmaker data using fuzzy entity matching
-4. Calculate edge and alert on positive EV
-
-### 3. Scan Button Flow
-
-When user clicks "Full Scan":
-```text
-1. Call polymarket-sync-24h
-   - Fetch ALL Polymarket active events
-   - Filter: Sports category + ends within 24h
-   - Store ALL qualifying events in event_watch_state (state = 'monitored')
-
-2. Call polymarket-monitor (automatically triggered after sync)
-   - For each monitored event:
-     a. Refresh Polymarket price (CLOB API)
-     b. Detect sport + market type from question
-     c. Fetch corresponding bookmaker odds
-     d. Match and calculate edge
-     e. If edge >= 2% net EV → create signal + SMS alert
-   - Mark expired events (commence_time passed)
-
-3. Continue polling every 5 minutes until event starts
+Add a database migration to include the table in Supabase Realtime:
+```sql
+ALTER PUBLICATION supabase_realtime ADD TABLE public.signal_opportunities;
 ```
 
----
+**2. Update `useSignals.ts` hook**
 
-## Technical Changes
+Add a Supabase realtime channel subscription that listens for INSERT/UPDATE/DELETE events on `signal_opportunities`:
+- On INSERT: Add the new signal to the local state
+- On UPDATE: Update the signal in local state (e.g., status change)
+- On DELETE: Remove the signal from local state
 
-### File: supabase/functions/polymarket-sync-24h/index.ts
+This way, when the cron job creates a new signal, your browser will receive it instantly without needing to refresh.
 
-**Key changes:**
-1. Remove `isSportsEvent()` function with H2H patterns
-2. Add simple `isSportsCategory()` that only checks tags
-3. Add `detectMarketType()` to classify question (h2h, total, spread, prop)
-4. Add `detectSport()` to identify sport from title
-5. Store `market_type`, `detected_sport`, `extracted_entity` in cache/state
+**3. Visual indicator for new signals**
 
-### File: supabase/functions/polymarket-monitor/index.ts
+Add a subtle animation or badge when a new signal arrives in real-time so you notice it immediately.
 
-**Key changes:**
-1. Remove hardcoded NBA-only fetch
-2. Add `SPORT_ENDPOINTS` mapping with multiple market types:
-   ```
-   NBA → basketball_nba/?markets=h2h,spreads,totals
-   NFL → americanfootball_nfl/?markets=h2h,spreads,totals
-   UFC → mma_mixed_martial_arts/?markets=h2h
-   ```
-3. Group monitored events by detected sport
-4. Fetch bookmaker data for each sport group
-5. Enhanced matching: support totals, spreads, not just H2H
-6. Same edge calculation and SMS alerting logic
+## Technical Details
 
-### File: src/hooks/useScanConfig.ts
+### Current Flow (broken)
+```text
++-------------------+     +-------------------+     +-------------------+
+| Cron detects edge | --> | Inserts signal    | --> | Sends SMS         |
+|                   |     | to database       |     |                   |
++-------------------+     +-------------------+     +-------------------+
+                                  |
+                                  v
+                          (Frontend doesn't know)
+```
 
-**Changes:**
-1. Update `runManualScan()` to call `polymarket-sync-24h` first
-2. Then call `polymarket-monitor` to check for edges
-3. Clear separation: sync discovers, monitor detects
+### Fixed Flow
+```text
++-------------------+     +-------------------+     +-------------------+
+| Cron detects edge | --> | Inserts signal    | --> | Sends SMS         |
+|                   |     | to database       |     |                   |
++-------------------+     +-------------------+     +-------------------+
+                                  |
+                                  v
+                          +-------------------+
+                          | Realtime channel  | --> Signal appears
+                          | notifies frontend |     in feed instantly
+                          +-------------------+
+```
 
----
+## Immediate Workaround
 
-## Event Lifecycle (Simplified)
-
-| State | Meaning | Transition |
-|-------|---------|------------|
-| `monitored` | Active polling target | Sync discovers event within 24h |
-| `alerted` | Signal sent | Edge detected, SMS triggered |
-| `expired` | Event started | commence_time passed |
-
-No more: `watching`, `active`, `confirmed`, `signal` states.
-
----
-
-## Market Type Detection
-
-Analyze Polymarket question to classify:
-
-| Pattern | Market Type |
-|---------|-------------|
-| "over", "under", "O/U", "total" | `total` |
-| "spread", "handicap", "+/-" | `spread` |
-| "vs", "beat", "win", "to win" | `h2h` |
-| Player name + stat | `player_prop` |
-
----
-
-## Sport Detection
-
-Analyze title/question for keywords:
-
-| Keywords | Sport API |
-|----------|-----------|
-| NBA, Lakers, Celtics... | `basketball_nba` |
-| NFL, Chiefs, Eagles... | `americanfootball_nfl` |
-| UFC, MMA, fighter names | `mma_mixed_martial_arts` |
-| ATP, WTA, player names | `tennis_*` |
-| Premier League, EPL, club names | `soccer_epl` |
-
----
-
-## Expected Outcomes
-
-1. **More events captured**: All sports, all market types within 24h
-2. **Broader matching**: Totals, spreads, props - not just moneylines
-3. **Same edge logic**: Still requires 2% net edge after fees
-4. **Instant alerts**: SMS when criteria met
-5. **Auto-expiry**: Events removed when they start
-
----
+Until this is implemented, **refresh the page** or **click the refresh button** in the Signal Feed when you receive an SMS. The signal will appear.
 
 ## Files to Modify
 
-1. `supabase/functions/polymarket-sync-24h/index.ts` - Simplify to sports + 24h filter only
-2. `supabase/functions/polymarket-monitor/index.ts` - Multi-sport, multi-market bookmaker fetching
-3. `src/hooks/useScanConfig.ts` - Wire scan button to call sync then monitor
+1. `src/hooks/useSignals.ts` - Add Supabase realtime channel subscription
+2. Database migration - Enable realtime for `signal_opportunities` table
+3. `src/components/terminal/SignalFeed.tsx` - Optional: Add "new signal" animation
+
