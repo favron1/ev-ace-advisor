@@ -1,280 +1,87 @@
 
-# Automated Polling + Notifications System - Complete Implementation Plan
+# Fix: Infinite Re-render Loop in Watch State Hook
 
-## Overview
+## Problem Summary
 
-This plan implements a **fully automated "set and forget" workflow** with two key features:
+The auto-polling and notification system has a **dependency loop** causing excessive API requests (dozens per second instead of one every few minutes). This is draining resources and causing "Failed to fetch" errors.
 
-1. **Auto-Polling Engine** - Runs Watch Poll every 5 minutes and Active Poll every 60 seconds automatically
-2. **Notification System** - Alerts you immediately when a CONFIRMED EDGE signal is detected
+## Root Cause
 
-After implementation, your daily workflow becomes:
-1. Open app in the morning
-2. Toggle "Auto-Poll" ON
-3. Toggle "Notifications" ON
-4. Go about your day
-5. Receive alerts when edges are confirmed
-6. Execute trades promptly
-7. Close app at end of day
+The `useWatchState` hook has `fetchWatchStates` as a dependency of the realtime subscription effect. Because `fetchWatchStates` depends on `options` (which includes the `onNewConfirmed` callback), and this callback is recreated on every render in Terminal.tsx, it causes:
 
----
+1. Callback recreated on render
+2. `fetchWatchStates` recreated
+3. Realtime subscription torn down and recreated
+4. New subscription triggers immediate fetch
+5. Fetch causes re-render
+6. Loop repeats infinitely
 
-## Feature 1: Auto-Polling Engine
+## Solution
 
-### What It Does
-- Runs **Watch Mode Poll** every 5 minutes automatically (collects baseline data, detects movement)
-- Runs **Active Mode Poll** every 60 seconds automatically (only when active events exist)
-- Pauses intelligently when approaching API limits or when browser tab is hidden
-- Shows countdown timers so you know when the next poll will run
+### 1. Stabilize the callback reference in useWatchState
 
-### New Hook: `useAutoPolling.ts`
+Move the `onNewConfirmed` callback to a ref so it doesn't affect the `fetchWatchStates` dependency:
 
-```text
-Core Logic:
-1. When enabled, start two intervals:
-   - watchInterval = setInterval(runWatchModePoll, 5 minutes)
-   - activeInterval = setInterval(runActiveModePoll, 60 seconds)
-   
-2. Safeguards:
-   - Skip poll if already polling (prevent overlap)
-   - Pause if daily API usage > 90%
-   - Pause if scanning_paused = true in config
-   - Pause if document.visibilityState === 'hidden' (optional)
-   
-3. State tracking:
-   - nextWatchPollAt: Date
-   - nextActivePollAt: Date
-   - pollsToday: number
-   - isAutoPolling: boolean
+```typescript
+// Store callback in ref to avoid dependency issues
+const onNewConfirmedRef = useRef(options?.onNewConfirmed);
+useEffect(() => {
+  onNewConfirmedRef.current = options?.onNewConfirmed;
+}, [options?.onNewConfirmed]);
+
+// Remove options from fetchWatchStates dependencies
+const fetchWatchStates = useCallback(async () => {
+  // ... existing code ...
+  
+  // Use ref instead of options directly
+  if (onNewConfirmedRef.current) {
+    const newlyConfirmed = newConfirmed.filter(e => !previousIds.has(e.id));
+    if (newlyConfirmed.length > 0) {
+      onNewConfirmedRef.current(newlyConfirmed);
+    }
+  }
+}, []); // No dependencies - stable reference
 ```
 
-### UI Changes to Scan Control Panel
+### 2. Stabilize the handleNewConfirmed callback in Terminal.tsx
 
-```text
-┌─────────────────────────────────────────┐
-│ 🔄 Automation & Alerts                  │
-│                                         │
-│ Auto-Polling: [==== Toggle ON ====]     │
-│ Notifications: [==== Toggle ON ====]    │
-│                                         │
-│ Watch Poll:  Next in 3:42               │
-│ Active Poll: Next in 0:28               │
-│                                         │
-│ Status: ● Running (12 polls today)      │
-└─────────────────────────────────────────┘
+Wrap the callback in useCallback with stable dependencies:
+
+```typescript
+const handleNewConfirmed = useCallback((newEvents: EventWatchState[]) => {
+  for (const event of newEvents) {
+    const movement = event.movement_pct?.toFixed(1) || '0';
+    notify(
+      `EDGE DETECTED`,
+      `${event.event_name}\n+${movement}% movement confirmed. Execute now!`
+    );
+  }
+}, [notify]); // notify should be stable from useNotifications
 ```
 
----
+### 3. Ensure notify function is stable in useNotifications
 
-## Feature 2: Notification System
-
-### What It Does
-- Sends **browser push notification** when a signal reaches CONFIRMED state
-- Plays **audio alert** sound so you hear it even if not looking at screen
-- Shows **visual indicator** in the header (pulsing red dot)
-- Works even when browser tab is in background
-
-### New Hook: `useNotifications.ts`
-
-```text
-Core Logic:
-1. requestPermission() - Ask browser for notification permission
-2. notify(title, body) - Send notification + play sound
-3. Track permission state: 'default' | 'granted' | 'denied'
-
-Features:
-- Browser Notification API integration
-- Audio playback using HTMLAudioElement
-- Permission state persistence in localStorage
-- Respects user toggle for notifications
-```
-
-### Triggering Notifications
-
-The existing realtime subscription in `useWatchState.ts` will be enhanced:
-
-```text
-Current:
-- Subscription fires on any change
-- Calls fetchWatchStates() to refresh UI
-
-Enhanced:
-- Track previous confirmed events in a ref
-- Compare new confirmed events with previous
-- If new confirmed event detected → call notify()
-- Pass event details: "EDGE DETECTED: Lakers vs Celtics +3.2%"
-```
-
-### Audio Alert
-
-A new sound file `public/sounds/notification.mp3` will be added - a short, attention-grabbing ping.
-
-### Visual Alert in Header
-
-```text
-Current Header:
-┌────────────────────────────────────┐
-│ ⚡ SIGNAL TERMINAL   [Run] [⚙️] [↪]│
-└────────────────────────────────────┘
-
-Enhanced Header:
-┌────────────────────────────────────┐
-│ ⚡ SIGNAL TERMINAL 🔴 [Run] [⚙️] [↪]│
-└────────────────────────────────────┘
-                     ↑
-              Pulsing red dot when
-              unviewed confirmed signals exist
-```
-
----
-
-## Files to Create
-
-| File | Purpose |
-|------|---------|
-| `src/hooks/useAutoPolling.ts` | Browser interval management for automated polling |
-| `src/hooks/useNotifications.ts` | Browser notification permission and sending |
-| `public/sounds/notification.mp3` | Alert sound file |
+The `notify` function should be wrapped in useCallback with no dependencies that change frequently.
 
 ## Files to Modify
 
-| File | Changes |
-|------|---------|
-| `src/hooks/useWatchState.ts` | Add notification trigger on new confirmed events |
-| `src/components/terminal/ScanControlPanel.tsx` | Add Auto-Polling toggle, countdown timers, Notifications toggle |
-| `src/components/terminal/Header.tsx` | Add visual alert indicator for unviewed confirmed signals |
-| `src/pages/Terminal.tsx` | Integrate both hooks and coordinate state |
+| File | Change |
+|------|--------|
+| `src/hooks/useWatchState.ts` | Use ref for callback, remove options from fetchWatchStates dependencies |
+| `src/pages/Terminal.tsx` | Stabilize handleNewConfirmed with useCallback |
+| `src/hooks/useNotifications.ts` | Verify notify function is stable |
 
----
+## Expected Result After Fix
 
-## Technical Implementation Details
+- Initial load: 1 request
+- Every 5 minutes (Watch Poll): 1 request
+- Every 60 seconds (Active Poll, if active events): 1 request
+- On realtime change: 1 request
+- No more rapid-fire requests or "Failed to fetch" errors
 
-### 1. useAutoPolling.ts
+## Technical Details
 
-```typescript
-interface AutoPollingState {
-  isEnabled: boolean;
-  isRunning: boolean;
-  nextWatchPollAt: Date | null;
-  nextActivePollAt: Date | null;
-  pollsToday: number;
-  watchCountdown: string; // "4:32" format
-  activeCountdown: string; // "0:28" format
-}
-
-// Key functions:
-// - enable() / disable() - toggle automation
-// - Interval management with cleanup on unmount
-// - Countdown timer updates every second
-// - Integration with existing runWatchModePoll/runActiveModePoll
-```
-
-### 2. useNotifications.ts
-
-```typescript
-interface NotificationsState {
-  permission: NotificationPermission;
-  enabled: boolean;
-  hasUnviewedConfirmed: boolean;
-}
-
-// Key functions:
-// - requestPermission() - prompt user for browser permission
-// - notify(title, body, options) - send notification + play sound
-// - markViewed() - clear the unviewed indicator
-// - Toggle enabled state with localStorage persistence
-```
-
-### 3. Notification Trigger in useWatchState.ts
-
-```typescript
-// Add ref to track previous confirmed events
-const previousConfirmedRef = useRef<Set<string>>(new Set());
-
-// In realtime subscription handler:
-const newConfirmed = events.filter(e => e.watch_state === 'confirmed');
-const previousIds = previousConfirmedRef.current;
-
-for (const event of newConfirmed) {
-  if (!previousIds.has(event.id)) {
-    // This is a NEW confirmed event!
-    notify(
-      `EDGE DETECTED: ${event.event_name}`,
-      `+${event.movement_pct.toFixed(1)}% movement confirmed. Execute now!`
-    );
-  }
-}
-
-// Update ref for next comparison
-previousConfirmedRef.current = new Set(newConfirmed.map(e => e.id));
-```
-
----
-
-## Safeguards Built In
-
-| Safeguard | Description |
-|-----------|-------------|
-| **API Limit Protection** | Auto-pause polling when daily usage > 90% |
-| **Overlap Prevention** | Skip poll if previous poll still running |
-| **Tab Visibility** | Optional pause when tab is hidden (saves resources) |
-| **Manual Override** | Clicking manual poll buttons works even with auto-polling on |
-| **Graceful Cleanup** | All intervals cleared on unmount/disable |
-| **Permission Handling** | Graceful fallback if notifications denied |
-
----
-
-## User Experience Flow
-
-```text
-Morning:
-┌─────────────────────────────────────────────────────┐
-│ 1. Open app                                         │
-│ 2. Toggle Auto-Polling ON                           │
-│ 3. Toggle Notifications ON (grants permission)      │
-│ 4. Minimize or switch to other work                 │
-└─────────────────────────────────────────────────────┘
-                           ↓
-During Day (Automated):
-┌─────────────────────────────────────────────────────┐
-│ • Watch Poll runs every 5 minutes                   │
-│ • Snapshots build up, movement detected             │
-│ • Events escalate to ACTIVE                         │
-│ • Active Poll runs every 60 seconds                 │
-│ • Persistence confirmed → CONFIRMED EDGE            │
-└─────────────────────────────────────────────────────┘
-                           ↓
-Alert Received:
-┌─────────────────────────────────────────────────────┐
-│ 🔔 Browser notification appears                     │
-│ 🔊 Sound plays                                      │
-│ 🔴 Header shows pulsing indicator                   │
-│                                                     │
-│ → You click notification or return to tab           │
-│ → Review the confirmed signal                       │
-│ → Execute on Polymarket                             │
-└─────────────────────────────────────────────────────┘
-                           ↓
-Evening:
-┌─────────────────────────────────────────────────────┐
-│ Toggle OFF or close browser                         │
-│ Repeat tomorrow                                     │
-└─────────────────────────────────────────────────────┘
-```
-
----
-
-## Summary
-
-This implementation gives you a complete hands-off monitoring system:
-
-| Feature | Benefit |
-|---------|---------|
-| Auto Watch Poll (5 min) | Builds movement history automatically |
-| Auto Active Poll (60 sec) | Confirms persistence without manual clicks |
-| Browser Notifications | Alerts even when tab is in background |
-| Sound Alerts | You hear it even if not looking |
-| Visual Indicator | See at a glance if new edges exist |
-| Smart Safeguards | Won't exceed API limits or waste resources |
-
-After implementation, you truly can open the app once in the morning, enable automation, and be notified instantly when tradable edges are confirmed.
+The fix uses React refs to break the dependency cycle. By storing the callback in a ref and updating it via a separate effect, we can:
+- Keep `fetchWatchStates` stable (empty dependency array)
+- Still call the latest callback when needed
+- Prevent the realtime subscription from constantly reconnecting
