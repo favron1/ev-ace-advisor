@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Activity, Mail, Lock, User, Loader2 } from "lucide-react";
+import { TrendingUp, Mail, Lock, User, Loader2 } from "lucide-react";
 import { z } from "zod";
 
 const authSchema = z.object({
@@ -106,12 +106,15 @@ const Auth = () => {
         <div className="text-center space-y-2">
           <div className="flex justify-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-primary shadow-lg shadow-primary/30">
-              <Activity className="h-7 w-7 text-primary-foreground" />
+              <TrendingUp className="h-7 w-7 text-primary-foreground" />
             </div>
           </div>
-          <h1 className="text-2xl font-bold text-foreground">EdgeBet Pro</h1>
+          <h1 className="text-2xl font-bold text-foreground">Signal Terminal</h1>
           <p className="text-muted-foreground">
             {isLogin ? "Welcome back" : "Create your account"}
+          </p>
+          <p className="text-xs text-muted-foreground/70">
+            Prediction Market Arbitrage Engine
           </p>
         </div>
 

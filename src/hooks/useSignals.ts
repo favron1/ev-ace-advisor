@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { supabase } from '@/integrations/supabase/client';
 import { arbitrageApi } from '@/lib/api/arbitrage';
 import type { SignalOpportunity, SignalDetectionResult } from '@/types/arbitrage';
 import { useToast } from '@/hooks/use-toast';
@@ -26,11 +27,22 @@ export function useSignals() {
   const runDetection = useCallback(async (): Promise<SignalDetectionResult | null> => {
     try {
       setDetecting(true);
+      
+      // First, refresh data sources
+      toast({ title: 'Refreshing data sources...' });
+      
+      await Promise.all([
+        supabase.functions.invoke('fetch-polymarket', { body: {} }),
+        supabase.functions.invoke('ingest-odds', { body: {} }),
+      ]);
+      
+      // Then run detection
       const result = await arbitrageApi.runSignalDetection();
       await fetchSignals();
+      
       toast({
         title: 'Signal Detection Complete',
-        description: `Found ${result.signals_surfaced} new opportunities from ${result.movements_detected} movements.`,
+        description: `Found ${result.signals_surfaced} opportunities from ${result.outright_signals || result.movements_detected} bookmaker signals.`,
       });
       return result;
     } catch (err) {
