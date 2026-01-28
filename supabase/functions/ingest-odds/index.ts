@@ -3,24 +3,6 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-interface OddsApiOutright {
-  id: string;
-  sport_key: string;
-  sport_title: string;
-  bookmakers: Array<{
-    key: string;
-    title: string;
-    last_update: string;
-    markets: Array<{
-      key: string;
-      outcomes: Array<{
-        name: string;
-        price: number;
-      }>;
-    }>;
-  }>;
-}
-
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -35,24 +17,21 @@ Deno.serve(async (req) => {
       );
     }
 
-    console.log('Fetching bookmaker odds (outrights + h2h)...');
+    console.log('Fetching bookmaker odds...');
 
-    // Sports with outright/futures markets that match Polymarket
+    // Outright/futures sports (championship winners) - use specific sport keys
     const outrightSports = [
-      'soccer_epl',
-      'soccer_spain_la_liga', 
-      'soccer_italy_serie_a',
-      'soccer_germany_bundesliga',
-      'soccer_france_ligue_one',
-      'soccer_uefa_champs_league',
-      'basketball_nba',
-      'americanfootball_nfl',
-      'icehockey_nhl',
+      'soccer_epl_winner', // EPL champion
+      'soccer_uefa_champs_league_winner', // Champions League winner
+      'basketball_nba_championship_winner', // NBA champion
+      'americanfootball_nfl_super_bowl_winner', // Super Bowl winner
+      'icehockey_nhl_championship_winner', // Stanley Cup winner
     ];
 
-    // Additional sports for head-to-head matches
+    // H2H sports for individual match betting
     const h2hSports = [
       'soccer_epl',
+      'soccer_spain_la_liga',
       'basketball_nba',
       'americanfootball_nfl',
       'mma_mixed_martial_arts',
@@ -60,28 +39,30 @@ Deno.serve(async (req) => {
 
     const allSignals: any[] = [];
 
-    // Fetch outright/futures odds (championship winners)
+    // Fetch outrights (championship winners)
     for (const sport of outrightSports) {
       try {
         const url = `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${oddsApiKey}&regions=us,eu,uk&markets=outrights&oddsFormat=decimal`;
         const response = await fetch(url);
         
         if (!response.ok) {
-          console.log(`Outrights not available for ${sport}`);
+          console.log(`Outrights not available for ${sport}: ${response.status}`);
           continue;
         }
 
-        const events: OddsApiOutright[] = await response.json();
-        console.log(`${sport} outrights: ${events.length} events`);
+        const events = await response.json();
+        console.log(`${sport}: ${events.length} outright events`);
 
         for (const event of events) {
           if (!event.bookmakers || event.bookmakers.length < 2) continue;
 
+          const sportTitle = event.sport_title || sport.replace(/_/g, ' ');
+          
           // Collect odds from all bookmakers for each outcome
           const outcomeOdds: Record<string, Array<{ odds: number; bookmaker: string }>> = {};
 
           for (const bookmaker of event.bookmakers) {
-            const outrightMarket = bookmaker.markets.find(m => m.key === 'outrights');
+            const outrightMarket = bookmaker.markets?.find((m: any) => m.key === 'outrights');
             if (!outrightMarket) continue;
 
             for (const outcome of outrightMarket.outcomes) {
@@ -95,16 +76,15 @@ Deno.serve(async (req) => {
             }
           }
 
-          // Process each outcome
+          // Create aggregated signal for each team/outcome
           for (const [outcomeName, oddsArray] of Object.entries(outcomeOdds)) {
             if (oddsArray.length < 2) continue;
 
             const avgOdds = oddsArray.reduce((sum, o) => sum + o.odds, 0) / oddsArray.length;
             const impliedProb = 1 / avgOdds;
-            
-            // Create aggregated signal for this outcome
+
             allSignals.push({
-              event_name: `${event.sport_title} Championship: ${outcomeName}`,
+              event_name: `${sportTitle}: ${outcomeName}`,
               market_type: 'outrights',
               outcome: outcomeName,
               bookmaker: 'consensus',
@@ -118,18 +98,18 @@ Deno.serve(async (req) => {
           }
         }
       } catch (err) {
-        console.error(`Error processing ${sport} outrights:`, err);
+        console.error(`Error processing ${sport}:`, err);
       }
     }
 
-    // Fetch h2h odds for matches (existing logic)
+    // Fetch h2h odds for matches
     for (const sport of h2hSports) {
       try {
         const url = `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${oddsApiKey}&regions=us,eu,uk&markets=h2h&oddsFormat=decimal`;
         const response = await fetch(url);
         
         if (!response.ok) {
-          console.error(`Failed to fetch ${sport}:`, response.status);
+          console.error(`Failed to fetch ${sport}: ${response.status}`);
           continue;
         }
 
@@ -143,7 +123,7 @@ Deno.serve(async (req) => {
           const outcomeOdds: Record<string, Array<{ odds: number; bookmaker: string }>> = {};
 
           for (const bookmaker of event.bookmakers) {
-            const h2hMarket = bookmaker.markets.find((m: any) => m.key === 'h2h');
+            const h2hMarket = bookmaker.markets?.find((m: any) => m.key === 'h2h');
             if (!h2hMarket) continue;
 
             for (const outcome of h2hMarket.outcomes) {
@@ -182,7 +162,7 @@ Deno.serve(async (req) => {
       }
     }
 
-    console.log(`Generated ${allSignals.length} bookmaker signals`);
+    console.log(`Generated ${allSignals.length} total signals`);
 
     // Store signals in database
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
@@ -212,12 +192,15 @@ Deno.serve(async (req) => {
       }
     }
 
+    const outrightCount = allSignals.filter(s => s.market_type === 'outrights').length;
+    const h2hCount = allSignals.filter(s => s.market_type === 'h2h').length;
+
     return new Response(
       JSON.stringify({
         success: true,
         signals_captured: allSignals.length,
-        outright_signals: allSignals.filter(s => s.market_type === 'outrights').length,
-        h2h_signals: allSignals.filter(s => s.market_type === 'h2h').length,
+        outright_signals: outrightCount,
+        h2h_signals: h2hCount,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
