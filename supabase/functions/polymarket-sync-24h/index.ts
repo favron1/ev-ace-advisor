@@ -111,6 +111,67 @@ function extractEntity(question: string, title: string): string | null {
   return null;
 }
 
+// Extract home and away team names from "Team A vs Team B" format
+function extractTeamNames(title: string, question: string): { home: string | null; away: string | null } {
+  // "X vs Y" pattern - try to match just from title first, then question
+  // Using non-greedy +? and anchoring more strictly to avoid over-matching
+  const vsPattern = /^([A-Za-z\s\.\-']+?)\s+vs\.?\s+([A-Za-z\s\.\-']+?)$/i;
+  
+  // Try title first (often cleaner format like "Rangers vs. Islanders")
+  const titleMatch = title.match(vsPattern);
+  if (titleMatch && titleMatch[1] && titleMatch[2]) {
+    const home = titleMatch[1].trim().replace(/\?$/, '');
+    const away = titleMatch[2].trim().replace(/\?$/, '');
+    if (home.length >= 2 && away.length >= 2) {
+      return { home, away };
+    }
+  }
+  
+  // Try question as fallback
+  const questionMatch = question.match(vsPattern);
+  if (questionMatch && questionMatch[1] && questionMatch[2]) {
+    const home = questionMatch[1].trim().replace(/\?$/, '');
+    const away = questionMatch[2].trim().replace(/\?$/, '');
+    if (home.length >= 2 && away.length >= 2) {
+      return { home, away };
+    }
+  }
+  
+  // Try looser pattern on title (for cases like "Team A vs Team B (Event Info)")
+  const looseVsPattern = /([A-Za-z0-9\s\.\-']+?)\s+(?:vs\.?|versus|v\.?)\s+([A-Za-z0-9\s\.\-']+?)(?:\s*[\(\?]|$)/i;
+  const looseMatch = title.match(looseVsPattern) || question.match(looseVsPattern);
+  if (looseMatch && looseMatch[1] && looseMatch[2]) {
+    const home = looseMatch[1].trim();
+    const away = looseMatch[2].trim();
+    if (home.length >= 2 && away.length >= 2) {
+      return { home, away };
+    }
+  }
+  
+  // Try "Will X beat Y" pattern
+  const beatMatch = question.match(/will (?:the )?([A-Za-z\s\.\-']+?)\s+(?:beat|defeat)\s+(?:the )?([A-Za-z\s\.\-']+)/i);
+  if (beatMatch && beatMatch[1] && beatMatch[2]) {
+    return { 
+      home: beatMatch[1].trim(), 
+      away: beatMatch[2].trim().replace(/\?$/, '') 
+    };
+  }
+  
+  return { home: null, away: null };
+}
+
+// Normalize team name for matching (lowercase, remove common prefixes/suffixes)
+function normalizeTeamName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/^the\s+/, '')
+    .replace(/\s+fc$/i, '')
+    .replace(/\s+cf$/i, '')
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
@@ -267,6 +328,11 @@ Deno.serve(async (req) => {
       const volume = parseFloat(market.volume || event.volume || '0') || 0;
       const liquidity = parseFloat(market.liquidity || event.liquidity || '0') || 0;
 
+      // Extract team names for H2H matching
+      const { home: teamHome, away: teamAway } = extractTeamNames(title, question);
+      const teamHomeNormalized = teamHome ? normalizeTeamName(teamHome) : null;
+      const teamAwayNormalized = teamAway ? normalizeTeamName(teamAway) : null;
+
       // Upsert to polymarket_h2h_cache
       const { error: cacheError } = await supabase
         .from('polymarket_h2h_cache')
@@ -274,6 +340,10 @@ Deno.serve(async (req) => {
           condition_id: conditionId,
           event_title: title,
           question: question,
+          team_home: teamHome,
+          team_away: teamAway,
+          team_home_normalized: teamHomeNormalized,
+          team_away_normalized: teamAwayNormalized,
           event_date: endDate.toISOString(),
           yes_price: yesPrice,
           no_price: noPrice,
