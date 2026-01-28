@@ -3,21 +3,6 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-interface PolymarketEvent {
-  id: string;
-  title: string;
-  description: string;
-  markets: Array<{
-    id: string;
-    question: string;
-    outcomePrices: string;
-    volume: string;
-    liquidity: string;
-    endDate: string;
-    active: boolean;
-  }>;
-}
-
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -26,9 +11,9 @@ Deno.serve(async (req) => {
   try {
     console.log('Fetching Polymarket markets...');
     
-    // Polymarket public CLOB API
-    const marketsResponse = await fetch(
-      'https://clob.polymarket.com/markets?next_cursor=&limit=50&active=true&closed=false',
+    // Use the Gamma API for events with active markets
+    const response = await fetch(
+      'https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100',
       {
         headers: {
           'Accept': 'application/json',
@@ -36,53 +21,72 @@ Deno.serve(async (req) => {
       }
     );
 
-    if (!marketsResponse.ok) {
-      console.error('Polymarket API error:', marketsResponse.status);
+    if (!response.ok) {
+      console.error('Polymarket API error:', response.status);
+      const errorText = await response.text();
+      console.error('Error details:', errorText);
       return new Response(
-        JSON.stringify({ error: 'Failed to fetch from Polymarket', status: marketsResponse.status }),
+        JSON.stringify({ error: 'Failed to fetch from Polymarket', status: response.status }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    const marketsData = await marketsResponse.json();
-    console.log('Raw markets data:', JSON.stringify(marketsData).slice(0, 500));
+    const eventsData = await response.json();
+    const events = Array.isArray(eventsData) ? eventsData : [];
+    console.log(`Received ${events.length} events from API`);
 
-    // Process markets
-    const markets = (marketsData.data || marketsData || []).map((market: any) => {
-      // Parse prices - can be array or object
-      let yesPrice = 0.5;
-      let noPrice = 0.5;
+    // Extract markets from events
+    const markets: any[] = [];
+    
+    for (const event of events) {
+      // Each event can have multiple markets
+      const eventMarkets = event.markets || [];
       
-      if (market.outcomePrices) {
-        try {
-          const prices = typeof market.outcomePrices === 'string' 
-            ? JSON.parse(market.outcomePrices) 
-            : market.outcomePrices;
-          if (Array.isArray(prices)) {
-            yesPrice = parseFloat(prices[0]) || 0.5;
-            noPrice = parseFloat(prices[1]) || 0.5;
+      for (const market of eventMarkets) {
+        // Skip closed or inactive markets
+        if (market.closed || !market.active) continue;
+        
+        // Parse prices from outcomePrices
+        let yesPrice = 0.5;
+        let noPrice = 0.5;
+        
+        if (market.outcomePrices) {
+          try {
+            const prices = typeof market.outcomePrices === 'string' 
+              ? JSON.parse(market.outcomePrices) 
+              : market.outcomePrices;
+            if (Array.isArray(prices) && prices.length >= 2) {
+              yesPrice = parseFloat(prices[0]) || 0.5;
+              noPrice = parseFloat(prices[1]) || 0.5;
+            }
+          } catch (e) {
+            // Use defaults
           }
-        } catch (e) {
-          console.error('Failed to parse prices:', e);
         }
+
+        // Skip markets with no real price data
+        if (yesPrice === 0.5 && noPrice === 0.5) continue;
+
+        const categoryTag = event.tags?.[0];
+        const categoryLabel = typeof categoryTag === 'object' ? categoryTag?.label : (categoryTag || 'General');
+
+        markets.push({
+          market_id: market.conditionId || market.id,
+          question: market.question || event.title || 'Unknown',
+          description: market.description || event.description || null,
+          category: categoryLabel,
+          end_date: market.endDate || event.endDate || null,
+          yes_price: yesPrice,
+          no_price: noPrice,
+          volume: parseFloat(market.volume) || 0,
+          liquidity: parseFloat(market.liquidity) || 0,
+          status: 'active',
+          last_updated: new Date().toISOString(),
+        });
       }
+    }
 
-      return {
-        market_id: market.condition_id || market.id,
-        question: market.question || market.title || 'Unknown',
-        description: market.description || null,
-        category: market.category || 'General',
-        end_date: market.end_date_iso || market.endDate || null,
-        yes_price: yesPrice,
-        no_price: noPrice,
-        volume: parseFloat(market.volume) || 0,
-        liquidity: parseFloat(market.liquidity) || 0,
-        status: market.active !== false && !market.closed ? 'active' : 'closed',
-        last_updated: new Date().toISOString(),
-      };
-    });
-
-    console.log(`Processed ${markets.length} markets`);
+    console.log(`Processed ${markets.length} active markets with real prices`);
 
     // Store in database
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
@@ -114,6 +118,7 @@ Deno.serve(async (req) => {
     return new Response(
       JSON.stringify({ 
         success: true, 
+        events_fetched: events.length,
         markets_fetched: markets.length,
         sample: markets.slice(0, 3)
       }),
