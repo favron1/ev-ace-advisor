@@ -1,4 +1,4 @@
-import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle, Eye, Zap, DollarSign, Timer, Copy, ChevronDown, Search, Link } from 'lucide-react';
+import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle, Eye, Zap, DollarSign, Timer, ExternalLink, Copy, ChevronDown, Search, Link } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -26,6 +26,94 @@ interface SignalCardProps {
   movementPct?: number;
   samplesCount?: number;
   samplesRequired?: number;
+}
+
+// Team name to Polymarket URL code mapping
+const TEAM_CODES: Record<string, string> = {
+  // NHL
+  'Utah Hockey Club': 'utah', 'Utah': 'utah',
+  'Carolina Hurricanes': 'car', 'Hurricanes': 'car',
+  'Edmonton Oilers': 'edm', 'Oilers': 'edm',
+  'San Jose Sharks': 'sj', 'Sharks': 'sj',
+  'Tampa Bay Lightning': 'tb', 'Lightning': 'tb',
+  'Winnipeg Jets': 'wpg', 'Jets': 'wpg',
+  'New York Rangers': 'nyr', 'Rangers': 'nyr',
+  'New York Islanders': 'nyi', 'Islanders': 'nyi',
+  'Los Angeles Kings': 'la', 'Kings': 'la',
+  'Buffalo Sabres': 'buf', 'Sabres': 'buf',
+  'Pittsburgh Penguins': 'pit', 'Penguins': 'pit',
+  'Chicago Blackhawks': 'chi', 'Blackhawks': 'chi',
+  'Boston Bruins': 'bos', 'Bruins': 'bos',
+  'Toronto Maple Leafs': 'tor', 'Maple Leafs': 'tor',
+  'Montreal Canadiens': 'mtl', 'Canadiens': 'mtl',
+  'Detroit Red Wings': 'det', 'Red Wings': 'det',
+  'Florida Panthers': 'fla', 'Panthers': 'fla',
+  'Nashville Predators': 'nsh', 'Predators': 'nsh',
+  'Dallas Stars': 'dal', 'Stars': 'dal',
+  'Colorado Avalanche': 'col', 'Avalanche': 'col',
+  'Vegas Golden Knights': 'vgk', 'Golden Knights': 'vgk',
+  'Seattle Kraken': 'sea', 'Kraken': 'sea',
+  'Vancouver Canucks': 'van', 'Canucks': 'van',
+  'Calgary Flames': 'cgy', 'Flames': 'cgy',
+  'Ottawa Senators': 'ott', 'Senators': 'ott',
+  'Philadelphia Flyers': 'phi', 'Flyers': 'phi',
+  'Washington Capitals': 'wsh', 'Capitals': 'wsh',
+  'New Jersey Devils': 'nj', 'Devils': 'nj',
+  'Columbus Blue Jackets': 'cbj', 'Blue Jackets': 'cbj',
+  'Minnesota Wild': 'min', 'Wild': 'min',
+  'St. Louis Blues': 'stl', 'Blues': 'stl',
+  'Anaheim Ducks': 'ana', 'Ducks': 'ana',
+  // NBA
+  'Atlanta Hawks': 'atl', 'Hawks': 'atl',
+  'Boston Celtics': 'bos', 'Celtics': 'bos',
+  'Brooklyn Nets': 'bkn', 'Nets': 'bkn',
+  'Charlotte Hornets': 'cha', 'Hornets': 'cha',
+  'Chicago Bulls': 'chi', 'Bulls': 'chi',
+  'Cleveland Cavaliers': 'cle', 'Cavaliers': 'cle',
+  'Dallas Mavericks': 'dal', 'Mavericks': 'dal',
+  'Denver Nuggets': 'den', 'Nuggets': 'den',
+  'Detroit Pistons': 'det', 'Pistons': 'det',
+  'Golden State Warriors': 'gsw', 'Warriors': 'gsw',
+  'Houston Rockets': 'hou', 'Rockets': 'hou',
+  'Indiana Pacers': 'ind', 'Pacers': 'ind',
+  'Los Angeles Clippers': 'lac', 'Clippers': 'lac',
+  'Los Angeles Lakers': 'lal', 'Lakers': 'lal',
+  'Memphis Grizzlies': 'mem', 'Grizzlies': 'mem',
+  'Miami Heat': 'mia', 'Heat': 'mia',
+  'Milwaukee Bucks': 'mil', 'Bucks': 'mil',
+  'Minnesota Timberwolves': 'min', 'Timberwolves': 'min',
+  'New Orleans Pelicans': 'nop', 'Pelicans': 'nop',
+  'New York Knicks': 'nyk', 'Knicks': 'nyk',
+  'Oklahoma City Thunder': 'okc', 'Thunder': 'okc',
+  'Orlando Magic': 'orl', 'Magic': 'orl',
+  'Philadelphia 76ers': 'phi', '76ers': 'phi',
+  'Phoenix Suns': 'phx', 'Suns': 'phx',
+  'Portland Trail Blazers': 'por', 'Trail Blazers': 'por',
+  'Sacramento Kings': 'sac',
+  'San Antonio Spurs': 'sas', 'Spurs': 'sas',
+  'Toronto Raptors': 'tor', 'Raptors': 'tor',
+  'Utah Jazz': 'uta', 'Jazz': 'uta',
+  'Washington Wizards': 'was', 'Wizards': 'was',
+};
+
+// Get team code from team name
+function getTeamCode(teamName: string): string | null {
+  return TEAM_CODES[teamName] || null;
+}
+
+// Calculate NHL/NBA week number from date
+function getWeekNumber(date: Date, sport: string): number {
+  // NHL season starts around Oct 10, NBA around Oct 22
+  const seasonStart = sport === 'NHL' 
+    ? new Date(date.getFullYear(), 9, 10) // Oct 10
+    : new Date(date.getFullYear(), 9, 22); // Oct 22
+  
+  if (date < seasonStart) {
+    seasonStart.setFullYear(seasonStart.getFullYear() - 1);
+  }
+  
+  const diffDays = Math.floor((date.getTime() - seasonStart.getTime()) / (1000 * 60 * 60 * 24));
+  return Math.floor(diffDays / 7) + 1;
 }
 
 // Format volume for display
@@ -136,6 +224,7 @@ export function SignalCard({
     confirming_books?: number;
     is_sharp_book?: boolean;
     hours_until_event?: number;
+    sport?: string;
   } | null;
   
   const isTrueArbitrage = signal.is_true_arbitrage === true;
@@ -149,19 +238,44 @@ export function SignalCard({
   const polyYesPrice = (signal as any).polymarket_yes_price || signal.polymarket_price;
   const polyConditionId = (signal as any).polymarket_condition_id;
   
-  // Generate Polymarket URLs - use search as primary since /event/ format doesn't work for sports
+  // Generate Polymarket direct URL for sports markets
+  const getPolymarketDirectUrl = (): string | null => {
+    const sport = signalFactors?.sport?.toUpperCase();
+    if (!sport || (sport !== 'NHL' && sport !== 'NBA')) return null;
+    
+    // Parse teams from event_name (e.g., "Utah vs. Hurricanes" or "Sharks vs. Oilers")
+    const match = signal.event_name.match(/^(.+?)\s+vs\.\s+(.+)$/i);
+    if (!match) return null;
+    
+    const [, awayTeam, homeTeam] = match;
+    const awayCode = getTeamCode(awayTeam.trim());
+    const homeCode = getTeamCode(homeTeam.trim());
+    
+    if (!awayCode || !homeCode) return null;
+    
+    // Get event date from polymarket_updated_at or use today
+    const eventDate = polyUpdatedAt ? new Date(polyUpdatedAt) : new Date();
+    const dateStr = eventDate.toISOString().split('T')[0]; // YYYY-MM-DD
+    const week = getWeekNumber(eventDate, sport);
+    
+    return `https://polymarket.com/sports/${sport.toLowerCase()}/games/week/${week}/${sport.toLowerCase()}-${awayCode}-${homeCode}-${dateStr}`;
+  };
+  
+  // Fallback search URL
   const getPolymarketSearchUrl = () => {
-    // Use the recommended_outcome (team name) for better search results
     const searchTerm = signal.recommended_outcome || signal.event_name;
     return `https://polymarket.com/search?query=${encodeURIComponent(searchTerm)}`;
   };
   
+  // Get best available URL
+  const getPolymarketUrl = () => getPolymarketDirectUrl() || getPolymarketSearchUrl();
+  
   const copyLinkToClipboard = () => {
-    const url = getPolymarketSearchUrl();
+    const url = getPolymarketUrl();
     navigator.clipboard.writeText(url).then(() => {
       toast({
         title: "Link copied!",
-        description: "Paste in a browser to open Polymarket",
+        description: getPolymarketDirectUrl() ? "Direct link copied" : "Search link copied",
       });
     });
   };
@@ -424,6 +538,22 @@ export function SignalCard({
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-56 bg-popover border border-border z-50">
+                  {getPolymarketDirectUrl() && (
+                    <>
+                      <DropdownMenuItem asChild>
+                        <a 
+                          href={getPolymarketDirectUrl()!}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="cursor-pointer flex items-center gap-2"
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                          Open Market Directly
+                        </a>
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                    </>
+                  )}
                   <DropdownMenuItem asChild>
                     <a 
                       href={getPolymarketSearchUrl()}
@@ -432,7 +562,7 @@ export function SignalCard({
                       className="cursor-pointer flex items-center gap-2"
                     >
                       <Search className="h-4 w-4" />
-                      Find on Polymarket
+                      Search on Polymarket
                     </a>
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
@@ -478,11 +608,27 @@ export function SignalCard({
                     className="gap-1 bg-primary/10 hover:bg-primary/20 text-primary border-primary/30"
                   >
                     <Link className="h-3 w-3" />
-                    Search Poly
+                    {getPolymarketDirectUrl() ? 'Open Poly' : 'Search Poly'}
                     <ChevronDown className="h-3 w-3" />
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-56 bg-popover border border-border z-50">
+                  {getPolymarketDirectUrl() && (
+                    <>
+                      <DropdownMenuItem asChild>
+                        <a 
+                          href={getPolymarketDirectUrl()!}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="cursor-pointer flex items-center gap-2"
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                          Open Market Directly
+                        </a>
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                    </>
+                  )}
                   <DropdownMenuItem asChild>
                     <a 
                       href={getPolymarketSearchUrl()}
@@ -491,7 +637,7 @@ export function SignalCard({
                       className="cursor-pointer flex items-center gap-2"
                     >
                       <Search className="h-4 w-4" />
-                      Search Polymarket
+                      Search on Polymarket
                     </a>
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
