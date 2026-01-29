@@ -74,6 +74,8 @@ export interface SignalFactors {
   movement_direction?: 'shortening' | 'drifting';
   books_confirming_movement?: number;
   signal_tier?: 'elite' | 'strong' | 'static';
+  // Directional signal labeling
+  bet_direction?: 'BUY_YES' | 'BUY_NO';
 }
 
 export interface SignalLog {

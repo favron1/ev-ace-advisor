@@ -11,12 +11,14 @@ interface FiltersBarProps {
   showTrueEdgesOnly: boolean;
   showBettableOnly: boolean;
   showMovementConfirmedOnly: boolean;
+  showBuyYesOnly: boolean;
   onMinEdgeChange: (value: number) => void;
   onMinConfidenceChange: (value: number) => void;
   onUrgencyChange: (value: string[]) => void;
   onShowTrueEdgesOnlyChange: (value: boolean) => void;
   onShowBettableOnlyChange: (value: boolean) => void;
   onShowMovementConfirmedOnlyChange: (value: boolean) => void;
+  onShowBuyYesOnlyChange: (value: boolean) => void;
 }
 
 export function FiltersBar({
@@ -26,12 +28,14 @@ export function FiltersBar({
   showTrueEdgesOnly,
   showBettableOnly,
   showMovementConfirmedOnly,
+  showBuyYesOnly,
   onMinEdgeChange,
   onMinConfidenceChange,
   onUrgencyChange,
   onShowTrueEdgesOnlyChange,
   onShowBettableOnlyChange,
   onShowMovementConfirmedOnlyChange,
+  onShowBuyYesOnlyChange,
 }: FiltersBarProps) {
   return (
     <Card className="bg-card/50">
@@ -49,6 +53,16 @@ export function FiltersBar({
                 />
                 <Label htmlFor="movement-confirmed-only" className="text-xs cursor-pointer font-medium text-primary">
                   Movement-Confirmed Only
+                </Label>
+              </div>
+              <div className="flex items-center space-x-2">
+                <Switch
+                  id="buy-yes-only"
+                  checked={showBuyYesOnly}
+                  onCheckedChange={onShowBuyYesOnlyChange}
+                />
+                <Label htmlFor="buy-yes-only" className="text-xs cursor-pointer font-medium text-green-500">
+                  BUY YES Only
                 </Label>
               </div>
               <div className="flex items-center space-x-2">
@@ -73,13 +87,15 @@ export function FiltersBar({
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              {showMovementConfirmedOnly 
-                ? 'Showing movement-confirmed (ELITE/STRONG) only'
-                : showBettableOnly 
-                  ? 'Showing BET/STRONG_BET only' 
-                  : showTrueEdgesOnly 
-                    ? 'Showing matched arbitrage only' 
-                    : 'Showing all signals'}
+              {showBuyYesOnly
+                ? 'Showing BUY YES only (shortening)'
+                : showMovementConfirmedOnly 
+                  ? 'Showing movement-confirmed (ELITE/STRONG) only'
+                  : showBettableOnly 
+                    ? 'Showing BET/STRONG_BET only' 
+                    : showTrueEdgesOnly 
+                      ? 'Showing matched arbitrage only' 
+                      : 'Showing all signals'}
             </p>
           </div>
 

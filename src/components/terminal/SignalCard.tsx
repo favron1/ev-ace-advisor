@@ -383,7 +383,7 @@ export function SignalCard({
             
             <h3 className="font-medium text-sm truncate mb-1">{signal.event_name}</h3>
             
-            {/* Clear bet recommendation */}
+            {/* Clear bet recommendation with directional labeling */}
             <div className="flex items-center gap-2 mb-2">
               {isMissingBetSide ? (
                 <Badge 
@@ -393,12 +393,20 @@ export function SignalCard({
                   BET SIDE UNKNOWN
                 </Badge>
               ) : betTarget ? (
-                <Badge 
-                  className="bg-primary/20 text-primary hover:bg-primary/30 font-semibold"
-                >
-                  <Target className="h-3 w-3 mr-1" />
-                  BET: {betTarget}
-                </Badge>
+                <>
+                  {/* Directional badge: BUY YES (green) or BUY NO (blue) */}
+                  <Badge 
+                    className={cn(
+                      "font-semibold",
+                      signal.side === 'YES' 
+                        ? "bg-green-500/20 text-green-400 hover:bg-green-500/30" 
+                        : "bg-blue-500/20 text-blue-400 hover:bg-blue-500/30"
+                    )}
+                  >
+                    <Target className="h-3 w-3 mr-1" />
+                    {signal.side === 'YES' ? 'BUY YES' : 'BUY NO'}: {betTarget}
+                  </Badge>
+                </>
               ) : (
                 <Badge 
                   className="bg-muted text-muted-foreground font-semibold"
@@ -415,7 +423,11 @@ export function SignalCard({
               </p>
             ) : betTarget ? (
               <p className="text-xs text-muted-foreground">
-                Back <span className="font-medium text-foreground">{betTarget}</span> to win
+                {signal.side === 'YES' ? (
+                  <>Back <span className="font-medium text-foreground">{betTarget}</span> to win</>
+                ) : (
+                  <>Fade <span className="font-medium text-foreground">{betTarget}</span> (buy NO)</>
+                )}
                 <span className="ml-1">• {(bookmakerProbFair * 100).toFixed(1)}% fair prob</span>
                 {signalFactors?.confirming_books && (
                   <span className="ml-1">• {signalFactors.confirming_books} books</span>
