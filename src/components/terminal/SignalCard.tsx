@@ -44,6 +44,29 @@ function formatTimeAgo(dateStr: string | null | undefined): string {
   return `${hours}h ago`;
 }
 
+// Format countdown to kickoff
+function formatCountdown(hoursUntil: number | null | undefined): { text: string; urgent: boolean } {
+  if (!hoursUntil || hoursUntil <= 0) return { text: 'Started', urgent: true };
+  
+  if (hoursUntil < 1) {
+    const mins = Math.round(hoursUntil * 60);
+    return { text: `${mins}m`, urgent: true };
+  }
+  
+  if (hoursUntil < 24) {
+    const hours = Math.floor(hoursUntil);
+    const mins = Math.round((hoursUntil - hours) * 60);
+    if (mins > 0) {
+      return { text: `${hours}h ${mins}m`, urgent: hoursUntil < 2 };
+    }
+    return { text: `${hours}h`, urgent: hoursUntil < 2 };
+  }
+  
+  const days = Math.floor(hoursUntil / 24);
+  const hours = Math.round(hoursUntil % 24);
+  return { text: `${days}d ${hours}h`, urgent: false };
+}
+
 // Check if Polymarket data is stale (>2h)
 function isStalePolymarket(dateStr: string | null | undefined): boolean {
   if (!dateStr) return true;
@@ -104,6 +127,7 @@ export function SignalCard({
     time_label?: string;
     confirming_books?: number;
     is_sharp_book?: boolean;
+    hours_until_event?: number;
   } | null;
   
   const isTrueArbitrage = signal.is_true_arbitrage === true;
@@ -119,6 +143,10 @@ export function SignalCard({
   // Quality checks
   const isStale = isStalePolymarket(polyUpdatedAt);
   const hasLowVolume = isLowVolume(polyVolume);
+  
+  // Countdown timer - extract hours until event from signal_factors
+  const hoursUntilEvent = signalFactors?.hours_until_event as number | undefined;
+  const countdown = formatCountdown(hoursUntilEvent);
   
   // Determine display state
   const displayState = watchState || (isTrueArbitrage ? 'confirmed' : 'signal');
@@ -176,11 +204,21 @@ export function SignalCard({
                 </span>
               )}
               
-              {timeUntilExpiry !== null && (
-                <span className="text-xs text-muted-foreground flex items-center gap-1">
+              
+              {/* Countdown timer to kickoff */}
+              {hoursUntilEvent !== undefined && (
+                <Badge 
+                  variant="outline" 
+                  className={cn(
+                    "flex items-center gap-1",
+                    countdown.urgent 
+                      ? "bg-red-500/10 text-red-500 border-red-500/30 animate-pulse" 
+                      : "bg-muted text-muted-foreground"
+                  )}
+                >
                   <Clock className="h-3 w-3" />
-                  {signalFactors?.time_label || `${timeUntilExpiry}m`}
-                </span>
+                  {countdown.text} to kickoff
+                </Badge>
               )}
             </div>
             
