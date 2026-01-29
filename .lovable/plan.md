@@ -1,122 +1,169 @@
 
 
-# Fix: Polymarket Token ID Extraction
+# Fix: Polymarket H2H vs O/U Market Misclassification
 
-## Problem Summary
+## Problem Identified
 
-The CLOB API integration is incomplete because token IDs are not being captured from Gamma API responses. This causes:
-- `token_id_yes` and `token_id_no` columns remain NULL
-- CLOB batch pricing returns 0 results (falls back to stale Gamma prices)
-- No bid/ask spread data available
+Based on my investigation:
+
+1. **You searched Polymarket for "Utah vs. Hurricanes"** and found:
+   - An **Over/Under 5.5** market (Totals) showing 57%
+   - A **resolved "Hurricanes"** market (already settled)
+   - **No active H2H market** for this game
+
+2. **But the app is recommending an H2H bet** because:
+   - The cache has `question: "Utah vs. Hurricanes"` (which is just the event title, not the actual market question)
+   - `market_type: "h2h"` (incorrectly classified)  
+   - `yes_price: 0.5` (50% placeholder price)
 
 ## Root Cause
 
-The Gamma API response structure may differ from what we expected. The `clobTokenIds` field might be:
-1. At a different path in the response (e.g., nested differently)
-2. Named differently (e.g., `tokenIds`, `outcomes[0].tokenId`)
-3. Only available via a separate endpoint
+The `polymarket-sync-24h` function has two issues:
 
-## Fix Plan
+### Issue 1: Wrong Question Source
+The function is storing the **event title** as the question instead of the **actual market question**:
+```
+Event title: "Utah vs. Hurricanes"  ← What's stored
+Actual market question: "Will there be over 5.5 goals?" ← What exists
+```
 
-### Step 1: Debug Gamma API Response Structure
-
-Add detailed logging to `polymarket-sync-24h` to see exactly what fields are available in the Gamma response:
-
+### Issue 2: Market Type Detection Failure
+Because the question is just "Utah vs. Hurricanes" (no "over/under" keywords), the `detectMarketType()` function defaults to `h2h`:
 ```typescript
-// Log first market's structure for debugging
-if (qualifying.length > 0) {
-  const sample = qualifying[0].market;
-  console.log(`[POLY-SYNC-24H] Sample market fields:`, Object.keys(sample));
-  console.log(`[POLY-SYNC-24H] Sample market data:`, JSON.stringify(sample).substring(0, 500));
+// This returns 'h2h' when no O/U or spread patterns found
+return 'h2h'; // Line 106
+```
+
+### Issue 3: Multiple Markets Not Handled
+Each Polymarket event can have **multiple markets** (H2H, O/U 5.5, O/U 6.5, etc.), but we only take the first market (`markets[0]`), which may not be an H2H.
+
+---
+
+## Solution
+
+### Step 1: Use Gamma API's `sportsMarketType` Field
+The logs show Gamma API returns a `sportsMarketType` field that indicates the actual market type. Use this instead of regex-based detection:
+```typescript
+const marketType = market.sportsMarketType || detectMarketType(question);
+```
+
+### Step 2: Filter for H2H Markets Only (When Focus Mode = h2h_only)
+Since the system is designed for H2H arbitrage, skip O/U and spread markets:
+```typescript
+if (marketType === 'total' || marketType === 'spread') {
+  statsNonH2h++;
+  continue; // Skip non-H2H markets
 }
 ```
 
-### Step 2: Fix Token ID Extraction
-
-Based on Polymarket documentation, the token IDs might be in:
-- `market.clobTokenIds` (current attempt)
-- `market.outcomes[0].clobTokenId` 
-- `market.tokens[0]` and `market.tokens[1]`
-
-Update extraction logic to try all possible paths:
-
+### Step 3: Iterate ALL Markets in Event
+Instead of just taking `markets[0]`, look through all markets to find an actual H2H market:
 ```typescript
-// Try multiple paths for token ID extraction
-let tokenIdYes: string | null = null;
-let tokenIdNo: string | null = null;
+// Find H2H market from all event markets
+const h2hMarket = markets.find(m => {
+  const type = m.sportsMarketType || detectMarketType(m.question);
+  return type === 'h2h' || type === 'moneyline';
+});
 
-// Path 1: clobTokenIds array
-if (market.clobTokenIds && Array.isArray(market.clobTokenIds)) {
-  tokenIdYes = market.clobTokenIds[0] || null;
-  tokenIdNo = market.clobTokenIds[1] || null;
-}
-// Path 2: tokens array
-else if (market.tokens && Array.isArray(market.tokens)) {
-  tokenIdYes = market.tokens[0]?.token_id || market.tokens[0] || null;
-  tokenIdNo = market.tokens[1]?.token_id || market.tokens[1] || null;
-}
-// Path 3: outcomes with tokenId
-else if (market.outcomes && Array.isArray(market.outcomes)) {
-  tokenIdYes = market.outcomes[0]?.clobTokenId || market.outcomes[0]?.tokenId || null;
-  tokenIdNo = market.outcomes[1]?.clobTokenId || market.outcomes[1]?.tokenId || null;
+if (!h2hMarket) {
+  statsNoH2H++;
+  continue; // No H2H market exists for this event
 }
 ```
 
-### Step 3: Fallback to CLOB Markets Endpoint
-
-If Gamma doesn't provide token IDs, fetch them directly from CLOB:
-
+### Step 4: Add H2H Existence Verification
+Before creating a signal, verify the Polymarket market actually exists by checking the `sportsMarketType`:
 ```typescript
-// If no token IDs from Gamma, fetch from CLOB markets endpoint
-if (!tokenIdYes && conditionId) {
-  try {
-    const clobResp = await fetch(`https://clob.polymarket.com/markets/${conditionId}`);
-    if (clobResp.ok) {
-      const clobData = await clobResp.json();
-      // CLOB returns tokens array with token_id fields
-      if (clobData.tokens && Array.isArray(clobData.tokens)) {
-        tokenIdYes = clobData.tokens.find(t => t.outcome === 'Yes')?.token_id || null;
-        tokenIdNo = clobData.tokens.find(t => t.outcome === 'No')?.token_id || null;
-      }
-    }
-  } catch (e) {
-    console.warn(`[POLY-SYNC-24H] Failed to fetch CLOB market: ${conditionId}`);
-  }
+// In detect-signals: Skip if matched market isn't actually H2H
+if (matchedMarket.market_type !== 'h2h' && matchedMarket.market_type !== 'moneyline') {
+  console.log(`[DETECT] Skipping ${eventName}: Poly market is ${matchedMarket.market_type}, not H2H`);
+  continue;
 }
 ```
 
-### Step 4: Fix Sport Misclassification
-
-The sport detection regex is matching "Hawks" in "Blackhawks" as NBA. Fix by being more specific:
-
-```typescript
-// NHL - be more specific about Blackhawks
-{ patterns: [/\bnhl\b/, /blackhawks/i, /maple leafs|canadiens|...], sport: 'NHL' },
-
-// NBA - remove 'hawks' standalone match that conflicts
-{ patterns: [/\bnba\b/, /atlanta hawks/i, /lakers|celtics|...], sport: 'NBA' },
-```
+---
 
 ## Files to Modify
 
 | File | Changes |
 |------|---------|
-| `supabase/functions/polymarket-sync-24h/index.ts` | Add debug logging, fix token ID extraction paths, add CLOB fallback |
-| `supabase/functions/polymarket-sync-24h/index.ts` | Fix sport detection regex for Blackhawks/Hawks |
+| `supabase/functions/polymarket-sync-24h/index.ts` | Use `sportsMarketType` field, filter for H2H only, iterate all event markets |
+| `supabase/functions/detect-signals/index.ts` | Add validation that matched Polymarket market is actually H2H |
+
+---
+
+## Technical Details
+
+### Changes to `polymarket-sync-24h/index.ts`
+
+**Line ~309** - Replace single market selection with H2H search:
+```typescript
+// Current (wrong):
+const primaryMarket = markets[0];
+
+// Fixed:
+// Find the H2H/moneyline market, not O/U or spread
+const h2hMarket = markets.find(m => {
+  const type = m.sportsMarketType?.toLowerCase() || '';
+  const question = (m.question || '').toLowerCase();
+  
+  // Skip totals and spreads
+  if (type.includes('total') || type.includes('spread') || 
+      type.includes('over') || type.includes('under')) {
+    return false;
+  }
+  if (/over\s+\d+|under\s+\d+|o\/u|spread|handicap/i.test(question)) {
+    return false;
+  }
+  
+  // Accept moneyline, h2h, or generic matches
+  return type === 'h2h' || type === 'moneyline' || 
+         type === '' || /vs\.?|beat|win/i.test(question);
+});
+
+if (!h2hMarket) {
+  statsNoH2H++;
+  continue; // This event doesn't have an H2H market on Poly
+}
+```
+
+**Line ~353** - Use Gamma's market type field:
+```typescript
+// Current:
+const marketType = detectMarketType(question);
+
+// Fixed:
+const marketType = market.sportsMarketType?.toLowerCase() || detectMarketType(question);
+```
+
+### Changes to `detect-signals/index.ts`
+
+Add validation in the signal creation loop to skip non-H2H matches:
+```typescript
+// Before creating signal, verify market type
+if (bestMatch && bestMatch.market_type && bestMatch.market_type !== 'h2h') {
+  console.log(`[DETECT] Skipping ${signal.event_name}: Matched market is ${bestMatch.market_type}, not H2H`);
+  continue;
+}
+```
+
+---
 
 ## Expected Outcome
 
-After fixes:
-- Token IDs populated in `polymarket_h2h_cache`
-- CLOB batch pricing returns actual bid/ask data
-- Accurate spread estimation for edge calculations
-- Correct sport classification
+After these fixes:
+- Utah vs. Hurricanes will be **skipped** (no H2H market exists on Polymarket)
+- Only events with actual H2H/moneyline markets will generate signals
+- No more "phantom" bets for markets that don't exist
+- Edge calculations will be accurate because they're based on real tradeable markets
+
+---
 
 ## Verification Steps
 
-1. Deploy updated function
-2. Trigger `polymarket-sync-24h` manually
-3. Check logs for "Sample market fields" to see actual Gamma response structure
-4. Query `polymarket_h2h_cache` to verify `token_id_yes` is populated
-5. Run `polymarket-monitor` and verify "Got X prices, X spreads from CLOB" shows non-zero values
+1. Deploy updated functions
+2. Trigger `polymarket-sync-24h` 
+3. Check logs for "No H2H market" messages for games like Utah vs. Hurricanes
+4. Verify `polymarket_h2h_cache` only contains actual H2H markets
+5. Confirm signal feed no longer shows bets for non-existent markets
 
