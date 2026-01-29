@@ -560,7 +560,7 @@ Deno.serve(async (req) => {
 
     const { data: cacheData } = await supabase
       .from('polymarket_h2h_cache')
-      .select('condition_id, market_type, extracted_league, extracted_entity, token_id_yes, token_id_no, best_bid, best_ask, spread_pct')
+      .select('condition_id, market_type, extracted_league, extracted_entity, token_id_yes, token_id_no, best_bid, best_ask, spread_pct, volume')
       .in('condition_id', conditionIds);
 
     const cacheMap = new Map(cacheData?.map(c => [c.condition_id, c]) || []);
@@ -594,6 +594,45 @@ Deno.serve(async (req) => {
       fetchClobSpreads(allTokenIds),
     ]);
     console.log(`[POLY-MONITOR] Got ${clobPrices.size} prices, ${clobSpreads.size} spreads from CLOB`);
+
+    // === CRITICAL: Update ALL active signals with fresh price data ===
+    // This ensures signals show current timestamps even if they no longer meet edge thresholds
+    const { data: activeSignals } = await supabase
+      .from('signal_opportunities')
+      .select('id, polymarket_condition_id')
+      .eq('status', 'active');
+    
+    if (activeSignals && activeSignals.length > 0) {
+      let priceUpdatesCount = 0;
+      
+      for (const signal of activeSignals) {
+        // Find matching cache entry
+        const cache = [...cacheMap.values()].find(c => c.condition_id === signal.polymarket_condition_id);
+        if (!cache?.token_id_yes) continue;
+        
+        // Get fresh price from CLOB
+        if (clobPrices.has(cache.token_id_yes)) {
+          const prices = clobPrices.get(cache.token_id_yes)!;
+          const freshPrice = prices.ask > 0 ? prices.ask : prices.bid;
+          
+          if (freshPrice > 0) {
+            await supabase
+              .from('signal_opportunities')
+              .update({
+                polymarket_yes_price: freshPrice,
+                polymarket_price: freshPrice,
+                polymarket_volume: cache.volume || 0,
+                polymarket_updated_at: now.toISOString(),
+              })
+              .eq('id', signal.id);
+            
+            priceUpdatesCount++;
+          }
+        }
+      }
+      
+      console.log(`[POLY-MONITOR] Refreshed prices for ${priceUpdatesCount}/${activeSignals.length} active signals`);
+    }
 
     // Fetch bookmaker data for each sport group
     const allBookmakerData: Map<string, any[]> = new Map();
