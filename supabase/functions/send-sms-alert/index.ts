@@ -18,6 +18,15 @@ interface SmsAlertRequest {
   time_until_start?: string;
 }
 
+// Build Google live score URL from event name
+function buildLiveScoreUrl(eventName: string): string {
+  const searchQuery = eventName
+    .replace(/\./g, '')
+    .replace(/\s+/g, '+')
+    + '+live+score';
+  return `google.com/search?q=${searchQuery}`;
+}
+
 // Build enhanced message if structured data is provided
 function buildEnhancedMessage(req: SmsAlertRequest): string {
   // If a custom message is provided, use it directly
@@ -28,18 +37,12 @@ function buildEnhancedMessage(req: SmsAlertRequest): string {
   // Build structured alert if we have the data
   if (req.event_name && req.poly_price !== undefined && req.bookmaker_fair_prob !== undefined) {
     const volume = req.poly_volume ? `$${(req.poly_volume / 1000).toFixed(0)}K vol` : '';
-    const netEv = req.net_edge && req.stake_amount 
-      ? `+$${(req.net_edge * req.stake_amount / 100).toFixed(2)}`
-      : '';
+    const liveScoreUrl = buildLiveScoreUrl(req.event_name);
     
-    return `🎯 EDGE DETECTED: ${req.event_name}
-Market: ${req.market || 'H2H'}
-Polymarket: ${(req.poly_price * 100).toFixed(0)}¢ ${volume ? `(${volume})` : ''}
-Bookmaker Fair: ${(req.bookmaker_fair_prob * 100).toFixed(0)}%
-Raw Edge: +${req.raw_edge?.toFixed(1) || '0'}%
-${netEv ? `Net EV: ${netEv} on $${req.stake_amount} stake` : ''}
-${req.time_until_start ? `Time: ${req.time_until_start} until start` : ''}
-ACT NOW - window may close`.trim();
+    return `🎯 EDGE: ${req.event_name}
+Poly: ${(req.poly_price * 100).toFixed(0)}¢ ${volume ? `(${volume})` : ''} | Fair: ${(req.bookmaker_fair_prob * 100).toFixed(0)}% | Edge: +${req.raw_edge?.toFixed(1) || '0'}%
+${req.time_until_start ? `Starts: ${req.time_until_start}` : ''}
+📺 ${liveScoreUrl}`.trim();
   }
   
   return req.message;
