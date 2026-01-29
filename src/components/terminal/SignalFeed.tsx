@@ -15,11 +15,12 @@ interface SignalFeedProps {
 }
 
 export function SignalFeed({ signals, loading, refreshing, onDismiss, onExecute, onRefresh }: SignalFeedProps) {
-  // Sort by urgency then confidence
+  // Sort by soonest to start first (expires_at = event start time)
   const sortedSignals = [...signals].sort((a, b) => {
-    const urgencyOrder: Record<string, number> = { critical: 0, high: 1, normal: 2, low: 3 };
-    const urgencyDiff = (urgencyOrder[a.urgency] ?? 2) - (urgencyOrder[b.urgency] ?? 2);
-    if (urgencyDiff !== 0) return urgencyDiff;
+    const aTime = a.expires_at ? new Date(a.expires_at).getTime() : Infinity;
+    const bTime = b.expires_at ? new Date(b.expires_at).getTime() : Infinity;
+    if (aTime !== bTime) return aTime - bTime;
+    // Secondary sort by confidence if same start time
     return b.confidence_score - a.confidence_score;
   });
 
