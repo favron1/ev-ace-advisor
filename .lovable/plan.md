@@ -1,133 +1,142 @@
 
-# Critical Bug Fixes: Signal Processing Integrity
+
+# Enforcement of Execution Gates (Hard Safety Controls)
 
 ## Summary
 
-Three critical bugs are causing incorrect signals in the feed:
+The bug fixes were deployed but three critical issues remain:
 
-1. **Cross-Sport Team Mismatch** - "Blackhawks vs. Penguins" (NHL) is matching "Atlanta Hawks" (NBA)
-2. **Duplicate Opposing Signals** - Same event ("Utah vs. Hurricanes") shows BUY YES for BOTH teams
-3. **Artifact High Edges** - 50%+ edges on 90%+ fair probabilities with stale data are not real
+1. **Bad signals still exist in DB** - The fixes prevent NEW bad signals but don't clean up existing ones
+2. **Execute button ignores staleness** - Stale data still shows "Execute (Strong)" button enabled
+3. **Edge function needs redeployment** - To activate the new validation logic
 
-## Bug Analysis
+This plan enforces HARD GATES that make signals non-executable when safety criteria aren't met.
 
-### Bug #1: Cross-Sport Team Mismatch
+---
 
-**Root Cause**: The `findBookmakerMatch` function in `polymarket-monitor/index.ts` uses fuzzy substring matching to find teams. When searching "Blackhawks", the word "hawks" matches the Atlanta Hawks in the NBA data (since the bookmaker API is fetched separately by sport group but matching is not namespace-locked).
+## Current State (From Database Query)
 
-**Evidence from DB**:
-```
-event_name: "Blackhawks vs. Penguins" 
-recommended_outcome: "Atlanta Hawks" ← WRONG
-```
-
-**Fix Required**: Validate that the matched team is an actual participant in the Polymarket event. If `teamName ∉ {home_team, away_team}` from the event → DROP SIGNAL.
-
-### Bug #2: Duplicate Opposing Signals
-
-**Root Cause**: The signal deduplication checks for `event_name + recommended_outcome` but allows signals for BOTH outcomes (Hurricanes AND Utah) to exist simultaneously for the same event. There's no exclusivity rule preventing two BUY YES signals on opposite sides.
-
-**Evidence from DB**:
-```
-event_name: "Utah vs. Hurricanes" | recommended_outcome: "Carolina Hurricanes" | side: YES
-event_name: "Utah vs. Hurricanes" | recommended_outcome: "Utah Hockey Club" | side: YES
-```
-
-**Fix Required**: Before creating/updating a signal, invalidate (expire) any existing active signal for the same event with a DIFFERENT recommended_outcome. Only ONE BUY YES signal per event at a time.
-
-### Bug #3: Artifact High Edges on Stale Data
-
-**Root Cause**: When `polymarket_updated_at` is hours stale (e.g., 4-6 hours old), the cached Polymarket price is outdated while the bookmaker fair probability is current. This creates phantom "edges" of 50%+ that don't exist in reality.
-
-**Evidence**: Signals showing `edge_percent: 54.6%` with `polymarket_updated_at: 2h-6h ago` and `fair_prob: 92%`.
-
-**Fix Required**: 
-- Require fresh confirmation (≤3 minutes staleness) for edges on high-probability outcomes (fair prob ≥85%)
-- Cap max displayable edge at 40% when fair prob ≥90% OR staleness ≥30 minutes
+| Event | Recommended Outcome | Issue |
+|-------|---------------------|-------|
+| Blackhawks vs. Penguins | Atlanta Hawks | Cross-sport mismatch (NBA team in NHL game) |
+| Utah vs. Hurricanes | Carolina Hurricanes | Duplicate signal exists |
+| Utah vs. Hurricanes | Utah Hockey Club | Duplicate signal exists |
+| Islanders vs. Rangers | NY Islanders | 5h stale, 33% edge on 88% fair prob |
 
 ---
 
 ## Implementation Plan
 
-### File 1: `supabase/functions/polymarket-monitor/index.ts`
+### Step 1: Clean Up Existing Bad Signals (Database)
 
-#### Change 1A: Team Participant Validation
+Run direct cleanup to expire invalid signals:
 
-Add a validation gate after `findBookmakerMatch()` to ensure the matched team is actually in the event:
+```sql
+-- Expire the Atlanta Hawks mismatch signal
+UPDATE signal_opportunities 
+SET status = 'expired' 
+WHERE id = '13583b9a-0fdf-4990-b84d-127a51c10192';
+
+-- Expire the older Utah duplicate (keep the newer Hurricanes one)
+UPDATE signal_opportunities 
+SET status = 'expired' 
+WHERE id = 'cd9ba6f8-5b39-4844-b39a-985053c5d327';
+
+-- Expire signals with edge=0 and no Polymarket data (unmatched junk)
+UPDATE signal_opportunities 
+SET status = 'expired' 
+WHERE edge_percent = 0 AND polymarket_updated_at IS NULL;
+```
+
+### Step 2: Enforce Execution Gates in SignalCard.tsx
+
+Add a `canExecute` function that checks ALL safety gates before allowing the Execute button to be enabled.
 
 ```typescript
-// After line 695 (teamName = match.teamName)
-if (match && teamName) {
-  // CRITICAL: Validate team belongs to this event
-  const eventNorm = normalizeName(event.event_name);
-  const teamNorm = normalizeName(teamName);
-  
-  // Team name must appear in the event name (e.g., "Oilers" in "Sharks vs. Oilers")
-  if (!eventNorm.includes(teamNorm.split(' ').pop() || '')) {
-    console.log(`[POLY-MONITOR] INVALID MATCH: "${teamName}" not in event "${event.event_name}" - DROPPING`);
-    continue;
+// Calculate execution eligibility
+const canExecuteSignal = (): { allowed: boolean; reason: string } => {
+  // Gate 1: Must have team in event name
+  if (betTarget) {
+    const teamLastWord = betTarget.split(' ').pop()?.toLowerCase() || '';
+    const eventNorm = signal.event_name.toLowerCase();
+    if (teamLastWord && !eventNorm.includes(teamLastWord)) {
+      return { allowed: false, reason: 'Team mismatch' };
+    }
   }
-}
+  
+  // Gate 2: Must have fresh price data (≤5 minutes)
+  const stalenessMinutes = polyUpdatedAt 
+    ? (Date.now() - new Date(polyUpdatedAt).getTime()) / 60000 
+    : Infinity;
+  if (stalenessMinutes > 5) {
+    return { allowed: false, reason: 'Stale price data' };
+  }
+  
+  // Gate 3: Must have minimum liquidity ($5K)
+  if (!polyVolume || polyVolume < 5000) {
+    return { allowed: false, reason: 'Insufficient liquidity' };
+  }
+  
+  // Gate 4: High-prob artifact check (85%+ fair prob needs extra fresh data)
+  if (bookmakerProbFair >= 0.85 && signal.edge_percent > 40) {
+    return { allowed: false, reason: 'Artifact edge detected' };
+  }
+  
+  // Gate 5: Must have positive execution decision
+  if (!signal.execution || signal.execution.execution_decision === 'NO_BET') {
+    return { allowed: false, reason: 'No bet recommended' };
+  }
+  
+  return { allowed: true, reason: 'Ready to execute' };
+};
 ```
 
-#### Change 1B: One-Signal-Per-Event Exclusivity
-
-Before creating a new signal, expire any existing signal for the same event with a different outcome:
-
-```typescript
-// Before line 850 (INSERT new signal block)
-// Invalidate any opposing signal for this event
-await supabase
-  .from('signal_opportunities')
-  .update({ status: 'expired' })
-  .eq('event_name', event.event_name)
-  .eq('status', 'active')
-  .neq('recommended_outcome', teamName);
-```
-
-#### Change 1C: Staleness & High-Prob Edge Gating
-
-Add validation for artifact edges:
-
-```typescript
-// After line 756 (rawEdge >= 0.02 check), add:
-// Gate against artifact edges on high-probability outcomes
-const staleness = now.getTime() - new Date(event.last_poly_refresh || 0).getTime();
-const stalenessMinutes = staleness / 60000;
-
-if (bookmakerFairProb >= 0.85 && stalenessMinutes > 3) {
-  console.log(`[POLY-MONITOR] Skipping high-prob edge for ${event.event_name} - stale price (${stalenessMinutes.toFixed(0)}m old)`);
-  continue;
-}
-
-if (bookmakerFairProb >= 0.90 && rawEdge > 0.40) {
-  console.log(`[POLY-MONITOR] Capping artifact edge for ${event.event_name} - raw ${(rawEdge * 100).toFixed(1)}% on 90%+ prob`);
-  rawEdge = 0.40; // Cap at 40%
-}
-```
-
-### File 2: `src/components/terminal/SignalCard.tsx`
-
-Add visual warning for potentially stale/artifact signals:
+**Execute Button Update:**
 
 ```tsx
-// Add near the staleness warning display
-{signal.bookmaker_probability && signal.bookmaker_probability >= 0.85 && 
- signal.edge_percent > 40 && (
-  <span className="text-yellow-500 text-xs">⚠️ High-prob edge - verify manually</span>
+const executionStatus = canExecuteSignal();
+
+<Button 
+  size="sm" 
+  className={cn(
+    "flex-1 gap-1",
+    executionStatus.allowed && signal.execution.execution_decision === 'STRONG_BET' && "bg-green-600 hover:bg-green-700",
+    executionStatus.allowed && signal.execution.execution_decision === 'BET' && "bg-green-600 hover:bg-green-700",
+    !executionStatus.allowed && "bg-muted text-muted-foreground"
+  )}
+  onClick={() => onExecute(signal.id, signal.polymarket_price)}
+  disabled={!executionStatus.allowed}
+  title={!executionStatus.allowed ? executionStatus.reason : undefined}
+>
+  <Check className="h-3 w-3" />
+  {executionStatus.allowed ? (
+    <>
+      {signal.execution.execution_decision === 'STRONG_BET' && 'Execute (Strong)'}
+      {signal.execution.execution_decision === 'BET' && 'Execute Bet'}
+      {signal.execution.execution_decision === 'MARGINAL' && 'Execute (Caution)'}
+    </>
+  ) : (
+    `Watch Only (${executionStatus.reason})`
+  )}
+</Button>
+```
+
+### Step 3: Visual "LOCKED" State for Non-Executable Signals
+
+Add a distinct visual treatment when signals fail gates:
+
+```tsx
+{!executionStatus.allowed && (
+  <div className="flex items-center gap-2 p-2 rounded bg-red-500/10 border border-red-500/30 text-red-400 text-xs">
+    <AlertCircle className="h-4 w-4" />
+    <span>NOT EXECUTABLE: {executionStatus.reason}</span>
+  </div>
 )}
 ```
 
----
+### Step 4: Redeploy Edge Function
 
-## Validation Rules Summary
-
-| Rule | Condition | Action |
-|------|-----------|--------|
-| Team Mismatch | `teamName` not found in `event_name` | DROP signal |
-| Duplicate Signal | Active signal exists for same event, different outcome | EXPIRE old signal |
-| Stale High-Prob | `fair_prob ≥ 85%` AND `staleness > 3min` | DROP signal |
-| Artifact Cap | `fair_prob ≥ 90%` AND `raw_edge > 40%` | CAP edge to 40% |
+The `polymarket-monitor` edge function needs to be redeployed to activate the team validation, signal exclusivity, and staleness gating logic that was added in the previous commit.
 
 ---
 
@@ -135,14 +144,47 @@ Add visual warning for potentially stale/artifact signals:
 
 | File | Changes |
 |------|---------|
-| `supabase/functions/polymarket-monitor/index.ts` | Add team validation, signal exclusivity, staleness gating |
-| `src/components/terminal/SignalCard.tsx` | Add high-prob edge warning |
+| `src/components/terminal/SignalCard.tsx` | Add `canExecuteSignal()` gate function, update button logic, add LOCKED visual state |
+| Database (manual cleanup) | Expire Atlanta Hawks signal, expire Utah duplicate, expire zero-edge junk |
 
 ---
 
-## Expected Behavior After Fix
+## Execution Gate Rules Summary
 
-1. **Blackhawks vs. Penguins** → No signal (Atlanta Hawks rejected as non-participant)
-2. **Utah vs. Hurricanes** → Only ONE active BUY YES signal (older one expired)
-3. **Any 50%+ edge on 90% fair prob** → Blocked unless price is ≤3 minutes fresh
+| Gate | Condition | Result if Failed |
+|------|-----------|------------------|
+| Team Validation | `teamLastWord` not in `event_name` | Button disabled, "Team mismatch" |
+| Freshness | `polymarket_updated_at` > 5 minutes ago | Button disabled, "Stale price data" |
+| Liquidity | `polyVolume` < $5,000 | Button disabled, "Insufficient liquidity" |
+| Artifact Check | Fair prob ≥85% AND edge >40% | Button disabled, "Artifact edge detected" |
+| Decision Check | `execution_decision` = NO_BET | Button disabled, "No bet recommended" |
+
+---
+
+## Expected Result After Implementation
+
+1. **Atlanta Hawks signal** → Immediately expired from DB, and future ones blocked by team validation
+2. **Utah duplicates** → One expired from DB, future ones blocked by exclusivity rule
+3. **Stale signals (>5m)** → Show "Watch Only (Stale price data)" instead of Execute button
+4. **High-prob artifacts** → Show "Watch Only (Artifact edge detected)"
+5. **Clean signals** → Show normal green "Execute (Strong)" or "Execute Bet"
+
+---
+
+## Before vs After
+
+**Before:**
+```
+Blackhawks vs. Penguins
+BUY YES: Atlanta Hawks
+[Execute (Strong)] ← DANGEROUS
+```
+
+**After:**
+```
+Blackhawks vs. Penguins
+BUY YES: Atlanta Hawks
+[Watch Only (Team mismatch)] ← SAFE
+⚠️ NOT EXECUTABLE: Team mismatch
+```
 
