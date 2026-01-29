@@ -194,13 +194,16 @@ export function useSignals() {
     return () => clearTimeout(timer);
   }, [newSignalIds]);
 
-  // Enrich signals with execution analysis
+  // Enrich signals with execution analysis, filtering out non-tradeable signals
   const enrichedSignals: EnrichedSignal[] = useMemo(() => {
-    return signals.map(signal => ({
-      ...signal,
-      execution: analyzeExecution(signal, 100), // Default $100 stake
-      isNew: newSignalIds.has(signal.id),
-    }));
+    return signals
+      // Only show signals matched to Polymarket (tradeable)
+      .filter(signal => signal.is_true_arbitrage === true)
+      .map(signal => ({
+        ...signal,
+        execution: analyzeExecution(signal, 100), // Default $100 stake
+        isNew: newSignalIds.has(signal.id),
+      }));
   }, [signals, newSignalIds]);
 
   // Filter and sort helpers
