@@ -97,9 +97,9 @@ export function useSignals() {
     }
   }, [toast]);
 
-  const executeSignal = useCallback(async (signalId: string, entryPrice: number) => {
+  const executeSignal = useCallback(async (signalId: string, entryPrice: number, stakeAmount?: number) => {
     try {
-      await arbitrageApi.executeSignal(signalId, entryPrice);
+      await arbitrageApi.executeSignal(signalId, entryPrice, stakeAmount);
       setSignals(prev => prev.filter(s => s.id !== signalId));
       toast({ title: 'Signal marked as executed' });
     } catch (err) {

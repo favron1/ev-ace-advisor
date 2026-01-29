@@ -6,6 +6,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Auth from "./pages/Auth";
 import Terminal from "./pages/Terminal";
 import Settings from "./pages/Settings";
+import Stats from "./pages/Stats";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -16,6 +17,7 @@ function AppRoutes() {
       <Route path="/" element={<Terminal />} />
       <Route path="/auth" element={<Auth />} />
       <Route path="/settings" element={<Settings />} />
+      <Route path="/stats" element={<Stats />} />
       <Route path="*" element={<NotFound />} />
     </Routes>
   );
