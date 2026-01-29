@@ -1,69 +1,133 @@
 
-
-# Consolidation: Remove Legacy Turbo Mode & Integrate Speed Controls
+# Critical Bug Fixes: Signal Processing Integrity
 
 ## Summary
 
-Turbo Mode is a legacy feature from an older polling system that no longer applies to the current two-tier Watch/Active architecture. This plan removes it and gives direct control over Watch Poll speed instead.
+Three critical bugs are causing incorrect signals in the feed:
 
-## The Problem
+1. **Cross-Sport Team Mismatch** - "Blackhawks vs. Penguins" (NHL) is matching "Atlanta Hawks" (NBA)
+2. **Duplicate Opposing Signals** - Same event ("Utah vs. Hurricanes") shows BUY YES for BOTH teams
+3. **Artifact High Edges** - 50%+ edges on 90%+ fair probabilities with stale data are not real
 
-| Setting | Default | Actually Controls |
-|---------|---------|-------------------|
-| `turbo_mode_enabled` | false | Legacy Full Scan scheduler only |
-| `turbo_frequency_minutes` | 5m | Legacy Full Scan scheduler only |
-| `watch_poll_interval_minutes` | 5m | **Actual Watch Poll** (the real system) |
+## Bug Analysis
 
-**Result:** Toggling "Turbo Mode" ON changes nothing for Watch Poll—the system already polls every 5 minutes. It's confusing and useless.
+### Bug #1: Cross-Sport Team Mismatch
+
+**Root Cause**: The `findBookmakerMatch` function in `polymarket-monitor/index.ts` uses fuzzy substring matching to find teams. When searching "Blackhawks", the word "hawks" matches the Atlanta Hawks in the NBA data (since the bookmaker API is fetched separately by sport group but matching is not namespace-locked).
+
+**Evidence from DB**:
+```
+event_name: "Blackhawks vs. Penguins" 
+recommended_outcome: "Atlanta Hawks" ← WRONG
+```
+
+**Fix Required**: Validate that the matched team is an actual participant in the Polymarket event. If `teamName ∉ {home_team, away_team}` from the event → DROP SIGNAL.
+
+### Bug #2: Duplicate Opposing Signals
+
+**Root Cause**: The signal deduplication checks for `event_name + recommended_outcome` but allows signals for BOTH outcomes (Hurricanes AND Utah) to exist simultaneously for the same event. There's no exclusivity rule preventing two BUY YES signals on opposite sides.
+
+**Evidence from DB**:
+```
+event_name: "Utah vs. Hurricanes" | recommended_outcome: "Carolina Hurricanes" | side: YES
+event_name: "Utah vs. Hurricanes" | recommended_outcome: "Utah Hockey Club" | side: YES
+```
+
+**Fix Required**: Before creating/updating a signal, invalidate (expire) any existing active signal for the same event with a DIFFERENT recommended_outcome. Only ONE BUY YES signal per event at a time.
+
+### Bug #3: Artifact High Edges on Stale Data
+
+**Root Cause**: When `polymarket_updated_at` is hours stale (e.g., 4-6 hours old), the cached Polymarket price is outdated while the bookmaker fair probability is current. This creates phantom "edges" of 50%+ that don't exist in reality.
+
+**Evidence**: Signals showing `edge_percent: 54.6%` with `polymarket_updated_at: 2h-6h ago` and `fair_prob: 92%`.
+
+**Fix Required**: 
+- Require fresh confirmation (≤3 minutes staleness) for edges on high-probability outcomes (fair prob ≥85%)
+- Cap max displayable edge at 40% when fair prob ≥90% OR staleness ≥30 minutes
 
 ---
 
-## Changes Overview
+## Implementation Plan
 
-### What Gets Removed
-- **Turbo Mode Switch** in ScanControlPanel
-- **Turbo Mode Badge** ("Turbo" status badge)
-- **Turbo Frequency slider** in ScanSettingsPanel
-- **toggleTurboMode function** in useScanConfig
-- Type references to `turbo_mode_enabled` and `turbo_frequency_minutes`
+### File 1: `supabase/functions/polymarket-monitor/index.ts`
 
-### What Gets Added
-- **Fast Mode Switch** — toggles Watch Poll between 5m (normal) and 2m (fast)
-- **Fast Badge** — shows when Fast Mode is active
-- Clearer UI language
+#### Change 1A: Team Participant Validation
+
+Add a validation gate after `findBookmakerMatch()` to ensure the matched team is actually in the event:
+
+```typescript
+// After line 695 (teamName = match.teamName)
+if (match && teamName) {
+  // CRITICAL: Validate team belongs to this event
+  const eventNorm = normalizeName(event.event_name);
+  const teamNorm = normalizeName(teamName);
+  
+  // Team name must appear in the event name (e.g., "Oilers" in "Sharks vs. Oilers")
+  if (!eventNorm.includes(teamNorm.split(' ').pop() || '')) {
+    console.log(`[POLY-MONITOR] INVALID MATCH: "${teamName}" not in event "${event.event_name}" - DROPPING`);
+    continue;
+  }
+}
+```
+
+#### Change 1B: One-Signal-Per-Event Exclusivity
+
+Before creating a new signal, expire any existing signal for the same event with a different outcome:
+
+```typescript
+// Before line 850 (INSERT new signal block)
+// Invalidate any opposing signal for this event
+await supabase
+  .from('signal_opportunities')
+  .update({ status: 'expired' })
+  .eq('event_name', event.event_name)
+  .eq('status', 'active')
+  .neq('recommended_outcome', teamName);
+```
+
+#### Change 1C: Staleness & High-Prob Edge Gating
+
+Add validation for artifact edges:
+
+```typescript
+// After line 756 (rawEdge >= 0.02 check), add:
+// Gate against artifact edges on high-probability outcomes
+const staleness = now.getTime() - new Date(event.last_poly_refresh || 0).getTime();
+const stalenessMinutes = staleness / 60000;
+
+if (bookmakerFairProb >= 0.85 && stalenessMinutes > 3) {
+  console.log(`[POLY-MONITOR] Skipping high-prob edge for ${event.event_name} - stale price (${stalenessMinutes.toFixed(0)}m old)`);
+  continue;
+}
+
+if (bookmakerFairProb >= 0.90 && rawEdge > 0.40) {
+  console.log(`[POLY-MONITOR] Capping artifact edge for ${event.event_name} - raw ${(rawEdge * 100).toFixed(1)}% on 90%+ prob`);
+  rawEdge = 0.40; // Cap at 40%
+}
+```
+
+### File 2: `src/components/terminal/SignalCard.tsx`
+
+Add visual warning for potentially stale/artifact signals:
+
+```tsx
+// Add near the staleness warning display
+{signal.bookmaker_probability && signal.bookmaker_probability >= 0.85 && 
+ signal.edge_percent > 40 && (
+  <span className="text-yellow-500 text-xs">⚠️ High-prob edge - verify manually</span>
+)}
+```
 
 ---
 
-## UI Before vs After
+## Validation Rules Summary
 
-**Control Panel - Before:**
-```
-[Turbo Mode Switch] ← confusing, does nothing useful
-Status: [Turbo] badge when enabled
-```
-
-**Control Panel - After:**
-```
-[Fast Mode Switch] ← toggles Watch Poll 5m → 2m
-Status: [Fast] badge when enabled
-```
-
-**Settings Panel - Before:**
-```
-Legacy Scan Frequency:
-  - Base Frequency: 30m slider
-  - Turbo Frequency: 5m slider ← redundant
-
-Two-Tier Polling:
-  - Watch Poll Interval: 5m slider
-```
-
-**Settings Panel - After:**
-```
-Two-Tier Polling:
-  - Watch Poll Interval: 2-15m slider
-  (Legacy section removed entirely)
-```
+| Rule | Condition | Action |
+|------|-----------|--------|
+| Team Mismatch | `teamName` not found in `event_name` | DROP signal |
+| Duplicate Signal | Active signal exists for same event, different outcome | EXPIRE old signal |
+| Stale High-Prob | `fair_prob ≥ 85%` AND `staleness > 3min` | DROP signal |
+| Artifact Cap | `fair_prob ≥ 90%` AND `raw_edge > 40%` | CAP edge to 40% |
 
 ---
 
@@ -71,86 +135,14 @@ Two-Tier Polling:
 
 | File | Changes |
 |------|---------|
-| `src/types/scan-config.ts` | Remove `turbo_mode_enabled` from ScanConfig interface, remove `'turbo'` from currentMode type |
-| `src/hooks/useScanConfig.ts` | Remove `toggleTurboMode`, add `toggleFastMode`, update DEFAULT_CONFIG, remove turbo logic from status |
-| `src/components/terminal/ScanControlPanel.tsx` | Replace Turbo Switch with Fast Mode Switch, update badge logic |
-| `src/components/terminal/ScanSettingsPanel.tsx` | Remove entire "Legacy Scan Frequency" card (Base Frequency + Turbo Frequency sliders) |
-| `src/pages/Terminal.tsx` | Update handler from `onToggleTurbo` to `onToggleFastMode` |
+| `supabase/functions/polymarket-monitor/index.ts` | Add team validation, signal exclusivity, staleness gating |
+| `src/components/terminal/SignalCard.tsx` | Add high-prob edge warning |
 
 ---
 
-## Technical Details
+## Expected Behavior After Fix
 
-### New toggleFastMode Function (useScanConfig.ts)
-
-```typescript
-const toggleFastMode = useCallback(async () => {
-  if (!config) return;
-  const newInterval = config.watch_poll_interval_minutes === 2 ? 5 : 2;
-  await updateConfig({ watch_poll_interval_minutes: newInterval });
-  toast({
-    title: newInterval === 2 ? 'Fast Mode Enabled' : 'Fast Mode Disabled',
-    description: `Watch Poll now every ${newInterval} minutes`,
-  });
-}, [config, updateConfig, toast]);
-```
-
-### Updated Status Badge Logic (ScanControlPanel.tsx)
-
-```tsx
-// Before
-status.currentMode === 'turbo' ? (
-  <Badge className="bg-orange-500/20 text-orange-400">Turbo</Badge>
-)
-
-// After
-config?.watch_poll_interval_minutes === 2 ? (
-  <Badge className="bg-orange-500/20 text-orange-400">Fast</Badge>
-)
-```
-
-### Updated Switch (ScanControlPanel.tsx)
-
-```tsx
-// Before
-<Switch
-  id="turbo-mode"
-  checked={config?.turbo_mode_enabled || false}
-  onCheckedChange={onToggleTurbo}
-/>
-<Label>Turbo Mode</Label>
-
-// After
-<Switch
-  id="fast-mode"
-  checked={config?.watch_poll_interval_minutes === 2}
-  onCheckedChange={onToggleFastMode}
-/>
-<Label>Fast Mode (2m)</Label>
-```
-
----
-
-## Database Consideration
-
-The `scan_config` table has `turbo_mode_enabled` and `turbo_frequency_minutes` columns. These will be left in place to avoid migration complexity—they simply won't be used. A future cleanup migration can remove them.
-
----
-
-## What Stays Unchanged
-
-- **News Spike Mode** — still triggers 60-second burst polling for 5 minutes
-- **Watch Poll Interval slider** in settings — still adjustable from 2-15m
-- **Active Poll Interval** — still 60 seconds for escalated events
-- All movement detection, edge calculation, and signal logic
-
----
-
-## Result
-
-| User Action | Before | After |
-|-------------|--------|-------|
-| Toggle "Fast Mode" | Changed legacy scheduler (unused) | Changes Watch Poll from 5m → 2m |
-| News Spike | Temporary 60s active polling | Unchanged |
-| Settings → Watch Interval | Adjustable 2-15m | Adjustable 2-15m (auto-set to 2m if Fast enabled) |
+1. **Blackhawks vs. Penguins** → No signal (Atlanta Hawks rejected as non-participant)
+2. **Utah vs. Hurricanes** → Only ONE active BUY YES signal (older one expired)
+3. **Any 50%+ edge on 90% fair prob** → Blocked unless price is ≤3 minutes fresh
 
