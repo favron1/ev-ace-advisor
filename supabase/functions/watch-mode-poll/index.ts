@@ -1,12 +1,13 @@
 // ============================================================================
-// WATCH-MODE-POLL: Polymarket-First Tier 1 Polling
+// WATCH-MODE-POLL: H2H Movement Detection via Bookmaker Signals
 // ============================================================================
-// This function now implements the CORRECT Polymarket-first flow:
-// 1. Query Polymarket cache for all active sports markets
-// 2. Group by sport/market_type
-// 3. Fetch bookmaker outrights for matching sports
+// This function detects arbitrage opportunities by:
+// 1. Query Polymarket H2H cache for active sports markets (24hr horizon)
+// 2. Query bookmaker_signals table for recent H2H data
+// 3. Match markets by team names with fuzzy logic
 // 4. Calculate edge = bookmaker_fair_prob - polymarket_yes_price
-// 5. Escalate markets with edge to active monitoring
+// 5. Store snapshots for movement tracking
+// 6. Escalate markets with edge to active monitoring
 // ============================================================================
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -24,9 +25,68 @@ const MIN_VOLUME = 5000;
 const MAX_MARKETS_PER_SCAN = 100;
 const ACTIVE_WINDOW_MINUTES = 30;
 const MAX_SIMULTANEOUS_ACTIVE = 10;
+const BOOKMAKER_LOOKBACK_HOURS = 2;
 
-// Team aliases for matching
+// ============================================================================
+// SPORT CATEGORY NORMALIZATION
+// ============================================================================
+function normalizeSportCategory(sport: string | null): string {
+  if (!sport) return 'unknown';
+  
+  const aliases: Record<string, string> = {
+    'NHL': 'icehockey_nhl',
+    'nhl': 'icehockey_nhl',
+    'NBA': 'basketball_nba',
+    'nba': 'basketball_nba',
+    'NFL': 'americanfootball_nfl',
+    'nfl': 'americanfootball_nfl',
+    'MLB': 'baseball_mlb',
+    'mlb': 'baseball_mlb',
+  };
+  
+  return aliases[sport] || sport;
+}
+
+// ============================================================================
+// COMPREHENSIVE TEAM ALIASES (NHL + NBA + NFL)
+// ============================================================================
 const TEAM_ALIASES: Record<string, string[]> = {
+  // NHL Teams
+  'winnipeg jets': ['jets', 'winnipeg', 'wpg'],
+  'tampa bay lightning': ['lightning', 'tampa bay', 'tampa', 'tbl'],
+  'edmonton oilers': ['oilers', 'edmonton', 'edm'],
+  'san jose sharks': ['sharks', 'san jose', 'sjs'],
+  'carolina hurricanes': ['hurricanes', 'carolina', 'car', 'canes'],
+  'florida panthers': ['panthers', 'florida', 'fla'],
+  'colorado avalanche': ['avalanche', 'avs', 'colorado', 'col'],
+  'vegas golden knights': ['golden knights', 'vegas', 'vgk', 'knights'],
+  'dallas stars': ['stars', 'dallas', 'dal'],
+  'new york rangers': ['rangers', 'ny rangers', 'nyr'],
+  'new york islanders': ['islanders', 'ny islanders', 'nyi'],
+  'toronto maple leafs': ['maple leafs', 'leafs', 'toronto', 'tor'],
+  'montreal canadiens': ['canadiens', 'habs', 'montreal', 'mtl'],
+  'boston bruins': ['bruins', 'boston', 'bos'],
+  'detroit red wings': ['red wings', 'wings', 'detroit', 'det'],
+  'chicago blackhawks': ['blackhawks', 'hawks', 'chicago', 'chi'],
+  'pittsburgh penguins': ['penguins', 'pens', 'pittsburgh', 'pit'],
+  'washington capitals': ['capitals', 'caps', 'washington', 'wsh'],
+  'philadelphia flyers': ['flyers', 'philly', 'philadelphia', 'phi'],
+  'new jersey devils': ['devils', 'new jersey', 'nj', 'njd'],
+  'columbus blue jackets': ['blue jackets', 'jackets', 'columbus', 'cbj'],
+  'buffalo sabres': ['sabres', 'buffalo', 'buf'],
+  'ottawa senators': ['senators', 'sens', 'ottawa', 'ott'],
+  'minnesota wild': ['wild', 'minnesota', 'min'],
+  'st louis blues': ['blues', 'st louis', 'stl'],
+  'nashville predators': ['predators', 'preds', 'nashville', 'nsh'],
+  'calgary flames': ['flames', 'calgary', 'cgy'],
+  'vancouver canucks': ['canucks', 'vancouver', 'van'],
+  'anaheim ducks': ['ducks', 'anaheim', 'ana'],
+  'los angeles kings': ['kings', 'la kings', 'los angeles', 'lak'],
+  'seattle kraken': ['kraken', 'seattle', 'sea'],
+  'arizona coyotes': ['coyotes', 'arizona', 'ari'],
+  'utah hockey club': ['utah', 'uhc'],
+  
+  // NBA Teams
   'los angeles lakers': ['la lakers', 'lakers', 'lal'],
   'golden state warriors': ['gsw', 'warriors', 'gs warriors', 'golden state'],
   'boston celtics': ['celtics', 'boston', 'bos'],
@@ -50,36 +110,47 @@ const TEAM_ALIASES: Record<string, string[]> = {
   'atlanta hawks': ['hawks', 'atlanta', 'atl'],
   'chicago bulls': ['bulls', 'chicago', 'chi'],
   'toronto raptors': ['raptors', 'toronto', 'tor'],
+  'charlotte hornets': ['hornets', 'charlotte', 'cha'],
+  'washington wizards': ['wizards', 'washington', 'wsh'],
+  'detroit pistons': ['pistons', 'detroit', 'det'],
+  'san antonio spurs': ['spurs', 'san antonio', 'sas'],
+  'utah jazz': ['jazz', 'utah', 'uta'],
+  'portland trail blazers': ['blazers', 'trail blazers', 'portland', 'por'],
+  'new orleans pelicans': ['pelicans', 'new orleans', 'nop'],
+  
+  // NFL Teams
   'kansas city chiefs': ['chiefs', 'kc', 'kansas city'],
   'san francisco 49ers': ['49ers', 'niners', 'sf', 'san francisco'],
   'philadelphia eagles': ['eagles', 'philly', 'phi'],
-  'edmonton oilers': ['oilers', 'edmonton', 'edm'],
-  'florida panthers': ['panthers', 'florida', 'fla'],
-  'colorado avalanche': ['avalanche', 'avs', 'colorado', 'col'],
-  'vegas golden knights': ['golden knights', 'vegas', 'vgk'],
-};
-
-// Sport to bookmaker endpoint mapping
-const SPORT_ENDPOINTS: Record<string, { outright: string; h2h?: string }> = {
-  'basketball_nba': { 
-    outright: 'basketball_nba_championship_winner',
-    h2h: 'basketball_nba'
-  },
-  'americanfootball_nfl': { 
-    outright: 'americanfootball_nfl_super_bowl_winner',
-    h2h: 'americanfootball_nfl'
-  },
-  'icehockey_nhl': { 
-    outright: 'icehockey_nhl_championship_winner',
-    h2h: 'icehockey_nhl'
-  },
-  'soccer': { 
-    outright: 'soccer_epl_championship_winner' 
-  },
-  'soccer_epl': { 
-    outright: 'soccer_epl_championship_winner',
-    h2h: 'soccer_epl'
-  },
+  'buffalo bills': ['bills', 'buffalo', 'buf'],
+  'baltimore ravens': ['ravens', 'baltimore', 'bal'],
+  'cincinnati bengals': ['bengals', 'cincy', 'cincinnati', 'cin'],
+  'miami dolphins': ['dolphins', 'miami', 'mia'],
+  'new england patriots': ['patriots', 'pats', 'new england', 'ne'],
+  'new york jets': ['jets', 'ny jets', 'nyj'],
+  'new york giants': ['giants', 'ny giants', 'nyg'],
+  'green bay packers': ['packers', 'green bay', 'gb'],
+  'detroit lions': ['lions', 'detroit', 'det'],
+  'dallas cowboys': ['cowboys', 'dallas', 'dal'],
+  'seattle seahawks': ['seahawks', 'seattle', 'sea'],
+  'los angeles rams': ['rams', 'la rams', 'lar'],
+  'los angeles chargers': ['chargers', 'la chargers', 'lac'],
+  'las vegas raiders': ['raiders', 'vegas', 'lvr'],
+  'denver broncos': ['broncos', 'denver', 'den'],
+  'pittsburgh steelers': ['steelers', 'pittsburgh', 'pit'],
+  'cleveland browns': ['browns', 'cleveland', 'cle'],
+  'tennessee titans': ['titans', 'tennessee', 'ten'],
+  'jacksonville jaguars': ['jaguars', 'jags', 'jacksonville', 'jax'],
+  'indianapolis colts': ['colts', 'indy', 'indianapolis', 'ind'],
+  'houston texans': ['texans', 'houston', 'hou'],
+  'minnesota vikings': ['vikings', 'minnesota', 'min'],
+  'chicago bears': ['bears', 'chicago', 'chi'],
+  'new orleans saints': ['saints', 'new orleans', 'no'],
+  'tampa bay buccaneers': ['buccaneers', 'bucs', 'tampa bay', 'tb'],
+  'atlanta falcons': ['falcons', 'atlanta', 'atl'],
+  'carolina panthers': ['panthers', 'carolina', 'car'],
+  'arizona cardinals': ['cardinals', 'arizona', 'ari'],
+  'washington commanders': ['commanders', 'washington', 'wsh'],
 };
 
 interface PolymarketCacheEntry {
@@ -97,6 +168,18 @@ interface PolymarketCacheEntry {
   no_price: number;
   volume: number;
   liquidity: number;
+}
+
+interface BookmakerSignal {
+  id: string;
+  event_name: string;
+  outcome: string;
+  bookmaker: string;
+  odds: number;
+  implied_probability: number;
+  market_type: string;
+  captured_at: string;
+  is_sharp_book: boolean | null;
 }
 
 // ============================================================================
@@ -126,80 +209,95 @@ function getCanonicalName(name: string): string {
   return normalized;
 }
 
-function matchTeamNames(polyTeam: string | null, bookmakerTeam: string): boolean {
-  if (!polyTeam) return false;
+function extractTeamsFromEvent(eventName: string): string[] {
+  // Handle formats like "Jets vs. Lightning", "Lightning vs Jets", "Team A @ Team B"
+  const normalized = eventName.toLowerCase();
+  const separators = [' vs. ', ' vs ', ' @ ', ' at ', ' v ', ' - '];
   
-  const polyCanon = getCanonicalName(polyTeam);
-  const bookCanon = getCanonicalName(bookmakerTeam);
-  
-  if (polyCanon === bookCanon) return true;
-  if (polyCanon.includes(bookCanon) || bookCanon.includes(polyCanon)) return true;
-  
-  for (const [canonical, aliases] of Object.entries(TEAM_ALIASES)) {
-    const polyInAliases = polyCanon === canonical || aliases.some(a => polyCanon.includes(a));
-    const bookInAliases = bookCanon === canonical || aliases.some(a => bookCanon.includes(a));
-    
-    if (polyInAliases && bookInAliases) return true;
-  }
-  
-  return false;
-}
-
-async function fetchBookmakerOutrights(
-  endpoint: string,
-  oddsApiKey: string
-): Promise<Map<string, number>> {
-  const fairProbabilities = new Map<string, number>();
-  
-  try {
-    const url = `https://api.the-odds-api.com/v4/sports/${endpoint}/odds/?apiKey=${oddsApiKey}&regions=us,uk,eu&oddsFormat=decimal&markets=outrights`;
-    
-    console.log(`[WATCH-MODE-POLL] Fetching outrights: ${endpoint}`);
-    const response = await fetch(url);
-    
-    if (!response.ok) {
-      console.error(`[WATCH-MODE-POLL] API error ${response.status} for ${endpoint}`);
-      return fairProbabilities;
-    }
-    
-    const events = await response.json();
-    
-    if (!Array.isArray(events) || events.length === 0) {
-      return fairProbabilities;
-    }
-    
-    // Aggregate across bookmakers
-    const outcomeOdds: Map<string, number[]> = new Map();
-    
-    for (const event of events) {
-      for (const bookmaker of event.bookmakers || []) {
-        for (const market of bookmaker.markets || []) {
-          if (market.key !== 'outrights') continue;
-          
-          for (const outcome of market.outcomes || []) {
-            const name = normalizeTeamName(outcome.name);
-            if (!outcomeOdds.has(name)) {
-              outcomeOdds.set(name, []);
-            }
-            outcomeOdds.get(name)!.push(outcome.price);
-          }
-        }
+  for (const sep of separators) {
+    if (normalized.includes(sep)) {
+      const parts = normalized.split(sep);
+      if (parts.length === 2) {
+        return parts.map(p => normalizeTeamName(p.trim()));
       }
     }
-    
-    // Calculate fair probabilities
-    for (const [name, prices] of outcomeOdds.entries()) {
-      const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
-      fairProbabilities.set(name, 1 / avgPrice);
-    }
-    
-    console.log(`[WATCH-MODE-POLL] Found ${fairProbabilities.size} outcomes for ${endpoint}`);
-    
-  } catch (error) {
-    console.error(`[WATCH-MODE-POLL] Error fetching ${endpoint}:`, error);
   }
   
-  return fairProbabilities;
+  return [];
+}
+
+function teamsMatch(polyTeams: string[], bookmakerEvent: string): boolean {
+  if (polyTeams.length !== 2) return false;
+  
+  const bookTeams = extractTeamsFromEvent(bookmakerEvent);
+  if (bookTeams.length !== 2) return false;
+  
+  const polyCanon = polyTeams.map(getCanonicalName);
+  const bookCanon = bookTeams.map(getCanonicalName);
+  
+  // Check if both teams match (order may differ)
+  const match1 = polyCanon[0] === bookCanon[0] && polyCanon[1] === bookCanon[1];
+  const match2 = polyCanon[0] === bookCanon[1] && polyCanon[1] === bookCanon[0];
+  
+  return match1 || match2;
+}
+
+function findMatchingOutcome(
+  polyTeam: string | null,
+  bookmakerSignals: BookmakerSignal[]
+): BookmakerSignal | null {
+  if (!polyTeam) return null;
+  
+  const polyCanon = getCanonicalName(polyTeam);
+  
+  for (const signal of bookmakerSignals) {
+    const outcomeCanon = getCanonicalName(signal.outcome);
+    
+    // Direct match
+    if (polyCanon === outcomeCanon) return signal;
+    
+    // Check if canonical names share an alias
+    for (const [canonical, aliases] of Object.entries(TEAM_ALIASES)) {
+      const polyInGroup = polyCanon === canonical || aliases.some(a => polyCanon.includes(a) || a.includes(polyCanon));
+      const outcomeInGroup = outcomeCanon === canonical || aliases.some(a => outcomeCanon.includes(a) || a.includes(outcomeCanon));
+      
+      if (polyInGroup && outcomeInGroup) return signal;
+    }
+  }
+  
+  return null;
+}
+
+function calculateVigFreeProb(signals: BookmakerSignal[]): number {
+  // Group by outcome and calculate vig-free probability
+  // For H2H, we need both sides to remove vig
+  const outcomeProbs: Map<string, number[]> = new Map();
+  
+  for (const signal of signals) {
+    const outcome = getCanonicalName(signal.outcome);
+    if (!outcomeProbs.has(outcome)) {
+      outcomeProbs.set(outcome, []);
+    }
+    outcomeProbs.get(outcome)!.push(signal.implied_probability);
+  }
+  
+  // Average probabilities per outcome
+  const avgProbs: Map<string, number> = new Map();
+  let totalRawProb = 0;
+  
+  for (const [outcome, probs] of outcomeProbs) {
+    const avg = probs.reduce((a, b) => a + b, 0) / probs.length;
+    avgProbs.set(outcome, avg);
+    totalRawProb += avg;
+  }
+  
+  // Normalize to remove vig (total should be 1.0)
+  const vigFreeProbs: Map<string, number> = new Map();
+  for (const [outcome, prob] of avgProbs) {
+    vigFreeProbs.set(outcome, prob / totalRawProb);
+  }
+  
+  return totalRawProb > 0 ? 1 / totalRawProb : 0; // Return vig multiplier for logging
 }
 
 // ============================================================================
@@ -212,18 +310,13 @@ Deno.serve(async (req) => {
   }
 
   const startTime = Date.now();
-  console.log('[WATCH-MODE-POLL] Starting Polymarket-first Tier 1 polling...');
+  console.log('[WATCH-MODE-POLL] Starting H2H movement detection...');
 
   try {
     const supabase = createClient(
       Deno.env.get('SUPABASE_URL')!,
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     );
-
-    const ODDS_API_KEY = Deno.env.get('ODDS_API_KEY');
-    if (!ODDS_API_KEY) {
-      throw new Error('ODDS_API_KEY not configured');
-    }
 
     // Get config
     const { data: configData } = await supabase
@@ -233,24 +326,21 @@ Deno.serve(async (req) => {
       .maybeSingle();
 
     const minVolume = configData?.min_poly_volume || MIN_VOLUME;
-    const enabledTypes = configData?.enabled_market_types || ['futures', 'h2h', 'total'];
     const maxActive = configData?.max_simultaneous_active || MAX_SIMULTANEOUS_ACTIVE;
 
     // ========================================================================
-    // STEP 1: Load Polymarket markets from cache - H2H ONLY, 24hr max
+    // STEP 1: Load Polymarket H2H markets from cache (24hr max horizon)
     // ========================================================================
-    // Calculate 24-hour horizon cutoff
     const maxEventDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     
-    // CRITICAL: Only H2H markets, NOT futures - futures are championship winner bets
     const { data: polyMarkets, error: fetchError } = await supabase
       .from('polymarket_h2h_cache')
       .select('*')
       .eq('status', 'active')
-      .eq('market_type', 'h2h')  // ONLY H2H - no futures
+      .eq('market_type', 'h2h')
       .gte('volume', minVolume)
-      .not('event_date', 'is', null)  // Must have event date
-      .lte('event_date', maxEventDate)  // Within 24 hours
+      .not('event_date', 'is', null)
+      .lte('event_date', maxEventDate)
       .order('volume', { ascending: false })
       .limit(MAX_MARKETS_PER_SCAN);
 
@@ -269,49 +359,58 @@ Deno.serve(async (req) => {
       );
     }
     
-    console.log(`[WATCH-MODE-POLL] Loaded ${polyMarkets.length} H2H markets within 24hr`);
-
-    console.log(`[WATCH-MODE-POLL] Loaded ${polyMarkets.length} Polymarket markets`);
+    console.log(`[WATCH-MODE-POLL] Loaded ${polyMarkets.length} Polymarket H2H markets`);
 
     // ========================================================================
-    // STEP 2: Group by sport for efficient API calls
+    // STEP 2: Query bookmaker_signals for recent H2H data
     // ========================================================================
-    const marketsBySport: Map<string, PolymarketCacheEntry[]> = new Map();
+    const lookbackTime = new Date(Date.now() - BOOKMAKER_LOOKBACK_HOURS * 60 * 60 * 1000).toISOString();
     
-    for (const market of polyMarkets as PolymarketCacheEntry[]) {
-      const sport = market.sport_category || 'unknown';
-      if (!marketsBySport.has(sport)) {
-        marketsBySport.set(sport, []);
+    const { data: bookmakerSignals, error: bookError } = await supabase
+      .from('bookmaker_signals')
+      .select('*')
+      .eq('market_type', 'h2h')
+      .gte('captured_at', lookbackTime);
+
+    if (bookError) throw bookError;
+
+    if (!bookmakerSignals || bookmakerSignals.length === 0) {
+      console.log('[WATCH-MODE-POLL] No recent bookmaker H2H signals found');
+      return new Response(
+        JSON.stringify({ 
+          success: true, 
+          message: 'No recent bookmaker signals',
+          polymarket_count: polyMarkets.length,
+          snapshots_stored: 0,
+          edges_found: 0,
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    console.log(`[WATCH-MODE-POLL] Loaded ${bookmakerSignals.length} bookmaker H2H signals`);
+
+    // Group bookmaker signals by event
+    const signalsByEvent: Map<string, BookmakerSignal[]> = new Map();
+    for (const signal of bookmakerSignals as BookmakerSignal[]) {
+      const eventKey = normalizeTeamName(signal.event_name);
+      if (!signalsByEvent.has(eventKey)) {
+        signalsByEvent.set(eventKey, []);
       }
-      marketsBySport.get(sport)!.push(market);
+      signalsByEvent.get(eventKey)!.push(signal);
     }
 
     // ========================================================================
-    // STEP 3: Fetch bookmaker data for each sport
-    // ========================================================================
-    const bookmakerData: Map<string, Map<string, number>> = new Map();
-    let apiCallsUsed = 0;
-
-    for (const [sport] of marketsBySport) {
-      const endpoints = SPORT_ENDPOINTS[sport];
-      if (endpoints?.outright) {
-        const fairProbs = await fetchBookmakerOutrights(endpoints.outright, ODDS_API_KEY);
-        bookmakerData.set(sport, fairProbs);
-        apiCallsUsed++;
-      }
-    }
-
-    // ========================================================================
-    // STEP 4: Calculate edges and store snapshots
+    // STEP 3: Match Polymarket markets to bookmaker signals
     // ========================================================================
     const edgesFound: Array<{
       polyMarket: PolymarketCacheEntry;
       bookmakerFairProb: number;
       edge: number;
       matchedTeam: string;
+      matchedEvent: string;
     }> = [];
 
-    // Store probability snapshots for tracking
     const snapshots: Array<{
       event_key: string;
       event_name: string;
@@ -321,52 +420,111 @@ Deno.serve(async (req) => {
       source: string;
     }> = [];
 
-    for (const [sport, markets] of marketsBySport) {
-      const bookmakerProbs = bookmakerData.get(sport);
-      if (!bookmakerProbs || bookmakerProbs.size === 0) continue;
+    let matchedCount = 0;
+    let unmatchedCount = 0;
 
-      for (const polyMarket of markets) {
-        const teamToMatch = polyMarket.team_home_normalized || polyMarket.team_home;
-        if (!teamToMatch) continue;
+    for (const polyMarket of polyMarkets as PolymarketCacheEntry[]) {
+      // Extract teams from Polymarket event
+      const polyEventName = polyMarket.question || polyMarket.event_title;
+      const polyTeams = extractTeamsFromEvent(polyEventName);
+      
+      // Also try team_home/team_away if extraction fails
+      if (polyTeams.length !== 2 && polyMarket.team_home && polyMarket.team_away) {
+        polyTeams.push(normalizeTeamName(polyMarket.team_home));
+        polyTeams.push(normalizeTeamName(polyMarket.team_away));
+      }
 
-        // Find matching bookmaker outcome
-        let bestMatch: { team: string; prob: number } | null = null;
-        
-        for (const [bookTeam, fairProb] of bookmakerProbs) {
-          if (matchTeamNames(teamToMatch, bookTeam)) {
-            bestMatch = { team: bookTeam, prob: fairProb };
-            break;
-          }
+      if (polyTeams.length !== 2) {
+        console.log(`[WATCH-MODE-POLL] Could not parse teams from: ${polyEventName}`);
+        unmatchedCount++;
+        continue;
+      }
+
+      // Find matching bookmaker event
+      let matchedEventKey: string | null = null;
+      let matchedSignals: BookmakerSignal[] = [];
+
+      for (const [eventKey, signals] of signalsByEvent) {
+        if (teamsMatch(polyTeams, signals[0].event_name)) {
+          matchedEventKey = eventKey;
+          matchedSignals = signals;
+          break;
         }
+      }
 
-        if (!bestMatch) continue;
+      if (!matchedEventKey || matchedSignals.length === 0) {
+        console.log(`[WATCH-MODE-POLL] No bookmaker match for: ${polyEventName} (teams: ${polyTeams.join(' vs ')})`);
+        unmatchedCount++;
+        continue;
+      }
 
-        // Store snapshot for movement tracking
-        const eventKey = `poly_${polyMarket.condition_id}`;
-        snapshots.push({
-          event_key: eventKey,
-          event_name: polyMarket.question,
-          outcome: polyMarket.team_home || 'YES',
-          fair_probability: bestMatch.prob,
-          captured_at: new Date().toISOString(),
-          source: 'bookmaker',
+      matchedCount++;
+
+      // Find the specific outcome matching Polymarket's team_home (the YES side)
+      const homeTeam = polyMarket.team_home || polyTeams[0];
+      const matchedOutcome = findMatchingOutcome(homeTeam, matchedSignals);
+
+      if (!matchedOutcome) {
+        console.log(`[WATCH-MODE-POLL] Matched event but no outcome for: ${homeTeam}`);
+        continue;
+      }
+
+      // Calculate vig-free fair probability
+      const outcomeProbs: Map<string, number[]> = new Map();
+      for (const signal of matchedSignals) {
+        const outcome = getCanonicalName(signal.outcome);
+        if (!outcomeProbs.has(outcome)) {
+          outcomeProbs.set(outcome, []);
+        }
+        outcomeProbs.get(outcome)!.push(signal.implied_probability);
+      }
+
+      // Calculate averages and remove vig
+      let totalRawProb = 0;
+      const avgProbs: Map<string, number> = new Map();
+      for (const [outcome, probs] of outcomeProbs) {
+        const avg = probs.reduce((a, b) => a + b, 0) / probs.length;
+        avgProbs.set(outcome, avg);
+        totalRawProb += avg;
+      }
+
+      // Vig-free probability for matched outcome
+      const matchedOutcomeCanon = getCanonicalName(matchedOutcome.outcome);
+      const rawProb = avgProbs.get(matchedOutcomeCanon) || matchedOutcome.implied_probability;
+      const vigFreeFairProb = totalRawProb > 0 ? rawProb / totalRawProb : rawProb;
+
+      // Store snapshot for movement tracking
+      const eventKey = `poly_${polyMarket.condition_id}`;
+      snapshots.push({
+        event_key: eventKey,
+        event_name: polyMarket.question,
+        outcome: homeTeam,
+        fair_probability: vigFreeFairProb,
+        captured_at: new Date().toISOString(),
+        source: 'bookmaker_h2h',
+      });
+
+      // Calculate edge
+      const edge = (vigFreeFairProb - polyMarket.yes_price) * 100;
+
+      console.log(`[WATCH-MODE-POLL] Match: ${polyEventName.substring(0, 40)}... | Book: ${(vigFreeFairProb * 100).toFixed(1)}% | Poly: ${(polyMarket.yes_price * 100).toFixed(1)}% | Edge: ${edge.toFixed(1)}%`);
+
+      if (edge >= MIN_EDGE_PCT) {
+        edgesFound.push({
+          polyMarket,
+          bookmakerFairProb: vigFreeFairProb,
+          edge,
+          matchedTeam: homeTeam,
+          matchedEvent: matchedSignals[0].event_name,
         });
-
-        // Calculate edge
-        const edge = (bestMatch.prob - polyMarket.yes_price) * 100;
-
-        if (edge >= MIN_EDGE_PCT) {
-          edgesFound.push({
-            polyMarket,
-            bookmakerFairProb: bestMatch.prob,
-            edge,
-            matchedTeam: bestMatch.team,
-          });
-        }
       }
     }
 
-    // Store snapshots
+    console.log(`[WATCH-MODE-POLL] Matched: ${matchedCount}/${polyMarkets.length} markets, Unmatched: ${unmatchedCount}`);
+
+    // ========================================================================
+    // STEP 4: Store snapshots
+    // ========================================================================
     if (snapshots.length > 0) {
       const { error: insertError } = await supabase
         .from('probability_snapshots')
@@ -374,10 +532,10 @@ Deno.serve(async (req) => {
 
       if (insertError) {
         console.error('[WATCH-MODE-POLL] Snapshot insert error:', insertError);
+      } else {
+        console.log(`[WATCH-MODE-POLL] Stored ${snapshots.length} snapshots`);
       }
     }
-
-    console.log(`[WATCH-MODE-POLL] Stored ${snapshots.length} snapshots, found ${edgesFound.length} edges`);
 
     // ========================================================================
     // STEP 5: Check active slot availability and escalate
@@ -414,7 +572,7 @@ Deno.serve(async (req) => {
           polymarket_yes_price: polyMarket.yes_price,
           polymarket_volume: polyMarket.volume,
           bookmaker_market_key: matchedTeam,
-          bookmaker_source: polyMarket.sport_category,
+          bookmaker_source: normalizeSportCategory(polyMarket.sport_category),
           initial_probability: bookmakerFairProb,
           current_probability: bookmakerFairProb,
           peak_probability: bookmakerFairProb,
@@ -450,7 +608,7 @@ Deno.serve(async (req) => {
           polymarket_yes_price: polyMarket.yes_price,
           polymarket_volume: polyMarket.volume,
           bookmaker_market_key: matchedTeam,
-          bookmaker_source: polyMarket.sport_category,
+          bookmaker_source: normalizeSportCategory(polyMarket.sport_category),
           initial_probability: bookmakerFairProb,
           current_probability: bookmakerFairProb,
           movement_pct: edge,
@@ -472,11 +630,13 @@ Deno.serve(async (req) => {
     return new Response(
       JSON.stringify({
         success: true,
+        polymarket_count: polyMarkets.length,
+        bookmaker_signals_count: bookmakerSignals.length,
+        matched_markets: matchedCount,
+        unmatched_markets: unmatchedCount,
         snapshots_stored: snapshots.length,
-        events_analyzed: polyMarkets.length,
-        escalation_candidates: edgesFound.length,
+        edges_found: edgesFound.length,
         escalated_to_active: escalatedCount,
-        api_calls_used: apiCallsUsed,
         duration_ms: duration,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
