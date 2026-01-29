@@ -6,9 +6,8 @@ export interface ScanConfig {
   
   // Scan frequency settings
   base_frequency_minutes: number;
-  turbo_frequency_minutes: number;
+  turbo_frequency_minutes: number; // Legacy - kept for DB compatibility, not used
   adaptive_scanning_enabled: boolean;
-  turbo_mode_enabled: boolean;
   scanning_paused: boolean;
   
   // Event horizon settings
@@ -57,7 +56,7 @@ export interface ScanStatus {
   dailyRequestsLimit: number;
   monthlyRequestsUsed: number;
   monthlyRequestsLimit: number;
-  currentMode: 'manual' | 'baseline' | 'turbo' | 'watching' | 'active';
+  currentMode: 'manual' | 'baseline' | 'watching' | 'active';
   estimatedMonthlyCost: number;
   activeEventsCount?: number;
   watchingEventsCount?: number;

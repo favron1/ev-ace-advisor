@@ -5,9 +5,8 @@ import { useToast } from '@/hooks/use-toast';
 
 const DEFAULT_CONFIG: Partial<ScanConfig> = {
   base_frequency_minutes: 30,
-  turbo_frequency_minutes: 5,
+  turbo_frequency_minutes: 5, // Legacy - kept for DB compatibility
   adaptive_scanning_enabled: true,
-  turbo_mode_enabled: false,
   scanning_paused: false,
   event_horizon_hours: 24,
   min_event_horizon_hours: 2,
@@ -99,7 +98,7 @@ export function useScanConfig() {
       dailyRequestsLimit: cfg.max_daily_requests,
       monthlyRequestsUsed: cfg.monthly_requests_used,
       monthlyRequestsLimit: cfg.max_monthly_requests,
-      currentMode: cfg.scanning_paused ? 'manual' : (cfg.turbo_mode_enabled ? 'turbo' : 'baseline'),
+      currentMode: cfg.scanning_paused ? 'manual' : 'baseline',
       estimatedMonthlyCost: estimatedMonthly,
     });
   };
@@ -261,15 +260,14 @@ export function useScanConfig() {
     });
   }, [config, updateConfig, toast]);
 
-  // Toggle turbo mode
-  const toggleTurboMode = useCallback(async () => {
+  // Toggle fast mode (changes watch poll interval between 2m and 5m)
+  const toggleFastMode = useCallback(async () => {
     if (!config) return;
-    await updateConfig({ turbo_mode_enabled: !config.turbo_mode_enabled });
+    const newInterval = config.watch_poll_interval_minutes === 2 ? 5 : 2;
+    await updateConfig({ watch_poll_interval_minutes: newInterval });
     toast({
-      title: config.turbo_mode_enabled ? 'Turbo Mode Disabled' : 'Turbo Mode Enabled',
-      description: config.turbo_mode_enabled 
-        ? `Reverted to ${config.base_frequency_minutes}min intervals`
-        : `Now scanning every ${config.turbo_frequency_minutes}min`,
+      title: newInterval === 2 ? 'Fast Mode Enabled' : 'Fast Mode Disabled',
+      description: `Watch Poll now every ${newInterval} minutes`,
     });
   }, [config, updateConfig, toast]);
 
@@ -284,9 +282,7 @@ export function useScanConfig() {
       return;
     }
 
-    const intervalMinutes = cfg.turbo_mode_enabled 
-      ? cfg.turbo_frequency_minutes 
-      : cfg.base_frequency_minutes;
+    const intervalMinutes = cfg.base_frequency_minutes;
 
     scanIntervalRef.current = setInterval(() => {
       runManualScan();
@@ -346,7 +342,7 @@ export function useScanConfig() {
     updateConfig,
     runManualScan,
     togglePause,
-    toggleTurboMode,
+    toggleFastMode,
     fetchConfig,
   };
 }
