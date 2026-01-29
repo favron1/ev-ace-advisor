@@ -42,7 +42,9 @@ interface SharpBookSnapshot {
   raw_odds: number;
 }
 
-// Calculate vig-removed fair probability for 2-way markets
+// Calculate fair probability with proper per-book vig removal
+// For 2-way markets: removes vig from each bookmaker individually, then aggregates
+// This eliminates the "average odds then invert" anti-pattern
 function calculateFairProbability(
   outcomeOdds: Record<string, OutcomeOdds[]>,
   targetOutcome: string,
@@ -51,26 +53,64 @@ function calculateFairProbability(
 ): { fairProb: number; rawProb: number; avgOdds: number } {
   const outcomes = Object.keys(outcomeOdds);
   
-  // Calculate weighted average odds for each outcome
-  const avgOddsMap: Record<string, number> = {};
-  
-  for (const outcome of outcomes) {
-    const oddsArray = outcomeOdds[outcome];
-    if (sharpBookWeighting) {
+  // For 2-way markets, calculate per-book vig-free probabilities
+  if (outcomes.length === 2) {
+    const [outcome1, outcome2] = outcomes;
+    const bookFairProbs: { prob: number; weight: number }[] = [];
+    
+    // Find matching book pairs (same bookmaker has both outcomes)
+    const bookmakers = new Set<string>();
+    for (const odds of outcomeOdds[outcome1]) {
+      bookmakers.add(odds.bookmaker);
+    }
+    
+    for (const bookmaker of bookmakers) {
+      const odds1 = outcomeOdds[outcome1].find(o => o.bookmaker === bookmaker);
+      const odds2 = outcomeOdds[outcome2].find(o => o.bookmaker === bookmaker);
+      
+      if (odds1 && odds2) {
+        // Calculate vig-free probability for this book
+        // Formula: p_fair = p_raw / (p_raw_1 + p_raw_2)
+        const raw1 = 1 / odds1.odds;
+        const raw2 = 1 / odds2.odds;
+        const total = raw1 + raw2; // This is >1 due to vig
+        const fair1 = raw1 / total;
+        const fair2 = raw2 / total;
+        
+        const targetFair = targetOutcome === outcome1 ? fair1 : fair2;
+        const weight = sharpBookWeighting && odds1.isSharp ? sharpBookWeight : 1;
+        
+        bookFairProbs.push({ prob: targetFair, weight });
+      }
+    }
+    
+    if (bookFairProbs.length > 0) {
+      // Weighted average of vig-free probabilities
       let totalWeight = 0;
       let weightedSum = 0;
-      for (const o of oddsArray) {
-        const weight = o.isSharp ? sharpBookWeight : 1;
-        weightedSum += o.odds * weight;
+      for (const { prob, weight } of bookFairProbs) {
+        weightedSum += prob * weight;
         totalWeight += weight;
       }
-      avgOddsMap[outcome] = weightedSum / totalWeight;
-    } else {
-      avgOddsMap[outcome] = oddsArray.reduce((sum, o) => sum + o.odds, 0) / oddsArray.length;
+      const fairProb = weightedSum / totalWeight;
+      
+      // Also calculate average odds for display
+      const targetOdds = outcomeOdds[targetOutcome];
+      const avgOdds = targetOdds.reduce((sum, o) => sum + o.odds, 0) / targetOdds.length;
+      const rawProb = 1 / avgOdds;
+      
+      return { fairProb, rawProb, avgOdds };
     }
   }
   
-  // Calculate raw implied probabilities
+  // Fallback for 3+ way markets or incomplete data: use original logic
+  // (outrights with many outcomes can't be perfectly devigged per-book)
+  const avgOddsMap: Record<string, number> = {};
+  for (const outcome of outcomes) {
+    const oddsArray = outcomeOdds[outcome];
+    avgOddsMap[outcome] = oddsArray.reduce((sum, o) => sum + o.odds, 0) / oddsArray.length;
+  }
+  
   const rawProbs: Record<string, number> = {};
   let totalRawProb = 0;
   for (const outcome of outcomes) {
@@ -78,7 +118,6 @@ function calculateFairProbability(
     totalRawProb += rawProbs[outcome];
   }
   
-  // Normalize to remove vig (sum of fair probs = 1)
   const targetRawProb = rawProbs[targetOutcome] || 0;
   const targetFairProb = totalRawProb > 0 ? targetRawProb / totalRawProb : 0;
   
