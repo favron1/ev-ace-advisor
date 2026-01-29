@@ -609,6 +609,8 @@ Deno.serve(async (req) => {
                   polymarket_updated_at: now.toISOString(),
                   signal_strength: netEdge * 100,
                   status: 'active',
+                   // IMPORTANT: Used by UI for kickoff countdown + by refresh-signals for urgency/time_label
+                   expires_at: event.commence_time,
                   polymarket_condition_id: event.polymarket_condition_id, // NEW: for direct market links
                   signal_factors: {
                     raw_edge: rawEdge * 100,
