@@ -1,72 +1,122 @@
 
 
-# Polymarket Data Source Upgrade Plan
+# Fix: Polymarket Token ID Extraction
 
-## Status: ✅ IMPLEMENTED
+## Problem Summary
 
----
+The CLOB API integration is incomplete because token IDs are not being captured from Gamma API responses. This causes:
+- `token_id_yes` and `token_id_no` columns remain NULL
+- CLOB batch pricing returns 0 results (falls back to stale Gamma prices)
+- No bid/ask spread data available
 
-## What Was Implemented
+## Root Cause
 
-### Phase 1: Database Schema Update ✅
-Added 6 new columns to `polymarket_h2h_cache`:
-- `token_id_yes` - YES outcome token for CLOB API
-- `token_id_no` - NO outcome token for CLOB API
-- `best_bid` - Highest buy price (what you get selling)
-- `best_ask` - Lowest sell price (what you pay buying)
-- `spread_pct` - Bid-ask spread percentage
-- `orderbook_depth` - Total liquidity in orderbook
+The Gamma API response structure may differ from what we expected. The `clobTokenIds` field might be:
+1. At a different path in the response (e.g., nested differently)
+2. Named differently (e.g., `tokenIds`, `outcomes[0].tokenId`)
+3. Only available via a separate endpoint
 
-### Phase 2: Enhanced Market Discovery ✅
-Updated `polymarket-sync-24h/index.ts`:
-- **Token ID Extraction**: Now extracts `clobTokenIds` from Gamma response and stores YES/NO token IDs
-- **Improved Market Type Detection**: Enhanced regex patterns for:
-  - Totals: "over 220.5", "under 110.5", "total points", "combined score"
-  - Spreads: "cover -5.5", "win by 5+", "-5.5", "+3.5"
-  - Player Props: "score 25+ points", "throw 3+ TDs", "record 10+ rebounds"
-- **Threshold Extraction**: New `extractThreshold()` function parses numeric values (e.g., 220.5, -5.5)
+## Fix Plan
 
-### Phase 3: CLOB REST API Integration ✅
-Updated `polymarket-monitor/index.ts`:
-- **Batch Price Fetch**: Uses `GET /prices?token_ids=...` to fetch all prices in one call
-- **Spread Fetch**: Uses `POST /spreads` to get bid-ask spreads
-- **Price Calculation**: Uses `best_ask` as actual buy price (not mid-price)
-- **Net Edge Calculation**: Now uses actual spread when available for accurate cost estimation
-- **Cache Updates**: Writes back `best_bid`, `best_ask`, `spread_pct` to cache
+### Step 1: Debug Gamma API Response Structure
 
----
+Add detailed logging to `polymarket-sync-24h` to see exactly what fields are available in the Gamma response:
 
-## Technical Details
+```typescript
+// Log first market's structure for debugging
+if (qualifying.length > 0) {
+  const sample = qualifying[0].market;
+  console.log(`[POLY-SYNC-24H] Sample market fields:`, Object.keys(sample));
+  console.log(`[POLY-SYNC-24H] Sample market data:`, JSON.stringify(sample).substring(0, 500));
+}
+```
 
-### CLOB API Endpoints Now Used
-| Endpoint | Purpose | Status |
-|----------|---------|--------|
-| `GET /markets/{condition_id}` | Market metadata | ✅ Fallback |
-| `GET /prices?token_ids=...` | Batch price lookup | ✅ **NEW** |
-| `POST /spreads` | Bid-ask spread | ✅ **NEW** |
+### Step 2: Fix Token ID Extraction
 
-### Token ID vs Condition ID
-- **Condition ID**: Identifies the market (used for Gamma/market links)
-- **Token ID**: Identifies specific outcome (YES or NO), required for CLOB price lookups
-- Both are now stored: `condition_id` (existing) and `token_id_yes`/`token_id_no` (new)
+Based on Polymarket documentation, the token IDs might be in:
+- `market.clobTokenIds` (current attempt)
+- `market.outcomes[0].clobTokenId` 
+- `market.tokens[0]` and `market.tokens[1]`
 
----
+Update extraction logic to try all possible paths:
 
-## Expected Outcomes
+```typescript
+// Try multiple paths for token ID extraction
+let tokenIdYes: string | null = null;
+let tokenIdNo: string | null = null;
 
-| Metric | Before | After |
-|--------|--------|-------|
-| Price accuracy | Stale (Gamma metadata) | Live (CLOB orderbook) |
-| Market coverage | ~23 events | ~100+ events (improved regex) |
-| Spread visibility | None | Yes (bid-ask from CLOB) |
-| O/U markets captured | ~5% | ~80%+ |
-| Slippage estimation | Volume-based guess | Actual spread data |
+// Path 1: clobTokenIds array
+if (market.clobTokenIds && Array.isArray(market.clobTokenIds)) {
+  tokenIdYes = market.clobTokenIds[0] || null;
+  tokenIdNo = market.clobTokenIds[1] || null;
+}
+// Path 2: tokens array
+else if (market.tokens && Array.isArray(market.tokens)) {
+  tokenIdYes = market.tokens[0]?.token_id || market.tokens[0] || null;
+  tokenIdNo = market.tokens[1]?.token_id || market.tokens[1] || null;
+}
+// Path 3: outcomes with tokenId
+else if (market.outcomes && Array.isArray(market.outcomes)) {
+  tokenIdYes = market.outcomes[0]?.clobTokenId || market.outcomes[0]?.tokenId || null;
+  tokenIdNo = market.outcomes[1]?.clobTokenId || market.outcomes[1]?.tokenId || null;
+}
+```
 
----
+### Step 3: Fallback to CLOB Markets Endpoint
 
-## Future Phase (Not Implemented)
+If Gamma doesn't provide token IDs, fetch them directly from CLOB:
 
-**WebSocket Integration** for real-time price updates:
-- Would connect to `wss://ws-subscriptions-clob.polymarket.com/ws/market`
-- Instant edge detection (< 1 second vs 5-minute polling)
-- Requires additional infrastructure (Edge Functions have 5-min limit)
+```typescript
+// If no token IDs from Gamma, fetch from CLOB markets endpoint
+if (!tokenIdYes && conditionId) {
+  try {
+    const clobResp = await fetch(`https://clob.polymarket.com/markets/${conditionId}`);
+    if (clobResp.ok) {
+      const clobData = await clobResp.json();
+      // CLOB returns tokens array with token_id fields
+      if (clobData.tokens && Array.isArray(clobData.tokens)) {
+        tokenIdYes = clobData.tokens.find(t => t.outcome === 'Yes')?.token_id || null;
+        tokenIdNo = clobData.tokens.find(t => t.outcome === 'No')?.token_id || null;
+      }
+    }
+  } catch (e) {
+    console.warn(`[POLY-SYNC-24H] Failed to fetch CLOB market: ${conditionId}`);
+  }
+}
+```
+
+### Step 4: Fix Sport Misclassification
+
+The sport detection regex is matching "Hawks" in "Blackhawks" as NBA. Fix by being more specific:
+
+```typescript
+// NHL - be more specific about Blackhawks
+{ patterns: [/\bnhl\b/, /blackhawks/i, /maple leafs|canadiens|...], sport: 'NHL' },
+
+// NBA - remove 'hawks' standalone match that conflicts
+{ patterns: [/\bnba\b/, /atlanta hawks/i, /lakers|celtics|...], sport: 'NBA' },
+```
+
+## Files to Modify
+
+| File | Changes |
+|------|---------|
+| `supabase/functions/polymarket-sync-24h/index.ts` | Add debug logging, fix token ID extraction paths, add CLOB fallback |
+| `supabase/functions/polymarket-sync-24h/index.ts` | Fix sport detection regex for Blackhawks/Hawks |
+
+## Expected Outcome
+
+After fixes:
+- Token IDs populated in `polymarket_h2h_cache`
+- CLOB batch pricing returns actual bid/ask data
+- Accurate spread estimation for edge calculations
+- Correct sport classification
+
+## Verification Steps
+
+1. Deploy updated function
+2. Trigger `polymarket-sync-24h` manually
+3. Check logs for "Sample market fields" to see actual Gamma response structure
+4. Query `polymarket_h2h_cache` to verify `token_id_yes` is populated
+5. Run `polymarket-monitor` and verify "Got X prices, X spreads from CLOB" shows non-zero values
+
