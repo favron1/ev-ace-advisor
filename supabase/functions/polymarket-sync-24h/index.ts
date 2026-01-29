@@ -14,14 +14,14 @@ function detectSport(title: string, question: string): string | null {
   const combined = `${title} ${question}`.toLowerCase();
   
   const sportPatterns: Array<{ patterns: RegExp[]; sport: string }> = [
-    // NBA - team names and league
-    { patterns: [/\bnba\b/, /lakers|celtics|warriors|heat|bulls|knicks|nets|bucks|76ers|sixers|suns|nuggets|clippers|mavericks|rockets|grizzlies|timberwolves|pelicans|spurs|thunder|jazz|blazers|trail blazers|kings|hornets|hawks|wizards|magic|pistons|cavaliers|raptors|pacers/i], sport: 'NBA' },
+    // NHL - check FIRST to catch "Blackhawks" before NBA's "hawks" pattern
+    { patterns: [/\bnhl\b/, /blackhawks|maple leafs|canadiens|habs|bruins|rangers|islanders|devils|flyers|penguins|capitals|caps|hurricanes|canes|panthers|lightning|bolts|red wings|senators|sens|sabres|blue jackets|blues|wild|avalanche|avs|stars|predators|preds|jets|flames|oilers|canucks|kraken|golden knights|knights|coyotes|sharks|ducks|kings/i], sport: 'NHL' },
     
-    // NFL - team names and league
-    { patterns: [/\bnfl\b/, /chiefs|eagles|49ers|niners|cowboys|bills|ravens|bengals|dolphins|lions|packers|jets|patriots|broncos|chargers|raiders|steelers|browns|texans|colts|jaguars|titans|commanders|giants|saints|panthers|falcons|buccaneers|bucs|seahawks|rams|cardinals|bears|vikings/i], sport: 'NFL' },
+    // NBA - team names and league (use "atlanta hawks" to avoid matching "blackhawks")
+    { patterns: [/\bnba\b/, /lakers|celtics|warriors|heat|bulls|knicks|nets|bucks|76ers|sixers|suns|nuggets|clippers|mavericks|rockets|grizzlies|timberwolves|pelicans|spurs|thunder|jazz|blazers|trail blazers|hornets|atlanta hawks|wizards|magic|pistons|cavaliers|raptors|pacers/i], sport: 'NBA' },
     
-    // NHL - team names and league
-    { patterns: [/\bnhl\b/, /maple leafs|canadiens|habs|bruins|rangers|islanders|devils|flyers|penguins|capitals|caps|hurricanes|canes|panthers|lightning|bolts|red wings|senators|sens|sabres|blue jackets|blackhawks|hawks|blues|wild|avalanche|avs|stars|predators|preds|jets|flames|oilers|canucks|kraken|golden knights|knights|coyotes|sharks|ducks|kings/i], sport: 'NHL' },
+    // NFL - team names and league (use "new york jets" context to avoid NHL jets confusion)
+    { patterns: [/\bnfl\b/, /chiefs|eagles|49ers|niners|cowboys|bills|ravens|bengals|dolphins|lions|packers|patriots|broncos|chargers|raiders|steelers|browns|texans|colts|jaguars|titans|commanders|giants|saints|panthers|falcons|buccaneers|bucs|seahawks|rams|cardinals|bears|vikings/i], sport: 'NFL' },
     
     // UFC/MMA - fighters and terms
     { patterns: [/\bufc\b/, /\bmma\b/, /adesanya|jones|pereira|volkanovski|makhachev|islam|strickland|chimaev|covington|diaz|mcgregor|usman|chandler|poirier|holloway|o'?malley|yan|sterling|pantoja|moreno|figueiredo|dvalishvili|merab|shevchenko|grasso|zhang weili|namajunas|nunes/i], sport: 'UFC' },
@@ -332,6 +332,12 @@ Deno.serve(async (req) => {
       qualifying.slice(0, 5).forEach((q, i) => {
         console.log(`  ${i + 1}. [${q.detectedSport}] ${q.event.title?.substring(0, 60) || q.market.question?.substring(0, 60)}`);
       });
+      
+      // Debug: Log first market structure to understand token ID paths
+      const sampleMarket = qualifying[0].market;
+      console.log(`[POLY-SYNC-24H] Sample market keys: ${Object.keys(sampleMarket).join(', ')}`);
+      console.log(`[POLY-SYNC-24H] Sample clobTokenIds: ${JSON.stringify(sampleMarket.clobTokenIds)}`);
+      console.log(`[POLY-SYNC-24H] Sample market data: ${JSON.stringify(sampleMarket).substring(0, 600)}`);
     }
 
     // Upsert qualifying events
@@ -374,13 +380,53 @@ Deno.serve(async (req) => {
       const teamHomeNormalized = teamHome ? normalizeTeamName(teamHome) : null;
       const teamAwayNormalized = teamAway ? normalizeTeamName(teamAway) : null;
 
-      // Extract token IDs from Gamma response (clobTokenIds field)
+      // Extract token IDs - try multiple paths from Gamma response
       let tokenIdYes: string | null = null;
       let tokenIdNo: string | null = null;
       
-      if (market.clobTokenIds && Array.isArray(market.clobTokenIds)) {
-        tokenIdYes = market.clobTokenIds[0] || null;
-        tokenIdNo = market.clobTokenIds[1] || null;
+      // Path 1: clobTokenIds - may be array or JSON string
+      if (market.clobTokenIds) {
+        let tokenIds = market.clobTokenIds;
+        // Parse if it's a JSON string
+        if (typeof tokenIds === 'string') {
+          try {
+            tokenIds = JSON.parse(tokenIds);
+          } catch (e) {
+            // Not valid JSON, skip
+          }
+        }
+        if (Array.isArray(tokenIds) && tokenIds.length >= 2) {
+          tokenIdYes = tokenIds[0] || null;
+          tokenIdNo = tokenIds[1] || null;
+        }
+      }
+      // Path 2: tokens array with token_id field
+      if (!tokenIdYes && market.tokens && Array.isArray(market.tokens) && market.tokens.length >= 2) {
+        tokenIdYes = market.tokens[0]?.token_id || market.tokens[0] || null;
+        tokenIdNo = market.tokens[1]?.token_id || market.tokens[1] || null;
+      }
+      // Path 3: outcomes array with clobTokenId or tokenId
+      if (!tokenIdYes && market.outcomes && Array.isArray(market.outcomes) && market.outcomes.length >= 2) {
+        tokenIdYes = market.outcomes[0]?.clobTokenId || market.outcomes[0]?.tokenId || null;
+        tokenIdNo = market.outcomes[1]?.clobTokenId || market.outcomes[1]?.tokenId || null;
+      }
+      
+      // Fallback: Fetch token IDs directly from CLOB markets endpoint if not found
+      if (!tokenIdYes && conditionId) {
+        try {
+          const clobResp = await fetch(`https://clob.polymarket.com/markets/${conditionId}`);
+          if (clobResp.ok) {
+            const clobData = await clobResp.json();
+            if (clobData.tokens && Array.isArray(clobData.tokens)) {
+              const yesToken = clobData.tokens.find((t: any) => t.outcome === 'Yes');
+              const noToken = clobData.tokens.find((t: any) => t.outcome === 'No');
+              tokenIdYes = yesToken?.token_id || null;
+              tokenIdNo = noToken?.token_id || null;
+            }
+          }
+        } catch (e) {
+          // Silent fail - token IDs not critical for basic sync
+        }
       }
       
       // Extract threshold for totals/spreads/props
