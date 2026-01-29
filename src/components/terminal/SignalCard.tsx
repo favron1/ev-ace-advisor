@@ -27,6 +27,12 @@ function formatVolume(volume: number | null | undefined): string {
   return `$${volume.toFixed(0)}`;
 }
 
+// Convert probability to decimal odds (dollar payout per $1)
+function toDecimalOdds(probability: number | null | undefined): string {
+  if (!probability || probability <= 0) return 'N/A';
+  return `$${(1 / probability).toFixed(2)}`;
+}
+
 // Format time ago
 function formatTimeAgo(dateStr: string | null | undefined): string {
   if (!dateStr) return 'N/A';
@@ -198,26 +204,37 @@ export function SignalCard({
             {/* True arbitrage - show execution decision with cost breakdown */}
             {isTrueArbitrage && signal.execution && (
               <div className="mt-3">
-                {/* Hero metrics row - trading terminal style */}
-                <div className="grid grid-cols-3 gap-4 mb-3 p-3 bg-muted/30 rounded-lg border border-border">
+                {/* Odds comparison row - decimal odds format */}
+                <div className="grid grid-cols-3 gap-2 mb-3 p-3 bg-muted/30 rounded-lg border border-border">
                   <div className="text-center">
                     <div className="text-2xl font-bold text-primary">
-                      {(polyYesPrice * 100).toFixed(0)}¢
+                      {toDecimalOdds(polyYesPrice)}
                     </div>
-                    <div className="text-xs text-muted-foreground">POLY YES</div>
+                    <div className="text-xs text-muted-foreground">
+                      ({(polyYesPrice * 100).toFixed(0)}¢ share)
+                    </div>
+                    <div className="text-xs font-medium text-muted-foreground mt-1">POLYMARKET</div>
+                  </div>
+                  <div className="text-center flex flex-col justify-center">
+                    <div className="text-lg text-muted-foreground font-medium">vs</div>
                   </div>
                   <div className="text-center">
                     <div className="text-2xl font-bold text-foreground">
-                      {(bookmakerProbFair * 100).toFixed(0)}%
+                      {toDecimalOdds(bookmakerProbFair)}
                     </div>
-                    <div className="text-xs text-muted-foreground">FAIR VALUE</div>
-                  </div>
-                  <div className="text-center">
-                    <div className="text-2xl font-bold text-muted-foreground">
-                      +{signal.edge_percent.toFixed(1)}%
+                    <div className="text-xs text-muted-foreground">
+                      ({(bookmakerProbFair * 100).toFixed(0)}% fair)
                     </div>
-                    <div className="text-xs text-muted-foreground">RAW EDGE</div>
+                    <div className="text-xs font-medium text-muted-foreground mt-1">SHARP BOOKS</div>
                   </div>
+                </div>
+                
+                {/* Edge callout */}
+                <div className="text-center mb-3 p-2 bg-green-500/10 rounded border border-green-500/30">
+                  <span className="text-sm text-muted-foreground">Edge per $1 bet: </span>
+                  <span className="text-lg font-bold text-green-500">
+                    +${polyYesPrice && bookmakerProbFair ? ((1/polyYesPrice) - (1/bookmakerProbFair)).toFixed(2) : 'N/A'}
+                  </span>
                 </div>
                 
                 {/* Quality indicators row */}
