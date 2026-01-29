@@ -1,182 +1,90 @@
 
 
-## Unified "Scan Once, Monitor Continuously" Architecture
+## Revert to 24-Hour Window + Expand to ALL Market Types
 
-### Current Problem
+### Summary
 
-The system has multiple overlapping functions with different time windows:
-- `polymarket-sync-24h` only captures events ending within 24 hours
-- `watch-mode-poll` monitors a separate `event_watch_state` table
-- `polymarket-monitor` runs independently every 5 minutes
-
-This creates gaps where markets are discovered too late (missing early sharp moves) and complexity in understanding what's being monitored.
+The current system was recently expanded to a 7-day window but is restricted to H2H markets only. You want to go back to a **24-hour window** but capture **ALL market types** offered on Polymarket (H2H, Totals, Spreads, Player Props). This gives you comprehensive coverage of every tradeable opportunity within the critical execution window.
 
 ---
 
-### Proposed Solution
+### What Changes
 
-```text
-┌─────────────────────────────────────────────────────────────────────┐
-│                         FULL SCAN (Manual)                          │
-│  Discover ALL Polymarket sports markets ending within 7 days        │
-│  → Upsert into polymarket_h2h_cache with status='watching'          │
-└─────────────────────────┬───────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                    BACKGROUND MONITOR (pg_cron)                     │
-│  Runs every 5 minutes, processes ALL 'watching' markets             │
-│                                                                     │
-│  For each market:                                                   │
-│  1. Get latest bookmaker H2H odds from bookmaker_signals            │
-│  2. Calculate edge vs Polymarket price                              │
-│  3. Check sharp_book_snapshots for coordinated movement             │
-│                                                                     │
-│  TRIGGER CONDITIONS:                                                │
-│  ├── Edge Trigger: raw_edge >= 5%                                   │
-│  └── Movement Trigger: 2+ sharp books moved same direction          │
-│                                                                     │
-│  Either trigger → Surface signal → SMS if ELITE/STRONG              │
-└─────────────────────────────────────────────────────────────────────┘
-```
+| Setting | Current | Proposed |
+|---------|---------|----------|
+| Time Window | 7 days | **24 hours** |
+| Market Types | H2H only | **All (H2H, Totals, Spreads, Props)** |
+| Sports Coverage | All sports | All sports (unchanged) |
+| Movement Tracking | All markets | All markets (unchanged) |
 
 ---
 
-### Implementation Details
+### Why 24 Hours + All Markets
 
-#### Step 1: Expand polymarket-sync-24h to 7-Day Window
+- **24-hour window**: Sharp money moves happen closest to event start; longer horizons add noise without increasing actionable edges
+- **All market types**: Polymarket offers Totals (Over/Under 220.5), Spreads (-5.5), and Props - each represents an independent edge opportunity
+- **Comprehensive coverage**: Every market within 24 hours gets monitored for both price edges AND bookmaker movement
 
-**File: `supabase/functions/polymarket-sync-24h/index.ts`**
+---
 
+### Technical Changes
+
+#### File: `supabase/functions/polymarket-sync-24h/index.ts`
+
+**Change 1: Revert to 24-hour window**
 ```typescript
-// Change from 24 hours to 7 days
+// BEFORE (current):
 const in7Days = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
-// Add status='watching' for continuous monitoring
-status: 'watching',
+// AFTER:
+const in24Hours = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 ```
 
-This ensures ALL upcoming sports events are captured when you run a Full Scan.
-
-#### Step 2: Consolidate into Single Background Monitor
-
-**File: `supabase/functions/polymarket-monitor/index.ts`**
-
-Update to process ALL markets with `status='watching'`:
-
+**Change 2: Process ALL markets per event (not just H2H)**
 ```typescript
-// Query ALL watched markets (not just 24h window)
-const { data: watchedMarkets } = await supabase
-  .from('polymarket_h2h_cache')
-  .select('*')
-  .in('status', ['active', 'watching'])
-  .gte('volume', 5000)
-  .order('event_date', { ascending: true });
+// BEFORE: Only finds H2H market, skips if not found
+const h2hMarket = markets.find(...); // Filters out totals/spreads
+if (!h2hMarket) continue;
 
-// For each market:
-// 1. Match to bookmaker_signals (H2H data)
-// 2. Calculate edge
-// 3. Query sharp_book_snapshots for movement
-// 4. Apply trigger logic
-```
-
-#### Step 3: Dual Trigger System
-
-```typescript
-interface TriggerResult {
-  triggered: boolean;
-  reason: 'edge' | 'movement' | 'both' | null;
-  edge_pct: number;
-  movement_velocity: number;
-  books_confirming: number;
-}
-
-function checkTriggers(
-  polyPrice: number,
-  bookmakerFairProb: number,
-  movementData: MovementResult
-): TriggerResult {
-  const rawEdge = (bookmakerFairProb - polyPrice) * 100;
-  
-  // Edge trigger: >= 5% raw edge
-  const edgeTriggered = rawEdge >= 5.0;
-  
-  // Movement trigger: coordinated sharp book move
-  const movementTriggered = movementData.triggered && movementData.booksConfirming >= 2;
-  
-  if (edgeTriggered && movementTriggered) {
-    return { triggered: true, reason: 'both', ... };
-  } else if (edgeTriggered) {
-    return { triggered: true, reason: 'edge', ... };
-  } else if (movementTriggered) {
-    return { triggered: true, reason: 'movement', ... };
-  }
-  
-  return { triggered: false, reason: null, ... };
+// AFTER: Process ALL valid markets from each event
+for (const market of markets) {
+  const marketType = detectMarketType(market.question);
+  // Upsert each market separately with its own condition_id
+  // Track H2H, total, spread, player_prop types
 }
 ```
 
-#### Step 4: Alert Prioritization
+**Change 3: Update logging to reflect new scope**
+- Change log messages from "No H2H market" to "Market type: X"
+- Track stats for each market type discovered
+
+#### File: `supabase/functions/polymarket-monitor/index.ts`
+
+**Change: Support all market types in matching logic**
+- The monitor already fetches `h2h,spreads,totals` from bookmakers
+- Needs to match Polymarket totals to bookmaker totals (same threshold)
+- Needs to match Polymarket spreads to bookmaker spreads (same line)
+
+---
+
+### Data Flow After Change
 
 ```text
-PRIORITY MATRIX:
-┌──────────────────────┬───────────────┬──────────────┐
-│ Trigger Type         │ Time to Start │ Alert Level  │
-├──────────────────────┼───────────────┼──────────────┤
-│ Edge + Movement      │ < 24h         │ SMS + Sound  │
-│ Edge + Movement      │ > 24h         │ UI Only      │
-│ Edge Only (>5%)      │ < 12h         │ SMS          │
-│ Edge Only (>5%)      │ > 12h         │ UI Only      │
-│ Movement Only        │ < 6h          │ SMS          │
-│ Movement Only        │ > 6h          │ UI Badge     │
-└──────────────────────┴───────────────┴──────────────┘
+FULL SCAN → Fetch ALL Polymarket sports markets ending in 24h
+         → For EACH event:
+              → Process H2H market (if exists)
+              → Process Total (O/U) market (if exists)
+              → Process Spread market (if exists)
+              → Process Player Props (if exists)
+         → Upsert ALL to polymarket_h2h_cache
+         
+BACKGROUND MONITOR (every 5 min)
+         → Load all watching markets (H2H + Totals + Spreads)
+         → Fetch bookmaker odds (h2h,spreads,totals)
+         → Match by market type + threshold
+         → Calculate edge per market type
+         → Trigger on Edge ≥5% OR Movement confirmed
 ```
-
----
-
-### Database Changes
-
-Add a `monitoring_status` column to track each market's state:
-
-```sql
-ALTER TABLE polymarket_h2h_cache 
-ADD COLUMN IF NOT EXISTS monitoring_status text DEFAULT 'idle';
-
--- Possible values:
--- 'idle' - Not actively monitored
--- 'watching' - In watchlist, checking for triggers
--- 'triggered' - Edge or movement detected, signal active
--- 'executed' - User placed bet
-```
-
----
-
-### pg_cron Schedule Update
-
-Simplify to a single consolidated job:
-
-| Job | Schedule | Function |
-|-----|----------|----------|
-| `unified-monitor` | Every 5 min | `polymarket-monitor` (processes all watched markets) |
-| `ingest-odds` | Every 5 min | Captures bookmaker H2H + sharp book snapshots |
-
-Remove redundant jobs:
-- `watch-mode-poll` → merged into unified monitor
-- `active-mode-poll` → merged into unified monitor
-
----
-
-### User Flow After Implementation
-
-1. **You click "Full Scan"** → System fetches ALL Polymarket sports events (7-day window)
-2. **~500+ markets added to watchlist** → Stored with `status='watching'`
-3. **Every 5 minutes (background)**:
-   - `ingest-odds` captures fresh bookmaker prices + sharp book snapshots
-   - `polymarket-monitor` scans all watched markets for triggers
-4. **When trigger fires** (edge OR movement):
-   - Signal created in `signal_opportunities`
-   - If near-term + high conviction → SMS sent
-5. **You get SMS** → Review in terminal → Execute or dismiss
 
 ---
 
@@ -184,10 +92,10 @@ Remove redundant jobs:
 
 | Metric | Before | After |
 |--------|--------|-------|
-| Markets monitored | ~25 (24h only) | 500+ (7-day window) |
-| Movement detection coverage | Limited | Full |
-| Time to detect sharp move | Varies | < 5 minutes |
-| Duplicate polling functions | 3 | 1 |
+| Time window | 7 days | 24 hours |
+| Markets per event | 1 (H2H only) | 3-5 (H2H + Totals + Spreads + Props) |
+| Total markets monitored | ~145 | ~300-500 |
+| Movement tracking | All | All (unchanged) |
 
 ---
 
@@ -195,9 +103,15 @@ Remove redundant jobs:
 
 | File | Changes |
 |------|---------|
-| `supabase/functions/polymarket-sync-24h/index.ts` | Expand to 7-day window, set `status='watching'` |
-| `supabase/functions/polymarket-monitor/index.ts` | Query all watched markets, add dual trigger logic |
-| `supabase/functions/watch-mode-poll/index.ts` | Can be deprecated after merge |
-| `supabase/functions/active-mode-poll/index.ts` | Can be deprecated after merge |
-| Database migration | Add `monitoring_status` column |
+| `supabase/functions/polymarket-sync-24h/index.ts` | Revert to 24h window, process ALL markets per event |
+| `supabase/functions/polymarket-monitor/index.ts` | Add Totals/Spreads matching logic (threshold-based) |
+
+---
+
+### Edge Cases Handled
+
+- **Multiple markets per event**: Each gets its own `condition_id` entry in cache
+- **Threshold matching**: Totals match on "Over 220.5" ↔ bookmaker "220.5" line
+- **Spread matching**: Spreads match on "-5.5" ↔ bookmaker "-5.5" line
+- **No double-counting**: Each market type tracked independently
 
