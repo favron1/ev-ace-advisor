@@ -39,10 +39,24 @@ function buildEnhancedMessage(req: SmsAlertRequest): string {
     const volume = req.poly_volume ? `$${(req.poly_volume / 1000).toFixed(0)}K vol` : '';
     const liveScoreUrl = buildLiveScoreUrl(req.event_name);
     
-    return `🎯 EDGE: ${req.event_name}
-Poly: ${(req.poly_price * 100).toFixed(0)}¢ ${volume ? `(${volume})` : ''} | Fair: ${(req.bookmaker_fair_prob * 100).toFixed(0)}% | Edge: +${req.raw_edge?.toFixed(1) || '0'}%
-${req.time_until_start ? `Starts: ${req.time_until_start}` : ''}
-📺 ${liveScoreUrl}`.trim();
+    // Calculate Net EV if we have stake amount and raw edge
+    const netEv = (req.stake_amount && req.raw_edge) 
+      ? `+$${((req.raw_edge / 100) * req.stake_amount).toFixed(2)}`
+      : null;
+    
+    const lines = [
+      `📺 ${liveScoreUrl}`,
+      `🎯 EDGE DETECTED: ${req.event_name}`,
+      `Market: ${req.market || 'H2H'}`,
+      `Polymarket: ${(req.poly_price * 100).toFixed(0)}¢ ${volume ? `(${volume})` : ''}`,
+      `Bookmaker Fair: ${(req.bookmaker_fair_prob * 100).toFixed(0)}%`,
+      `Raw Edge: +${req.raw_edge?.toFixed(1) || '0'}%`,
+      netEv ? `Net EV: ${netEv} on $${req.stake_amount} stake` : null,
+      req.time_until_start ? `Time: ${req.time_until_start}` : null,
+      `ACT NOW - window may close`
+    ].filter(Boolean);
+    
+    return lines.join('\n');
   }
   
   return req.message;
