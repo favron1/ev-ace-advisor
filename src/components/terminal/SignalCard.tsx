@@ -284,8 +284,10 @@ export function SignalCard({
   const isStale = isStalePolymarket(polyUpdatedAt);
   const hasLowVolume = isLowVolume(polyVolume);
   
-  // Countdown timer - extract hours until event from signal_factors
-  const hoursUntilEvent = signalFactors?.hours_until_event as number | undefined;
+  // Countdown timer - calculate from expires_at (event start time) or use signal_factors
+  const hoursUntilEvent = signal.expires_at 
+    ? (new Date(signal.expires_at).getTime() - Date.now()) / (1000 * 60 * 60)
+    : signalFactors?.hours_until_event as number | undefined;
   const countdown = formatCountdown(hoursUntilEvent);
   
   // Determine display state
