@@ -446,12 +446,18 @@ Deno.serve(async (req) => {
             console.log(`[POLY-MONITOR] Edge found: ${event.event_name} - Raw: ${(rawEdge * 100).toFixed(1)}%, Net: ${(netEdge * 100).toFixed(1)}%`);
             
             if (netEdge >= 0.02) {
-              edgesFound++;
+              // Extract team name: prefer match result, fallback to cache extracted_entity
+              const teamName = match?.teamName || cache?.extracted_entity || null;
               
-              // Create signal
-              // Extract team name from match result
-              const teamName = match?.teamName || null;
+              // CRITICAL: Skip signal creation if we can't determine the bet side
+              if (!teamName) {
+                console.log(`[POLY-MONITOR] SKIPPING signal for ${event.event_name} - no team name could be determined`);
+                continue;
+              }
+              
+              edgesFound++;
 
+              // Create signal with validated team name
               const { data: signal, error: signalError } = await supabase
                 .from('signal_opportunities')
                 .insert({
