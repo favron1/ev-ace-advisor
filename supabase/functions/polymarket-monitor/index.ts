@@ -690,9 +690,26 @@ Deno.serve(async (req) => {
         let teamName: string | null = null;
         
         if (match) {
-          eventsMatched++;
           bookmakerFairProb = calculateConsensusFairProb(match.game, match.marketKey, match.targetIndex);
           teamName = match.teamName;
+          
+          // CRITICAL FIX #1: Team participant validation
+          // Validate that matched team is actually in the Polymarket event name
+          // This prevents cross-sport mismatches (e.g., "Blackhawks vs. Penguins" matching "Atlanta Hawks")
+          if (teamName) {
+            const eventNorm = normalizeName(event.event_name);
+            const teamNorm = normalizeName(teamName);
+            const teamWords = teamNorm.split(' ').filter(w => w.length > 2);
+            const lastWord = teamWords[teamWords.length - 1] || '';
+            
+            // Team's last word (e.g., "Lightning", "Oilers", "Hawks") must appear in event name
+            if (lastWord && !eventNorm.includes(lastWord)) {
+              console.log(`[POLY-MONITOR] INVALID MATCH: "${teamName}" not found in event "${event.event_name}" - DROPPING`);
+              continue;
+            }
+          }
+          
+          eventsMatched++;
         }
 
         // Update event state and cache with CLOB data
@@ -754,6 +771,23 @@ Deno.serve(async (req) => {
           // ========== END DIRECTIONAL CALCULATION ==========
           
           if (rawEdge >= 0.02) {
+            // CRITICAL FIX #3: Staleness & high-prob edge gating
+            // Gate against artifact edges on high-probability outcomes
+            const staleness = now.getTime() - new Date(event.last_poly_refresh || now.toISOString()).getTime();
+            const stalenessMinutes = staleness / 60000;
+            
+            // High probability + stale = likely artifact
+            if (bookmakerFairProb >= 0.85 && stalenessMinutes > 3) {
+              console.log(`[POLY-MONITOR] Skipping high-prob edge for ${event.event_name} - stale price (${stalenessMinutes.toFixed(0)}m old, ${(bookmakerFairProb * 100).toFixed(0)}% fair prob)`);
+              continue;
+            }
+            
+            // Cap extreme edges on very high probability outcomes
+            if (bookmakerFairProb >= 0.90 && rawEdge > 0.40) {
+              console.log(`[POLY-MONITOR] Capping artifact edge for ${event.event_name} - raw ${(rawEdge * 100).toFixed(1)}% on ${(bookmakerFairProb * 100).toFixed(0)}% prob`);
+              rawEdge = 0.40; // Cap at 40%
+            }
+            
             const { netEdge } = calculateNetEdge(rawEdge, liveVolume, stakeAmount, spreadPct);
             const signalTier = calculateSignalTier(movement.triggered, netEdge);
             
@@ -829,6 +863,15 @@ Deno.serve(async (req) => {
                 bet_direction: betSide === 'YES' ? 'BUY_YES' : 'BUY_NO',
               },
             };
+
+            // CRITICAL FIX #2: One-signal-per-event exclusivity
+            // Before creating/updating signal, expire any opposing signal for this event
+            await supabase
+              .from('signal_opportunities')
+              .update({ status: 'expired' })
+              .eq('event_name', event.event_name)
+              .eq('status', 'active')
+              .neq('recommended_outcome', teamName);
 
             if (existingSignal) {
               // UPDATE existing active signal with fresh data

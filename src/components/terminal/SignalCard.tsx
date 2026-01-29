@@ -509,6 +509,14 @@ export function SignalCard({
                     {hasLowVolume && 'Low liquidity.'}
                   </div>
                 )}
+                
+                {/* High-prob artifact edge warning */}
+                {bookmakerProbFair >= 0.85 && signal.edge_percent > 40 && (
+                  <div className="mt-2 text-xs text-yellow-500 flex items-center gap-1">
+                    <AlertCircle className="h-3 w-3" />
+                    ⚠️ High-prob edge ({(bookmakerProbFair * 100).toFixed(0)}% fair) - verify manually before trading
+                  </div>
+                )}
               </div>
             )}
             
