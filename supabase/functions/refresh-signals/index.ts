@@ -10,6 +10,7 @@ interface SignalOpportunity {
   expires_at: string | null;
   urgency: string;
   signal_factors: Record<string, any>;
+  polymarket_condition_id?: string | null;
 }
 
 function calculateUrgency(hoursUntilEvent: number): string {
@@ -40,7 +41,7 @@ Deno.serve(async (req) => {
     // Fetch all active signals
     const { data: signals, error: fetchError } = await supabase
       .from('signal_opportunities')
-      .select('id, expires_at, urgency, signal_factors')
+      .select('id, expires_at, urgency, signal_factors, polymarket_condition_id')
       .eq('status', 'active');
 
     if (fetchError) throw fetchError;
@@ -60,10 +61,60 @@ Deno.serve(async (req) => {
 
     const now = new Date();
     const toExpire: string[] = [];
-    const toUpdate: { id: string; urgency: string; signal_factors: Record<string, any> }[] = [];
+    const toUpdate: { id: string; urgency: string; signal_factors: Record<string, any>; expires_at?: string }[] = [];
     let unchanged = 0;
 
+    // Backfill missing expires_at using event_watch_state (needed for kickoff countdown)
+    const missingExpiryConditionIds = (signals as SignalOpportunity[])
+      .filter(s => !s.expires_at && s.polymarket_condition_id)
+      .map(s => s.polymarket_condition_id as string);
+
+    const commenceTimeByConditionId = new Map<string, string>();
+
+    if (missingExpiryConditionIds.length > 0) {
+      const { data: events, error: eventsError } = await supabase
+        .from('event_watch_state')
+        .select('polymarket_condition_id, commence_time')
+        .in('polymarket_condition_id', missingExpiryConditionIds)
+        .not('commence_time', 'is', null);
+
+      if (eventsError) {
+        console.error('Error backfilling expires_at from event_watch_state:', eventsError);
+      } else {
+        for (const e of events || []) {
+          if (e.polymarket_condition_id && e.commence_time) {
+            commenceTimeByConditionId.set(e.polymarket_condition_id, e.commence_time);
+          }
+        }
+      }
+    }
+
     for (const signal of signals as SignalOpportunity[]) {
+      // If expires_at is missing, try to backfill it from the monitored event
+      if (!signal.expires_at && signal.polymarket_condition_id) {
+        const commence = commenceTimeByConditionId.get(signal.polymarket_condition_id);
+        if (commence) {
+          const expiresAt = new Date(commence);
+          const hoursUntilEvent = (expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60);
+          const newUrgency = calculateUrgency(hoursUntilEvent);
+          const newTimeLabel = getTimeLabel(hoursUntilEvent);
+
+          const updatedFactors = {
+            ...signal.signal_factors,
+            time_label: newTimeLabel,
+            hours_until_event: Math.round(hoursUntilEvent * 10) / 10
+          };
+
+          toUpdate.push({
+            id: signal.id,
+            urgency: newUrgency,
+            signal_factors: updatedFactors,
+            expires_at: commence,
+          });
+          continue;
+        }
+      }
+
       // Check if event has started (expired)
       if (signal.expires_at) {
         const expiresAt = new Date(signal.expires_at);
@@ -122,7 +173,11 @@ Deno.serve(async (req) => {
     for (const update of toUpdate) {
       const { error: updateError } = await supabase
         .from('signal_opportunities')
-        .update({ urgency: update.urgency, signal_factors: update.signal_factors })
+        .update({
+          urgency: update.urgency,
+          signal_factors: update.signal_factors,
+          ...(update.expires_at ? { expires_at: update.expires_at } : {}),
+        })
         .eq('id', update.id);
 
       if (updateError) {
