@@ -219,18 +219,18 @@ Deno.serve(async (req) => {
   }
 
   const startTime = Date.now();
-  console.log('[POLY-SYNC-24H] Starting universal sports scan with 7-DAY window...');
+  console.log('[POLY-SYNC-24H] Starting universal sports scan with 24-HOUR window + ALL market types...');
 
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // Calculate 7-DAY window (expanded from 24h for comprehensive coverage)
+    // Calculate 24-HOUR window (focused on actionable events)
     const now = new Date();
-    const in7Days = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const in24Hours = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
-    console.log(`[POLY-SYNC-24H] Window: now to ${in7Days.toISOString()} (7 days)`);
+    console.log(`[POLY-SYNC-24H] Window: now to ${in24Hours.toISOString()} (24 hours)`);
 
     // Fetch sports events using tag_slug=sports filter
     let allEvents: any[] = [];
@@ -271,12 +271,13 @@ Deno.serve(async (req) => {
       console.log(`  ${i + 1}. title="${e.title || 'N/A'}" endDate="${e.endDate || 'N/A'}"`);
     });
 
-    // Filter: ends within 7 DAYS (sports filter already applied via tag_slug)
+    // Filter: ends within 24 HOURS (sports filter already applied via tag_slug)
+    // Now process ALL market types, not just H2H
     const qualifying: any[] = [];
     let statsNoEndDate = 0;
     let statsOutsideWindow = 0;
     let statsNoMarkets = 0;
-    let statsNoH2H = 0;
+    let statsByMarketType: Record<string, number> = { h2h: 0, total: 0, spread: 0, player_prop: 0, futures: 0 };
 
     for (const event of allEvents) {
       const title = event.title || '';
@@ -292,9 +293,9 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      // End date must be within 7 DAYS (expanded window for early movement detection)
+      // End date must be within 24 HOURS (focused window for actionable events)
       const endDate = new Date(event.endDate);
-      if (endDate > in7Days || endDate < now) {
+      if (endDate > in24Hours || endDate < now) {
         statsOutsideWindow++;
         continue;
       }
@@ -306,101 +307,71 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      // NEW: Find an actual H2H/moneyline market, not O/U or spread
-      // Iterate all markets in the event to find a true H2H market
-      const h2hMarket = markets.find((m: any) => {
-        // Use Gamma API's sportsMarketType field if available
-        const gammaType = (m.sportsMarketType || '').toLowerCase();
-        const mQuestion = (m.question || '').toLowerCase();
+      // NEW: Process ALL valid markets from this event (not just H2H)
+      for (const market of markets) {
+        const mQuestion = (market.question || '').toLowerCase();
         
-        // Skip explicit totals and spreads
-        if (gammaType.includes('total') || gammaType.includes('spread') || 
-            gammaType.includes('over') || gammaType.includes('under')) {
-          return false;
+        // Detect market type using Gamma's field first, then fallback to regex
+        const gammaType = (market.sportsMarketType || '').toLowerCase();
+        let marketType: string;
+        
+        if (gammaType === 'moneyline' || gammaType === 'h2h' || gammaType === 'winner') {
+          marketType = 'h2h';
+        } else if (gammaType.includes('total') || gammaType.includes('over') || gammaType.includes('under')) {
+          marketType = 'total';
+        } else if (gammaType.includes('spread') || gammaType.includes('handicap')) {
+          marketType = 'spread';
+        } else {
+          // Fall back to regex-based detection
+          marketType = detectMarketType(market.question || '');
         }
         
-        // Skip if question contains O/U or spread patterns
-        if (/over\s+\d+|under\s+\d+|o\/u|spread|handicap|\+\d+\.5|\-\d+\.5/i.test(mQuestion)) {
-          return false;
+        // Skip futures markets (championship, MVP, etc.) - not tradable in 24h window
+        if (marketType === 'futures') {
+          continue;
         }
         
-        // Accept moneyline, h2h, or winner markets
-        if (gammaType === 'h2h' || gammaType === 'moneyline' || gammaType === 'winner') {
-          return true;
-        }
+        // Track stats
+        statsByMarketType[marketType] = (statsByMarketType[marketType] || 0) + 1;
         
-        // Accept generic "vs" pattern questions (likely H2H)
-        if (/\bvs\.?\s+|\bbeat\b|\bwin\s+(?:against|vs)/i.test(mQuestion)) {
-          return true;
-        }
-        
-        // If no explicit type, accept only if it looks like a simple binary outcome
-        // and NOT a totals question
-        if (!gammaType && !/\d+\.?\d*\s*(points|goals|runs|score)/i.test(mQuestion)) {
-          return true;
-        }
-        
-        return false;
-      });
-
-      if (!h2hMarket) {
-        statsNoH2H++;
-        console.log(`[POLY-SYNC-24H] No H2H market for: ${title} (has ${markets.length} markets)`);
-        continue; // This event doesn't have an H2H market on Poly
+        qualifying.push({
+          event,
+          market,
+          endDate,
+          detectedSport,
+          marketType,
+        });
       }
-      
-      qualifying.push({
-        event,
-        market: h2hMarket,
-        endDate,
-        detectedSport,
-      });
     }
 
     console.log(`[POLY-SYNC-24H] Filtering stats:`);
     console.log(`  - No end date: ${statsNoEndDate}`);
-    console.log(`  - Outside 7-day window: ${statsOutsideWindow}`);
+    console.log(`  - Outside 24h window: ${statsOutsideWindow}`);
     console.log(`  - No markets: ${statsNoMarkets}`);
-    console.log(`  - No H2H market: ${statsNoH2H}`);
-    console.log(`  - QUALIFYING: ${qualifying.length}`);
+    console.log(`  - Markets by type: ${JSON.stringify(statsByMarketType)}`);
+    console.log(`  - QUALIFYING MARKETS: ${qualifying.length}`);
 
-    // Log first few qualifying events for debugging
+    // Log sample qualifying events by type
     if (qualifying.length > 0) {
-      console.log(`[POLY-SYNC-24H] Sample qualifying events:`);
-      qualifying.slice(0, 5).forEach((q, i) => {
-        console.log(`  ${i + 1}. [${q.detectedSport}] ${q.event.title?.substring(0, 60) || q.market.question?.substring(0, 60)}`);
-      });
+      console.log(`[POLY-SYNC-24H] Sample qualifying markets:`);
+      const sampleH2H = qualifying.filter(q => q.marketType === 'h2h').slice(0, 2);
+      const sampleTotal = qualifying.filter(q => q.marketType === 'total').slice(0, 2);
+      const sampleSpread = qualifying.filter(q => q.marketType === 'spread').slice(0, 2);
       
-      // Debug: Log first market structure to understand token ID paths
-      const sampleMarket = qualifying[0].market;
-      console.log(`[POLY-SYNC-24H] Sample market keys: ${Object.keys(sampleMarket).join(', ')}`);
-      console.log(`[POLY-SYNC-24H] Sample clobTokenIds: ${JSON.stringify(sampleMarket.clobTokenIds)}`);
-      console.log(`[POLY-SYNC-24H] Sample market data: ${JSON.stringify(sampleMarket).substring(0, 600)}`);
+      [...sampleH2H, ...sampleTotal, ...sampleSpread].forEach((q, i) => {
+        console.log(`  ${i + 1}. [${q.detectedSport}/${q.marketType}] ${q.market.question?.substring(0, 60) || q.event.title?.substring(0, 60)}`);
+      });
     }
 
     // Upsert qualifying events
     let upserted = 0;
     let monitored = 0;
 
-    for (const { event, market, endDate, detectedSport } of qualifying) {
+    for (const { event, market, endDate, detectedSport, marketType } of qualifying) {
       const conditionId = market.conditionId || market.id || event.id;
       const question = market.question || event.question || '';
       const title = event.title || '';
       
-      // Detect market type - prefer Gamma API's sportsMarketType field
-      const gammaMarketType = (market.sportsMarketType || '').toLowerCase();
-      let marketType: string;
-      
-      if (gammaMarketType === 'moneyline' || gammaMarketType === 'h2h' || gammaMarketType === 'winner') {
-        marketType = 'h2h';
-      } else if (gammaMarketType.includes('total') || gammaMarketType.includes('over') || gammaMarketType.includes('under')) {
-        marketType = 'total';
-      } else if (gammaMarketType.includes('spread') || gammaMarketType.includes('handicap')) {
-        marketType = 'spread';
-      } else {
-        // Fall back to regex-based detection
-        marketType = detectMarketType(question);
-      }
       const extractedEntity = extractEntity(question, title);
 
       // Parse prices
@@ -581,7 +552,7 @@ Deno.serve(async (req) => {
           no_end_date: statsNoEndDate,
           outside_window: statsOutsideWindow,
           no_markets: statsNoMarkets,
-          no_h2h_market: statsNoH2H,
+          markets_by_type: statsByMarketType,
         },
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
