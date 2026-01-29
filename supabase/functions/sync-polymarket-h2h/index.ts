@@ -102,6 +102,40 @@ const TEAM_ALIASES: Record<string, string[]> = {
   'utah jazz': ['jazz', 'utah'],
   'washington wizards': ['wizards', 'washington'],
   
+  // NHL Teams
+  'washington capitals': ['capitals', 'caps'],
+  'detroit red wings': ['red wings', 'wings', 'detroit'],
+  'tampa bay lightning': ['lightning', 'bolts', 'tampa bay'],
+  'winnipeg jets': ['jets', 'winnipeg'],
+  'new jersey devils': ['devils', 'nj devils', 'new jersey'],
+  'nashville predators': ['predators', 'preds', 'nashville'],
+  'toronto maple leafs': ['maple leafs', 'leafs', 'toronto'],
+  'seattle kraken': ['kraken', 'seattle'],
+  'colorado avalanche': ['avalanche', 'avs', 'colorado'],
+  'montreal canadiens': ['canadiens', 'habs', 'montreal'],
+  'dallas stars': ['stars'],
+  'vegas golden knights': ['golden knights', 'knights', 'vegas'],
+  'philadelphia flyers': ['flyers', 'philly'],
+  'boston bruins': ['bruins', 'boston'],
+  'florida panthers': ['panthers', 'florida', 'cats'],
+  'st louis blues': ['blues', 'st louis'],
+  'carolina hurricanes': ['hurricanes', 'canes', 'carolina'],
+  'chicago blackhawks': ['blackhawks', 'hawks'],
+  'pittsburgh penguins': ['penguins', 'pens', 'pittsburgh'],
+  'san jose sharks': ['sharks', 'san jose'],
+  'edmonton oilers': ['oilers', 'edmonton'],
+  'calgary flames': ['flames', 'calgary'],
+  'minnesota wild': ['wild'],
+  'anaheim ducks': ['ducks', 'anaheim'],
+  'vancouver canucks': ['canucks', 'vancouver'],
+  'new york islanders': ['islanders', 'isles', 'ny islanders'],
+  'new york rangers': ['rangers', 'ny rangers'],
+  'los angeles kings': ['la kings'],
+  'buffalo sabres': ['sabres', 'buffalo'],
+  'utah hockey club': ['utah', 'utah hc'],
+  'ottawa senators': ['senators', 'sens', 'ottawa'],
+  'columbus blue jackets': ['blue jackets', 'cbj', 'columbus'],
+  
   // Tennis players
   'jannik sinner': ['sinner', 'jannik'],
   'carlos alcaraz': ['alcaraz', 'carlos'],
@@ -127,11 +161,26 @@ interface PolymarketMarket {
   conditionId: string;
   question: string;
   outcomePrices?: string | number[];
+  clobTokenIds?: string | string[];
+  tokens?: Array<{ token_id: string; outcome: string }>;
   volume?: string | number;
   liquidity?: string | number;
   active?: boolean;
   closed?: boolean;
   lastUpdateTimestamp?: string;
+}
+
+// CLOB API types
+interface ClobPriceRequest {
+  token_id: string;
+  side: 'BUY' | 'SELL';
+}
+
+interface ClobPriceResponse {
+  [tokenId: string]: {
+    BUY?: string;
+    SELL?: string;
+  };
 }
 
 interface ExtractedTeams {
@@ -332,6 +381,83 @@ function parsePrices(market: PolymarketMarket): { yesPrice: number; noPrice: num
   return { yesPrice, noPrice };
 }
 
+// Extract token IDs from market data
+function extractTokenIds(market: PolymarketMarket): { yesTokenId: string | null; noTokenId: string | null } {
+  let yesTokenId: string | null = null;
+  let noTokenId: string | null = null;
+  
+  // Try clobTokenIds first (can be stringified JSON or array)
+  if (market.clobTokenIds) {
+    try {
+      const tokenIds = typeof market.clobTokenIds === 'string'
+        ? JSON.parse(market.clobTokenIds)
+        : market.clobTokenIds;
+      
+      if (Array.isArray(tokenIds) && tokenIds.length >= 2) {
+        yesTokenId = String(tokenIds[0]);
+        noTokenId = String(tokenIds[1]);
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }
+  
+  // Fallback to tokens array
+  if (!yesTokenId && market.tokens && Array.isArray(market.tokens)) {
+    for (const token of market.tokens) {
+      const outcome = token.outcome?.toLowerCase();
+      if (outcome === 'yes' && token.token_id) {
+        yesTokenId = token.token_id;
+      } else if (outcome === 'no' && token.token_id) {
+        noTokenId = token.token_id;
+      }
+    }
+  }
+  
+  return { yesTokenId, noTokenId };
+}
+
+// Batch fetch CLOB prices for token IDs
+async function fetchClobPrices(tokenIds: string[]): Promise<ClobPriceResponse> {
+  if (tokenIds.length === 0) return {};
+  
+  const CLOB_API_BASE = 'https://clob.polymarket.com';
+  const batchSize = 50; // CLOB API limit per request
+  const allPrices: ClobPriceResponse = {};
+  
+  for (let i = 0; i < tokenIds.length; i += batchSize) {
+    const batch = tokenIds.slice(i, i + batchSize);
+    const requestBody: ClobPriceRequest[] = batch.map(token_id => ({
+      token_id,
+      side: 'BUY' as const
+    }));
+    
+    try {
+      const response = await fetch(`${CLOB_API_BASE}/prices`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
+      });
+      
+      if (response.ok) {
+        const prices = await response.json();
+        Object.assign(allPrices, prices);
+      } else {
+        console.warn(`[CLOB] Batch ${i} failed: ${response.status}`);
+      }
+    } catch (error) {
+      console.warn(`[CLOB] Batch ${i} error:`, error);
+    }
+    
+    // Small delay between batches
+    if (i + batchSize < tokenIds.length) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+  
+  return allPrices;
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
@@ -424,11 +550,11 @@ Deno.serve(async (req) => {
           continue;
         }
 
-        // Parse prices
+        // Parse prices (may be placeholder - we'll refresh from CLOB later)
         const { yesPrice, noPrice } = parsePrices(market);
         
-        // Skip markets with no real pricing
-        if (yesPrice === 0.5 && noPrice === 0.5) continue;
+        // Extract token IDs for CLOB price refresh
+        const { yesTokenId, noTokenId } = extractTokenIds(market);
 
         // Detect sport category
         const sportCategory = detectSportCategory(title, question);
@@ -453,6 +579,8 @@ Deno.serve(async (req) => {
           event_date: eventDate?.toISOString() || null,
           yes_price: yesPrice,
           no_price: noPrice,
+          token_id_yes: yesTokenId,
+          token_id_no: noTokenId,
           volume,
           liquidity,
           status: 'active',
@@ -494,7 +622,84 @@ Deno.serve(async (req) => {
         } else {
           inserted += batch.length;
           console.log(`[SYNC-POLYMARKET-H2H] Upserted batch ${i / batchSize + 1}: ${batch.length} markets`);
+    }
+
+    // ============= CLOB PRICE REFRESH =============
+    // Fetch real executable prices from Polymarket CLOB API
+    console.log('[SYNC-POLYMARKET-H2H] Starting CLOB price refresh...');
+    
+    // Get all H2H markets with token IDs from the cache
+    const { data: h2hMarkets, error: fetchError } = await supabase
+      .from('polymarket_h2h_cache')
+      .select('condition_id, token_id_yes, token_id_no')
+      .eq('status', 'active')
+      .eq('market_type', 'h2h')
+      .not('token_id_yes', 'is', null);
+    
+    if (fetchError) {
+      console.error('[SYNC-POLYMARKET-H2H] Error fetching H2H markets for CLOB refresh:', fetchError);
+    } else if (h2hMarkets && h2hMarkets.length > 0) {
+      console.log(`[SYNC-POLYMARKET-H2H] Refreshing CLOB prices for ${h2hMarkets.length} H2H markets`);
+      
+      // Collect all YES token IDs
+      const tokenIdToCondition: Map<string, string> = new Map();
+      const allTokenIds: string[] = [];
+      
+      for (const market of h2hMarkets) {
+        if (market.token_id_yes) {
+          tokenIdToCondition.set(market.token_id_yes, market.condition_id);
+          allTokenIds.push(market.token_id_yes);
         }
+      }
+      
+      if (allTokenIds.length > 0) {
+        const clobPrices = await fetchClobPrices(allTokenIds);
+        const priceUpdates: Array<{ condition_id: string; yes_price: number; no_price: number; best_bid: number; best_ask: number }> = [];
+        
+        for (const [tokenId, priceData] of Object.entries(clobPrices)) {
+          const conditionId = tokenIdToCondition.get(tokenId);
+          if (!conditionId) continue;
+          
+          // BUY price = what you pay = best ask
+          // For YES token: this is the YES price
+          const buyPrice = parseFloat(priceData.BUY || '0');
+          const sellPrice = parseFloat(priceData.SELL || '0');
+          
+          if (buyPrice > 0) {
+            priceUpdates.push({
+              condition_id: conditionId,
+              yes_price: buyPrice,
+              no_price: 1 - buyPrice,
+              best_bid: sellPrice,
+              best_ask: buyPrice,
+            });
+          }
+        }
+        
+        console.log(`[SYNC-POLYMARKET-H2H] Got ${priceUpdates.length} valid CLOB prices`);
+        
+        // Update cache with real prices
+        let clobUpdated = 0;
+        for (const update of priceUpdates) {
+          const { error: updateError } = await supabase
+            .from('polymarket_h2h_cache')
+            .update({
+              yes_price: update.yes_price,
+              no_price: update.no_price,
+              best_bid: update.best_bid,
+              best_ask: update.best_ask,
+              last_price_update: new Date().toISOString(),
+            })
+            .eq('condition_id', update.condition_id);
+          
+          if (!updateError) clobUpdated++;
+        }
+        
+        console.log(`[SYNC-POLYMARKET-H2H] Updated ${clobUpdated} markets with CLOB prices`);
+      }
+    } else {
+      console.log('[SYNC-POLYMARKET-H2H] No H2H markets with token IDs found for CLOB refresh');
+    }
       }
     }
 
