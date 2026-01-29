@@ -41,7 +41,7 @@ function estimateSlippage(stakeAmount: number, volume: number): number {
 function getLiquidityTier(volume: number): 'high' | 'medium' | 'low' | 'insufficient' {
   if (volume >= 100000) return 'high';
   if (volume >= 50000) return 'medium';
-  if (volume >= 10000) return 'low';
+  if (volume >= 5000) return 'low';  // Lowered from 10K to 5K to capture smaller but valid markets
   return 'insufficient';
 }
 
