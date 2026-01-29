@@ -276,6 +276,7 @@ Deno.serve(async (req) => {
     let statsNoEndDate = 0;
     let statsOutsideWindow = 0;
     let statsNoMarkets = 0;
+    let statsNoH2H = 0;
 
     for (const event of allEvents) {
       const title = event.title || '';
@@ -305,12 +306,52 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      // Take the primary market
-      const primaryMarket = markets[0];
+      // NEW: Find an actual H2H/moneyline market, not O/U or spread
+      // Iterate all markets in the event to find a true H2H market
+      const h2hMarket = markets.find((m: any) => {
+        // Use Gamma API's sportsMarketType field if available
+        const gammaType = (m.sportsMarketType || '').toLowerCase();
+        const mQuestion = (m.question || '').toLowerCase();
+        
+        // Skip explicit totals and spreads
+        if (gammaType.includes('total') || gammaType.includes('spread') || 
+            gammaType.includes('over') || gammaType.includes('under')) {
+          return false;
+        }
+        
+        // Skip if question contains O/U or spread patterns
+        if (/over\s+\d+|under\s+\d+|o\/u|spread|handicap|\+\d+\.5|\-\d+\.5/i.test(mQuestion)) {
+          return false;
+        }
+        
+        // Accept moneyline, h2h, or winner markets
+        if (gammaType === 'h2h' || gammaType === 'moneyline' || gammaType === 'winner') {
+          return true;
+        }
+        
+        // Accept generic "vs" pattern questions (likely H2H)
+        if (/\bvs\.?\s+|\bbeat\b|\bwin\s+(?:against|vs)/i.test(mQuestion)) {
+          return true;
+        }
+        
+        // If no explicit type, accept only if it looks like a simple binary outcome
+        // and NOT a totals question
+        if (!gammaType && !/\d+\.?\d*\s*(points|goals|runs|score)/i.test(mQuestion)) {
+          return true;
+        }
+        
+        return false;
+      });
+
+      if (!h2hMarket) {
+        statsNoH2H++;
+        console.log(`[POLY-SYNC-24H] No H2H market for: ${title} (has ${markets.length} markets)`);
+        continue; // This event doesn't have an H2H market on Poly
+      }
       
       qualifying.push({
         event,
-        market: primaryMarket,
+        market: h2hMarket,
         endDate,
         detectedSport,
       });
@@ -320,10 +361,7 @@ Deno.serve(async (req) => {
     console.log(`  - No end date: ${statsNoEndDate}`);
     console.log(`  - Outside 24h window: ${statsOutsideWindow}`);
     console.log(`  - No markets: ${statsNoMarkets}`);
-    console.log(`  - QUALIFYING: ${qualifying.length}`);
-    console.log(`  - No end date: ${statsNoEndDate}`);
-    console.log(`  - Outside 24h window: ${statsOutsideWindow}`);
-    console.log(`  - No markets: ${statsNoMarkets}`);
+    console.log(`  - No H2H market: ${statsNoH2H}`);
     console.log(`  - QUALIFYING: ${qualifying.length}`);
 
     // Log first few qualifying events for debugging
@@ -349,8 +387,20 @@ Deno.serve(async (req) => {
       const question = market.question || event.question || '';
       const title = event.title || '';
       
-      // Detect market type
-      const marketType = detectMarketType(question);
+      // Detect market type - prefer Gamma API's sportsMarketType field
+      const gammaMarketType = (market.sportsMarketType || '').toLowerCase();
+      let marketType: string;
+      
+      if (gammaMarketType === 'moneyline' || gammaMarketType === 'h2h' || gammaMarketType === 'winner') {
+        marketType = 'h2h';
+      } else if (gammaMarketType.includes('total') || gammaMarketType.includes('over') || gammaMarketType.includes('under')) {
+        marketType = 'total';
+      } else if (gammaMarketType.includes('spread') || gammaMarketType.includes('handicap')) {
+        marketType = 'spread';
+      } else {
+        // Fall back to regex-based detection
+        marketType = detectMarketType(question);
+      }
       const extractedEntity = extractEntity(question, title);
 
       // Parse prices
@@ -530,6 +580,7 @@ Deno.serve(async (req) => {
           no_end_date: statsNoEndDate,
           outside_window: statsOutsideWindow,
           no_markets: statsNoMarkets,
+          no_h2h_market: statsNoH2H,
         },
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
