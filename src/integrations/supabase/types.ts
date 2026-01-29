@@ -612,6 +612,7 @@ export type Database = {
           expires_at: string | null
           id: string
           is_true_arbitrage: boolean | null
+          polymarket_condition_id: string | null
           polymarket_market_id: string | null
           polymarket_match_confidence: number | null
           polymarket_price: number
@@ -636,6 +637,7 @@ export type Database = {
           expires_at?: string | null
           id?: string
           is_true_arbitrage?: boolean | null
+          polymarket_condition_id?: string | null
           polymarket_market_id?: string | null
           polymarket_match_confidence?: number | null
           polymarket_price: number
@@ -660,6 +662,7 @@ export type Database = {
           expires_at?: string | null
           id?: string
           is_true_arbitrage?: boolean | null
+          polymarket_condition_id?: string | null
           polymarket_market_id?: string | null
           polymarket_match_confidence?: number | null
           polymarket_price?: number
