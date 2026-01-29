@@ -1,4 +1,4 @@
-import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle, Eye, Zap, DollarSign, Timer, ExternalLink, Copy, ChevronDown, Search, Link } from 'lucide-react';
+import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle, Eye, Zap, DollarSign, Timer, Copy, ChevronDown, Search, Link } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -149,21 +149,15 @@ export function SignalCard({
   const polyYesPrice = (signal as any).polymarket_yes_price || signal.polymarket_price;
   const polyConditionId = (signal as any).polymarket_condition_id;
   
-  // Generate Polymarket URLs
-  const getPolymarketDirectUrl = (usewWww: boolean = false) => {
-    if (polyConditionId) {
-      const domain = usewWww ? 'www.polymarket.com' : 'polymarket.com';
-      return `https://${domain}/event/${polyConditionId}`;
-    }
-    return null;
-  };
-  
+  // Generate Polymarket URLs - use search as primary since /event/ format doesn't work for sports
   const getPolymarketSearchUrl = () => {
-    return `https://polymarket.com/search?query=${encodeURIComponent(signal.event_name)}`;
+    // Use the recommended_outcome (team name) for better search results
+    const searchTerm = signal.recommended_outcome || signal.event_name;
+    return `https://polymarket.com/search?query=${encodeURIComponent(searchTerm)}`;
   };
   
   const copyLinkToClipboard = () => {
-    const url = getPolymarketDirectUrl() || getPolymarketSearchUrl();
+    const url = getPolymarketSearchUrl();
     navigator.clipboard.writeText(url).then(() => {
       toast({
         title: "Link copied!",
@@ -430,33 +424,6 @@ export function SignalCard({
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-56 bg-popover border border-border z-50">
-                  {polyConditionId ? (
-                    <>
-                      <DropdownMenuItem asChild>
-                        <a 
-                          href={getPolymarketDirectUrl()!}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="cursor-pointer flex items-center gap-2"
-                        >
-                          <ExternalLink className="h-4 w-4" />
-                          Open in Polymarket
-                        </a>
-                      </DropdownMenuItem>
-                      <DropdownMenuItem asChild>
-                        <a 
-                          href={getPolymarketDirectUrl(true)!}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="cursor-pointer flex items-center gap-2"
-                        >
-                          <ExternalLink className="h-4 w-4" />
-                          Try alternate URL (www)
-                        </a>
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                    </>
-                  ) : null}
                   <DropdownMenuItem asChild>
                     <a 
                       href={getPolymarketSearchUrl()}
@@ -465,7 +432,7 @@ export function SignalCard({
                       className="cursor-pointer flex items-center gap-2"
                     >
                       <Search className="h-4 w-4" />
-                      Search Polymarket
+                      Find on Polymarket
                     </a>
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
