@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { supabase } from '@/integrations/supabase/client';
+import { toast } from '@/hooks/use-toast';
 
 export interface SignalLogEntry {
   id: string;
@@ -192,6 +193,87 @@ export function useSignalStats() {
       .reduce((sum, l) => sum + (l.stake_amount || 0), 0);
   }, [logs]);
 
+  // Update a bet
+  const updateBet = useCallback(async (id: string, updates: Partial<SignalLogEntry>) => {
+    const { error } = await supabase
+      .from('signal_logs')
+      .update(updates)
+      .eq('id', id);
+
+    if (error) {
+      toast({
+        title: 'Error updating bet',
+        description: error.message,
+        variant: 'destructive',
+      });
+      throw error;
+    }
+
+    toast({ title: 'Bet updated successfully' });
+    await fetchLogs();
+  }, [fetchLogs]);
+
+  // Delete a bet
+  const deleteBet = useCallback(async (id: string) => {
+    const { error } = await supabase
+      .from('signal_logs')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      toast({
+        title: 'Error deleting bet',
+        description: error.message,
+        variant: 'destructive',
+      });
+      throw error;
+    }
+
+    toast({ title: 'Bet deleted successfully' });
+    await fetchLogs();
+  }, [fetchLogs]);
+
+  // Check pending bets for settlement
+  const [checkingPending, setCheckingPending] = useState(false);
+  
+  const checkPendingBets = useCallback(async () => {
+    setCheckingPending(true);
+    try {
+      const response = await supabase.functions.invoke('settle-bets', {
+        body: { force: true },
+      });
+
+      if (response.error) throw response.error;
+
+      const data = response.data;
+      
+      if (data.settled > 0) {
+        toast({
+          title: 'Bets settled',
+          description: `${data.settled} bet(s) have been settled`,
+        });
+        await fetchLogs();
+      } else {
+        toast({
+          title: 'No updates',
+          description: 'No pending bets were ready for settlement',
+        });
+      }
+
+      return data;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to check pending bets';
+      toast({
+        title: 'Error checking bets',
+        description: message,
+        variant: 'destructive',
+      });
+      throw error;
+    } finally {
+      setCheckingPending(false);
+    }
+  }, [fetchLogs]);
+
   return {
     logs,
     loading,
@@ -203,5 +285,9 @@ export function useSignalStats() {
     todayStaked,
     getRemainingStake,
     refetch: fetchLogs,
+    updateBet,
+    deleteBet,
+    checkPendingBets,
+    checkingPending,
   };
 }
