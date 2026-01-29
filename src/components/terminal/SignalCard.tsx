@@ -1,4 +1,4 @@
-import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle, Eye, Zap, DollarSign, Timer, ExternalLink } from 'lucide-react';
+import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle, Eye, Zap, DollarSign, Timer, ExternalLink, Copy, ChevronDown, Search, Link } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -8,6 +8,14 @@ import type { SignalState } from '@/types/scan-config';
 import { ExecutionDecision } from './ExecutionDecision';
 import { ManualPriceInput } from './ManualPriceInput';
 import { EvCalculator } from './EvCalculator';
+import { toast } from '@/hooks/use-toast';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 
 interface SignalCardProps {
   signal: EnrichedSignal;
@@ -139,6 +147,30 @@ export function SignalCard({
   const polyVolume = (signal as any).polymarket_volume;
   const polyUpdatedAt = (signal as any).polymarket_updated_at;
   const polyYesPrice = (signal as any).polymarket_yes_price || signal.polymarket_price;
+  const polyConditionId = (signal as any).polymarket_condition_id;
+  
+  // Generate Polymarket URLs
+  const getPolymarketDirectUrl = (usewWww: boolean = false) => {
+    if (polyConditionId) {
+      const domain = usewWww ? 'www.polymarket.com' : 'polymarket.com';
+      return `https://${domain}/event/${polyConditionId}`;
+    }
+    return null;
+  };
+  
+  const getPolymarketSearchUrl = () => {
+    return `https://polymarket.com/search?query=${encodeURIComponent(signal.event_name)}`;
+  };
+  
+  const copyLinkToClipboard = () => {
+    const url = getPolymarketDirectUrl() || getPolymarketSearchUrl();
+    navigator.clipboard.writeText(url).then(() => {
+      toast({
+        title: "Link copied!",
+        description: "Paste in a browser to open Polymarket",
+      });
+    });
+  };
   
   // Quality checks
   const isStale = isStalePolymarket(polyUpdatedAt);
@@ -385,21 +417,64 @@ export function SignalCard({
         <div className="flex items-center gap-2 mt-4 pt-3 border-t border-border">
           {isTrueArbitrage && signal.execution ? (
             <>
-              <Button 
-                size="sm" 
-                variant="outline"
-                className="gap-1 bg-primary/10 hover:bg-primary/20 text-primary border-primary/30"
-                asChild
-              >
-                <a 
-                  href={`https://polymarket.com/search?query=${encodeURIComponent(signal.event_name)}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  <ExternalLink className="h-3 w-3" />
-                  Trade on Poly
-                </a>
-              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button 
+                    size="sm" 
+                    variant="outline"
+                    className="gap-1 bg-primary/10 hover:bg-primary/20 text-primary border-primary/30"
+                  >
+                    <Link className="h-3 w-3" />
+                    Trade on Poly
+                    <ChevronDown className="h-3 w-3" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-56 bg-popover border border-border z-50">
+                  {polyConditionId ? (
+                    <>
+                      <DropdownMenuItem asChild>
+                        <a 
+                          href={getPolymarketDirectUrl()!}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="cursor-pointer flex items-center gap-2"
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                          Open in Polymarket
+                        </a>
+                      </DropdownMenuItem>
+                      <DropdownMenuItem asChild>
+                        <a 
+                          href={getPolymarketDirectUrl(true)!}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="cursor-pointer flex items-center gap-2"
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                          Try alternate URL (www)
+                        </a>
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                    </>
+                  ) : null}
+                  <DropdownMenuItem asChild>
+                    <a 
+                      href={getPolymarketSearchUrl()}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="cursor-pointer flex items-center gap-2"
+                    >
+                      <Search className="h-4 w-4" />
+                      Search Polymarket
+                    </a>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={copyLinkToClipboard} className="cursor-pointer flex items-center gap-2">
+                    <Copy className="h-4 w-4" />
+                    Copy link to clipboard
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <Button 
                 size="sm" 
                 className={cn(
@@ -428,21 +503,37 @@ export function SignalCard({
             </>
           ) : (
             <>
-              <Button 
-                size="sm" 
-                variant="outline"
-                className="gap-1 bg-primary/10 hover:bg-primary/20 text-primary border-primary/30"
-                asChild
-              >
-                <a 
-                  href={`https://polymarket.com/search?query=${encodeURIComponent(signal.event_name)}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  <ExternalLink className="h-3 w-3" />
-                  Search Poly
-                </a>
-              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button 
+                    size="sm" 
+                    variant="outline"
+                    className="gap-1 bg-primary/10 hover:bg-primary/20 text-primary border-primary/30"
+                  >
+                    <Link className="h-3 w-3" />
+                    Search Poly
+                    <ChevronDown className="h-3 w-3" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-56 bg-popover border border-border z-50">
+                  <DropdownMenuItem asChild>
+                    <a 
+                      href={getPolymarketSearchUrl()}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="cursor-pointer flex items-center gap-2"
+                    >
+                      <Search className="h-4 w-4" />
+                      Search Polymarket
+                    </a>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={copyLinkToClipboard} className="cursor-pointer flex items-center gap-2">
+                    <Copy className="h-4 w-4" />
+                    Copy link to clipboard
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <Button 
                 size="sm" 
                 variant="outline"

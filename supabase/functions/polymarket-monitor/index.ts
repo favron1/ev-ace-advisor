@@ -457,7 +457,7 @@ Deno.serve(async (req) => {
               
               edgesFound++;
 
-              // Create signal with validated team name
+              // Create signal with validated team name and condition_id for direct linking
               const { data: signal, error: signalError } = await supabase
                 .from('signal_opportunities')
                 .insert({
@@ -477,6 +477,7 @@ Deno.serve(async (req) => {
                   polymarket_updated_at: now.toISOString(),
                   signal_strength: netEdge * 100,
                   status: 'active',
+                  polymarket_condition_id: event.polymarket_condition_id, // NEW: for direct market links
                   signal_factors: {
                     raw_edge: rawEdge * 100,
                     net_edge: netEdge * 100,
