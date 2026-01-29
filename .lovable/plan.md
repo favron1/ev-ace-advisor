@@ -1,97 +1,78 @@
 
 
-## Add Live Score Links to SMS Alerts
+## Fix SMS Alert Format - Restore Full Details + Live Score Link
 
-### Overview
+### Problem
 
-Enhance SMS alerts with a clickable link that opens a live score page for the game. Since SMS is text-based and needs to work on any phone, we'll use **Google Search** deep links which:
-- Work universally on all devices
-- Trigger Google's live sports widget for NHL/NBA/Soccer
-- Don't require any API keys or authentication
-- Keep SMS character count reasonable
+The last edit condensed the SMS format too much, losing important information like:
+- The specific team/bet to place (e.g., "Market: Carolina Hurricanes YES")
+- The Net EV calculation
+- Time until start
+- "ACT NOW" call to action
 
----
+### New Structure
+
+Based on your screenshot, here's the improved format with the **live score link at the top as a clickable header**:
+
+```text
+📺 google.com/search?q=Utah+vs+Hurricanes+live+score
+🎯 EDGE DETECTED: Utah vs. Hurricanes
+Market: Carolina Hurricanes YES
+Polymarket: 40¢ ($164K vol)
+Bookmaker Fair: 56%
+Raw Edge: +16.2%
+Net EV: +$16.20 on $100 stake
+Time: ~10 hours until start
+ACT NOW - window may close
+```
 
 ### Implementation
 
 **File: `supabase/functions/send-sms-alert/index.ts`**
 
-Add a new optional field for the live score link and include it in the message template:
+Update the `buildEnhancedMessage` function to:
 
-```text
-CURRENT SMS FORMAT:
-🎯 EDGE DETECTED: Jets vs. Lightning
-Market: H2H
-Polymarket: 38¢ ($260K vol)
-Bookmaker Fair: 58%
-Raw Edge: +19.9%
-Time: 3h until start
-ACT NOW - window may close
+1. Put the **live score URL at the very top** (so it's clickable as a header)
+2. Restore all the detail lines:
+   - Event name
+   - **The bet** (Market: [Team] YES)
+   - Polymarket price + volume (liquidity)
+   - Bookmaker fair probability  
+   - Raw edge %
+   - Net EV on $100 stake
+   - Time until start
+   - Call to action
 
-NEW SMS FORMAT:
-🎯 EDGE DETECTED: Jets vs. Lightning
-BET: Tampa Bay Lightning YES
-Poly: 38¢ | Fair: 58% | Edge: +19.9%
-Starts: 3h
+### Updated Template
 
-📺 Live Score: google.com/search?q=Jets+vs+Lightning
-🎯 Trade: [polymarket link]
-```
-
-**Changes:**
-1. Add `live_score_url?: string` field to `SmsAlertRequest` interface
-2. Create `buildLiveScoreUrl(eventName: string)` helper function
-3. Include the link in the message body (shortened for SMS character limits)
-
-**Helper Function:**
 ```typescript
-function buildLiveScoreUrl(eventName: string): string {
-  // Convert "Jets vs. Lightning" → "Jets+vs+Lightning+live+score"
-  const searchQuery = eventName
-    .replace(/\./g, '')
-    .replace(/\s+/g, '+')
-    + '+live+score';
-  return `google.com/search?q=${encodeURIComponent(searchQuery)}`;
-}
+return `📺 ${liveScoreUrl}
+🎯 EDGE DETECTED: ${req.event_name}
+Market: ${req.market || 'H2H'}
+Polymarket: ${(req.poly_price * 100).toFixed(0)}¢ ${volume ? `(${volume})` : ''}
+Bookmaker Fair: ${(req.bookmaker_fair_prob * 100).toFixed(0)}%
+Raw Edge: +${req.raw_edge?.toFixed(1) || '0'}%
+${netEv ? `Net EV: ${netEv} on $${req.stake_amount} stake` : ''}
+${req.time_until_start ? `Time: ${req.time_until_start}` : ''}
+ACT NOW - window may close`.trim();
 ```
 
----
+### Key Changes
 
-### Technical Considerations
+| Element | Current (broken) | Fixed |
+|---------|-----------------|-------|
+| Live score link | At bottom | **At top (clickable header)** |
+| The bet | Missing | **Market: [Team] YES** |
+| Poly price | Shown | Shown |
+| Bookmaker fair | Condensed with Poly | **Separate line** |
+| Liquidity/Volume | Shown | Shown |
+| Net EV | Missing | **Restored** |
+| Time | Condensed | **Full line** |
+| Call to action | Missing | **ACT NOW restored** |
 
-| Consideration | Solution |
-|---------------|----------|
-| SMS character limits (160 chars) | Use shortened URL format without `https://` prefix |
-| Universal compatibility | Google Search works on all phones/browsers |
-| Sport coverage | Google shows live widgets for NHL, NBA, NFL, Soccer |
-| No API needed | Just a URL construction - no external calls |
-
----
-
-### Updated SMS Example
-
-For **Jets vs. Lightning** with Tampa Bay YES at 38¢:
-
-```
-🎯 EDGE: Jets vs. Lightning
-BET: Tampa Bay Lightning YES
-38¢ | Fair 58% | +19.9%
-3h to kickoff
-
-📺 google.com/search?q=Jets+vs+Lightning+live
-```
-
----
-
-### Files to Modify
+### File to Modify
 
 | File | Change |
 |------|--------|
-| `supabase/functions/send-sms-alert/index.ts` | Add `buildLiveScoreUrl()` helper and include link in structured message template |
-
----
-
-### Summary
-
-This adds a Google live score deep link to every SMS alert, making it easy to check game status from your phone when the alert arrives. The link format is compact and universally compatible.
+| `supabase/functions/send-sms-alert/index.ts` | Update `buildEnhancedMessage()` to restore full format with live score link at top |
 
