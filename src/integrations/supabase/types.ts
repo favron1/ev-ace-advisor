@@ -250,6 +250,8 @@ export type Database = {
       }
       polymarket_h2h_cache: {
         Row: {
+          best_ask: number | null
+          best_bid: number | null
           condition_id: string
           created_at: string | null
           event_date: string | null
@@ -263,17 +265,23 @@ export type Database = {
           liquidity: number | null
           market_type: string | null
           no_price: number
+          orderbook_depth: number | null
           question: string
           sport_category: string | null
+          spread_pct: number | null
           status: string | null
           team_away: string | null
           team_away_normalized: string | null
           team_home: string | null
           team_home_normalized: string | null
+          token_id_no: string | null
+          token_id_yes: string | null
           volume: number | null
           yes_price: number
         }
         Insert: {
+          best_ask?: number | null
+          best_bid?: number | null
           condition_id: string
           created_at?: string | null
           event_date?: string | null
@@ -287,17 +295,23 @@ export type Database = {
           liquidity?: number | null
           market_type?: string | null
           no_price: number
+          orderbook_depth?: number | null
           question: string
           sport_category?: string | null
+          spread_pct?: number | null
           status?: string | null
           team_away?: string | null
           team_away_normalized?: string | null
           team_home?: string | null
           team_home_normalized?: string | null
+          token_id_no?: string | null
+          token_id_yes?: string | null
           volume?: number | null
           yes_price: number
         }
         Update: {
+          best_ask?: number | null
+          best_bid?: number | null
           condition_id?: string
           created_at?: string | null
           event_date?: string | null
@@ -311,13 +325,17 @@ export type Database = {
           liquidity?: number | null
           market_type?: string | null
           no_price?: number
+          orderbook_depth?: number | null
           question?: string
           sport_category?: string | null
+          spread_pct?: number | null
           status?: string | null
           team_away?: string | null
           team_away_normalized?: string | null
           team_home?: string | null
           team_home_normalized?: string | null
+          token_id_no?: string | null
+          token_id_yes?: string | null
           volume?: number | null
           yes_price?: number
         }

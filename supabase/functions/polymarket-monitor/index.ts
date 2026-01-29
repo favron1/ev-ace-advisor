@@ -46,8 +46,13 @@ function calculateFairProb(odds: number[], targetIndex: number): number {
   return probs[targetIndex] / totalProb;
 }
 
-// Calculate net edge after fees
-function calculateNetEdge(rawEdge: number, volume: number, stakeAmount: number = 100): {
+// Calculate net edge after fees - now uses actual spread if available
+function calculateNetEdge(
+  rawEdge: number, 
+  volume: number, 
+  stakeAmount: number = 100,
+  actualSpreadPct: number | null = null
+): {
   netEdge: number;
   platformFee: number;
   spreadCost: number;
@@ -55,11 +60,14 @@ function calculateNetEdge(rawEdge: number, volume: number, stakeAmount: number =
 } {
   const platformFee = rawEdge > 0 ? rawEdge * 0.01 : 0;
   
-  let spreadCost = 0.03;
-  if (volume >= 500000) spreadCost = 0.005;
-  else if (volume >= 100000) spreadCost = 0.01;
-  else if (volume >= 50000) spreadCost = 0.015;
-  else if (volume >= 10000) spreadCost = 0.02;
+  // Use actual spread if available, otherwise estimate based on volume
+  let spreadCost = actualSpreadPct !== null ? actualSpreadPct : 0.03;
+  if (actualSpreadPct === null) {
+    if (volume >= 500000) spreadCost = 0.005;
+    else if (volume >= 100000) spreadCost = 0.01;
+    else if (volume >= 50000) spreadCost = 0.015;
+    else if (volume >= 10000) spreadCost = 0.02;
+  }
   
   let slippage = 0.03;
   if (volume > 0) {
@@ -71,6 +79,79 @@ function calculateNetEdge(rawEdge: number, volume: number, stakeAmount: number =
   }
   
   return { netEdge: rawEdge - platformFee - spreadCost - slippage, platformFee, spreadCost, slippage };
+}
+
+// Batch fetch CLOB prices for multiple tokens
+async function fetchClobPrices(tokenIds: string[]): Promise<Map<string, { bid: number; ask: number }>> {
+  const priceMap = new Map<string, { bid: number; ask: number }>();
+  
+  if (tokenIds.length === 0) return priceMap;
+  
+  try {
+    // CLOB prices endpoint uses query params with comma-separated token IDs
+    const tokenIdsParam = tokenIds.join(',');
+    const url = `${CLOB_API_BASE}/prices?token_ids=${encodeURIComponent(tokenIdsParam)}`;
+    
+    const response = await fetch(url);
+    if (!response.ok) {
+      console.log(`[POLY-MONITOR] CLOB prices fetch failed: ${response.status}`);
+      return priceMap;
+    }
+    
+    const data = await response.json();
+    
+    // Response format: { "tokenId": { "bid": "0.45", "ask": "0.46" }, ... }
+    // or: { "tokenId": "0.45" } for simple price
+    for (const [tokenId, priceData] of Object.entries(data)) {
+      if (typeof priceData === 'object' && priceData !== null) {
+        const pd = priceData as Record<string, string>;
+        priceMap.set(tokenId, {
+          bid: parseFloat(pd.bid || pd.BUY || '0'),
+          ask: parseFloat(pd.ask || pd.SELL || '0'),
+        });
+      } else if (typeof priceData === 'string') {
+        const price = parseFloat(priceData);
+        priceMap.set(tokenId, { bid: price, ask: price });
+      }
+    }
+  } catch (error) {
+    console.error('[POLY-MONITOR] CLOB batch price fetch error:', error);
+  }
+  
+  return priceMap;
+}
+
+// Fetch spreads for tokens
+async function fetchClobSpreads(tokenIds: string[]): Promise<Map<string, number>> {
+  const spreadMap = new Map<string, number>();
+  
+  if (tokenIds.length === 0) return spreadMap;
+  
+  try {
+    const response = await fetch(`${CLOB_API_BASE}/spreads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(tokenIds.map(id => ({ token_id: id }))),
+    });
+    
+    if (!response.ok) {
+      console.log(`[POLY-MONITOR] CLOB spreads fetch failed: ${response.status}`);
+      return spreadMap;
+    }
+    
+    const data = await response.json();
+    
+    // Response format: { "tokenId": "0.02", ... }
+    for (const [tokenId, spread] of Object.entries(data)) {
+      if (typeof spread === 'string' || typeof spread === 'number') {
+        spreadMap.set(tokenId, parseFloat(String(spread)));
+      }
+    }
+  } catch (error) {
+    console.error('[POLY-MONITOR] CLOB spreads fetch error:', error);
+  }
+  
+  return spreadMap;
 }
 
 // Format time until event
@@ -318,7 +399,7 @@ Deno.serve(async (req) => {
 
     const { data: cacheData } = await supabase
       .from('polymarket_h2h_cache')
-      .select('condition_id, market_type, extracted_league, extracted_entity')
+      .select('condition_id, market_type, extracted_league, extracted_entity, token_id_yes, token_id_no, best_bid, best_ask, spread_pct')
       .in('condition_id', conditionIds);
 
     const cacheMap = new Map(cacheData?.map(c => [c.condition_id, c]) || []);
@@ -337,6 +418,21 @@ Deno.serve(async (req) => {
     }
 
     console.log(`[POLY-MONITOR] Sport groups: ${[...sportGroups.keys()].join(', ')}`);
+
+    // Collect all token IDs for batch CLOB fetch
+    const allTokenIds: string[] = [];
+    for (const event of monitoredEvents) {
+      const cache = cacheMap.get(event.polymarket_condition_id);
+      if (cache?.token_id_yes) allTokenIds.push(cache.token_id_yes);
+    }
+    
+    // Batch fetch CLOB prices and spreads
+    console.log(`[POLY-MONITOR] Batch fetching CLOB prices for ${allTokenIds.length} tokens`);
+    const [clobPrices, clobSpreads] = await Promise.all([
+      fetchClobPrices(allTokenIds),
+      fetchClobSpreads(allTokenIds),
+    ]);
+    console.log(`[POLY-MONITOR] Got ${clobPrices.size} prices, ${clobSpreads.size} spreads from CLOB`);
 
     // Fetch bookmaker data for each sport group
     const allBookmakerData: Map<string, any[]> = new Map();
@@ -385,26 +481,48 @@ Deno.serve(async (req) => {
         const cache = cacheMap.get(event.polymarket_condition_id);
         const sport = cache?.extracted_league || 'Unknown';
         const marketType = cache?.market_type || 'h2h';
+        const tokenIdYes = cache?.token_id_yes;
         
         // Get bookmaker data for this sport
         const bookmakerGames = allBookmakerData.get(sport) || [];
 
-        // Fetch fresh Polymarket price
+        // Get price from CLOB batch results (preferred) or fallback to single fetch
         let livePolyPrice = event.polymarket_yes_price || 0.5;
         let liveVolume = event.polymarket_volume || 0;
-
-        if (event.polymarket_condition_id) {
-          try {
-            const clobUrl = `${CLOB_API_BASE}/markets/${event.polymarket_condition_id}`;
-            const clobResponse = await fetch(clobUrl);
-            
-            if (clobResponse.ok) {
-              const marketData = await clobResponse.json();
-              livePolyPrice = parseFloat(marketData.tokens?.[0]?.price || livePolyPrice);
-              liveVolume = parseFloat(marketData.volume || liveVolume);
+        let bestBid: number | null = null;
+        let bestAsk: number | null = null;
+        let spreadPct: number | null = null;
+        
+        // Try CLOB batch prices first
+        if (tokenIdYes && clobPrices.has(tokenIdYes)) {
+          const prices = clobPrices.get(tokenIdYes)!;
+          bestBid = prices.bid;
+          bestAsk = prices.ask;
+          // Use best_ask as the actual buy price (what you pay)
+          livePolyPrice = bestAsk > 0 ? bestAsk : livePolyPrice;
+          
+          if (clobSpreads.has(tokenIdYes)) {
+            spreadPct = clobSpreads.get(tokenIdYes)!;
+          } else if (bestBid > 0 && bestAsk > 0) {
+            spreadPct = bestAsk - bestBid;
+          }
+        }
+        
+        // Fallback to single market fetch if no batch data
+        if (!tokenIdYes || !clobPrices.has(tokenIdYes)) {
+          if (event.polymarket_condition_id) {
+            try {
+              const clobUrl = `${CLOB_API_BASE}/markets/${event.polymarket_condition_id}`;
+              const clobResponse = await fetch(clobUrl);
+              
+              if (clobResponse.ok) {
+                const marketData = await clobResponse.json();
+                livePolyPrice = parseFloat(marketData.tokens?.[0]?.price || livePolyPrice);
+                liveVolume = parseFloat(marketData.volume || liveVolume);
+              }
+            } catch {
+              // Use cached price
             }
-          } catch {
-            // Use cached price
           }
         }
 
@@ -423,7 +541,7 @@ Deno.serve(async (req) => {
           bookmakerFairProb = calculateConsensusFairProb(match.game, match.marketKey, match.targetIndex);
         }
 
-        // Update event state
+        // Update event state and cache with CLOB data
         await supabase
           .from('event_watch_state')
           .update({
@@ -435,15 +553,29 @@ Deno.serve(async (req) => {
             updated_at: now.toISOString(),
           })
           .eq('id', event.id);
+        
+        // Update cache with CLOB bid/ask/spread data
+        if (bestBid !== null || bestAsk !== null || spreadPct !== null) {
+          await supabase
+            .from('polymarket_h2h_cache')
+            .update({
+              best_bid: bestBid,
+              best_ask: bestAsk,
+              spread_pct: spreadPct,
+              last_price_update: now.toISOString(),
+            })
+            .eq('condition_id', event.polymarket_condition_id);
+        }
 
         // Check for edge
         if (bookmakerFairProb !== null && liveVolume >= 5000) {
           const rawEdge = bookmakerFairProb - livePolyPrice;
           
           if (rawEdge >= 0.02) {
-            const { netEdge } = calculateNetEdge(rawEdge, liveVolume, stakeAmount);
+            // Use actual spread for more accurate net edge calculation
+            const { netEdge } = calculateNetEdge(rawEdge, liveVolume, stakeAmount, spreadPct);
             
-            console.log(`[POLY-MONITOR] Edge found: ${event.event_name} - Raw: ${(rawEdge * 100).toFixed(1)}%, Net: ${(netEdge * 100).toFixed(1)}%`);
+            console.log(`[POLY-MONITOR] Edge found: ${event.event_name} - Raw: ${(rawEdge * 100).toFixed(1)}%, Net: ${(netEdge * 100).toFixed(1)}%${spreadPct !== null ? ` (spread: ${(spreadPct * 100).toFixed(2)}%)` : ''}`);
             
             if (netEdge >= 0.02) {
               // Extract team name: prefer match result, fallback to cache extracted_entity
