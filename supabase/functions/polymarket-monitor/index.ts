@@ -92,7 +92,8 @@ async function sendSmsAlert(
   netEdge: number,
   volume: number,
   stakeAmount: number,
-  marketType: string
+  marketType: string,
+  teamName: string | null
 ): Promise<boolean> {
   try {
     const { data: profiles } = await supabase
@@ -111,8 +112,9 @@ async function sendSmsAlert(
     const timeUntil = formatTimeUntil(eventDate);
     const netEv = (netEdge * stakeAmount).toFixed(2);
     
+    const betSide = teamName || 'YES';
     const message = `🎯 EDGE: ${event.event_name}
-Type: ${marketType.toUpperCase()}
+BET: ${betSide}
 Poly: ${(polyPrice * 100).toFixed(0)}¢ ($${(volume / 1000).toFixed(0)}K)
 Book: ${(bookmakerFairProb * 100).toFixed(0)}%
 Edge: +${(rawEdge * 100).toFixed(1)}% raw, +$${netEv} net EV
@@ -169,7 +171,7 @@ function findBookmakerMatch(
   question: string,
   marketType: string,
   bookmakerGames: any[]
-): { game: any; targetIndex: number; marketKey: string } | null {
+): { game: any; targetIndex: number; marketKey: string; teamName: string } | null {
   const eventNorm = normalizeName(`${eventName} ${question}`);
   
   for (const game of bookmakerGames) {
@@ -196,17 +198,32 @@ function findBookmakerMatch(
     
     if (!market || !market.outcomes) continue;
     
-    // Determine target outcome index
+    // Determine target outcome index and extract team name
     let targetIndex = 0;
+    let teamName = '';
+    
     if (targetMarketKey === 'h2h') {
       // For H2H, determine if we're betting home or away
       if (containsHome && !containsAway) {
         targetIndex = market.outcomes.findIndex((o: any) => normalizeName(o.name).includes(homeNorm.split(' ').pop() || ''));
+        teamName = game.home_team;
       } else if (containsAway && !containsHome) {
         targetIndex = market.outcomes.findIndex((o: any) => normalizeName(o.name).includes(awayNorm.split(' ').pop() || ''));
+        teamName = game.away_team;
       } else {
-        // Both teams mentioned - default to first mentioned in question
-        targetIndex = 0;
+        // Both teams mentioned - check question for team name
+        const questionNorm = normalizeName(question);
+        if (homeWords.some((w: string) => questionNorm.includes(w))) {
+          targetIndex = 0;
+          teamName = game.home_team;
+        } else if (awayWords.some((w: string) => questionNorm.includes(w))) {
+          targetIndex = 1;
+          teamName = game.away_team;
+        } else {
+          // Default to first outcome
+          targetIndex = 0;
+          teamName = market.outcomes[0]?.name || game.home_team;
+        }
       }
     } else if (targetMarketKey === 'totals') {
       // For totals, check if "over" or "under" is in question
@@ -214,11 +231,20 @@ function findBookmakerMatch(
       targetIndex = market.outcomes.findIndex((o: any) => 
         isOver ? o.name.toLowerCase().includes('over') : o.name.toLowerCase().includes('under')
       );
+      teamName = isOver ? 'Over' : 'Under';
     }
     
-    if (targetIndex === -1) targetIndex = 0;
+    if (targetIndex === -1) {
+      targetIndex = 0;
+      teamName = market.outcomes[0]?.name || '';
+    }
     
-    return { game, targetIndex, marketKey: targetMarketKey };
+    // Ensure we have a team name
+    if (!teamName && market.outcomes[targetIndex]) {
+      teamName = market.outcomes[targetIndex].name;
+    }
+    
+    return { game, targetIndex, marketKey: targetMarketKey, teamName };
   }
   
   return null;
@@ -423,10 +449,14 @@ Deno.serve(async (req) => {
               edgesFound++;
               
               // Create signal
+              // Extract team name from match result
+              const teamName = match?.teamName || null;
+
               const { data: signal, error: signalError } = await supabase
                 .from('signal_opportunities')
                 .insert({
                   event_name: event.event_name,
+                  recommended_outcome: teamName,
                   side: 'YES',
                   polymarket_price: livePolyPrice,
                   bookmaker_probability: bookmakerFairProb,
@@ -447,16 +477,17 @@ Deno.serve(async (req) => {
                     market_type: marketType,
                     sport: sport,
                     volume: liveVolume,
+                    team_name: teamName,
                   },
                 })
                 .select()
                 .single();
 
               if (!signalError && signal) {
-                // Send SMS
+                // Send SMS with team name
                 const alertSent = await sendSmsAlert(
                   supabase, event, livePolyPrice, bookmakerFairProb,
-                  rawEdge, netEdge, liveVolume, stakeAmount, marketType
+                  rawEdge, netEdge, liveVolume, stakeAmount, marketType, teamName
                 );
                 
                 if (alertSent) {

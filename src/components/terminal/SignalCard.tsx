@@ -91,7 +91,9 @@ export function SignalCard({
     ? Math.max(0, Math.floor((new Date(signal.expires_at).getTime() - Date.now()) / 1000 / 60))
     : null;
   
-  const betTarget = signal.recommended_outcome || signal.event_name;
+  // Only use recommended_outcome for bet display - never fall back to event_name
+  const betTarget = signal.recommended_outcome;
+  const isMissingBetSide = !betTarget && signal.is_true_arbitrage;
   
   // Extract enhanced data from signal_factors
   const signalFactors = signal.signal_factors as { 
@@ -185,21 +187,47 @@ export function SignalCard({
             
             {/* Clear bet recommendation */}
             <div className="flex items-center gap-2 mb-2">
-              <Badge 
-                className="bg-primary/20 text-primary hover:bg-primary/30 font-semibold"
-              >
-                <Target className="h-3 w-3 mr-1" />
-                BET: {betTarget}
-              </Badge>
+              {isMissingBetSide ? (
+                <Badge 
+                  className="bg-orange-500/20 text-orange-500 hover:bg-orange-500/30 font-semibold"
+                >
+                  <AlertCircle className="h-3 w-3 mr-1" />
+                  BET SIDE UNKNOWN
+                </Badge>
+              ) : betTarget ? (
+                <Badge 
+                  className="bg-primary/20 text-primary hover:bg-primary/30 font-semibold"
+                >
+                  <Target className="h-3 w-3 mr-1" />
+                  BET: {betTarget}
+                </Badge>
+              ) : (
+                <Badge 
+                  className="bg-muted text-muted-foreground font-semibold"
+                >
+                  <Activity className="h-3 w-3 mr-1" />
+                  Signal Only
+                </Badge>
+              )}
             </div>
             
-            <p className="text-xs text-muted-foreground">
-              Back <span className="font-medium text-foreground">{betTarget}</span> to win
-              <span className="ml-1">• {(bookmakerProbFair * 100).toFixed(1)}% fair prob</span>
-              {signalFactors?.confirming_books && (
-                <span className="ml-1">• {signalFactors.confirming_books} books</span>
-              )}
-            </p>
+            {isMissingBetSide ? (
+              <p className="text-xs text-orange-400">
+                ⚠️ Could not determine bet side. Check Polymarket question directly.
+              </p>
+            ) : betTarget ? (
+              <p className="text-xs text-muted-foreground">
+                Back <span className="font-medium text-foreground">{betTarget}</span> to win
+                <span className="ml-1">• {(bookmakerProbFair * 100).toFixed(1)}% fair prob</span>
+                {signalFactors?.confirming_books && (
+                  <span className="ml-1">• {signalFactors.confirming_books} books</span>
+                )}
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Sharp movement detected • {(bookmakerProbFair * 100).toFixed(1)}% fair prob
+              </p>
+            )}
             
             {/* True arbitrage - show execution decision with cost breakdown */}
             {isTrueArbitrage && signal.execution && (
@@ -320,7 +348,7 @@ export function SignalCard({
                 asChild
               >
                 <a 
-                  href={`https://polymarket.com/search?query=${encodeURIComponent(betTarget || signal.event_name)}`}
+                  href={`https://polymarket.com/search?query=${encodeURIComponent(signal.event_name)}`}
                   target="_blank"
                   rel="noopener noreferrer"
                 >
@@ -363,7 +391,7 @@ export function SignalCard({
                 asChild
               >
                 <a 
-                  href={`https://polymarket.com/search?query=${encodeURIComponent(betTarget || signal.event_name)}`}
+                  href={`https://polymarket.com/search?query=${encodeURIComponent(signal.event_name)}`}
                   target="_blank"
                   rel="noopener noreferrer"
                 >
