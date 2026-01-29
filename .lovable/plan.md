@@ -1,190 +1,149 @@
 
 
-# Enforcement of Execution Gates (Hard Safety Controls)
+## Automatic Bet Settlement + Editable Bet History
 
-## Summary
-
-The bug fixes were deployed but three critical issues remain:
-
-1. **Bad signals still exist in DB** - The fixes prevent NEW bad signals but don't clean up existing ones
-2. **Execute button ignores staleness** - Stale data still shows "Execute (Strong)" button enabled
-3. **Edge function needs redeployment** - To activate the new validation logic
-
-This plan enforces HARD GATES that make signals non-executable when safety criteria aren't met.
+### Overview
+This plan adds two key features to the Stats page:
+1. **Automatic Result Checking** - The polling system automatically updates bet outcomes when markets resolve
+2. **Editable Fields** - Manual override capability for all bet history fields
 
 ---
 
-## Current State (From Database Query)
+### How It Works
 
-| Event | Recommended Outcome | Issue |
-|-------|---------------------|-------|
-| Blackhawks vs. Penguins | Atlanta Hawks | Cross-sport mismatch (NBA team in NHL game) |
-| Utah vs. Hurricanes | Carolina Hurricanes | Duplicate signal exists |
-| Utah vs. Hurricanes | Utah Hockey Club | Duplicate signal exists |
-| Islanders vs. Rangers | NY Islanders | 5h stale, 33% edge on 88% fair prob |
+```text
+                         AUTOMATIC SETTLEMENT FLOW
++----------------+     +------------------+     +----------------+
+| Polling System |---->| Check Polymarket |---->| Update         |
+| (every 5 min)  |     | for resolved     |     | signal_logs    |
+|                |     | markets          |     | with outcome   |
++----------------+     +------------------+     +----------------+
+        |                      |
+        v                      v
++----------------+     +------------------+
+| pending bets   |     | Gamma API:       |
+| with           |     | closed=true or   |
+| condition_id   |     | event passed     |
++----------------+     +------------------+
+
+
+                         MANUAL EDITING FLOW
++----------------+     +------------------+     +----------------+
+| Click row in   |---->| Edit dialog      |---->| Save to        |
+| Bet History    |     | with all fields  |     | signal_logs    |
++----------------+     +------------------+     +----------------+
+```
 
 ---
 
-## Implementation Plan
+### Feature 1: Automatic Settlement
 
-### Step 1: Clean Up Existing Bad Signals (Database)
+**When Markets Resolve:**
+- The `watch-mode-poll` function (runs every 5 minutes) will check for pending bets
+- For each pending bet with a `polymarket_condition_id`, query Polymarket to check resolution
+- If the market is closed, determine win/loss based on the final price (YES > 0.9 = Yes won)
+- Calculate P/L: win = `stake * (1 - entry_price) / entry_price`, loss = `-stake`
 
-Run direct cleanup to expire invalid signals:
-
-```sql
--- Expire the Atlanta Hawks mismatch signal
-UPDATE signal_opportunities 
-SET status = 'expired' 
-WHERE id = '13583b9a-0fdf-4990-b84d-127a51c10192';
-
--- Expire the older Utah duplicate (keep the newer Hurricanes one)
-UPDATE signal_opportunities 
-SET status = 'expired' 
-WHERE id = 'cd9ba6f8-5b39-4844-b39a-985053c5d327';
-
--- Expire signals with edge=0 and no Polymarket data (unmatched junk)
-UPDATE signal_opportunities 
-SET status = 'expired' 
-WHERE edge_percent = 0 AND polymarket_updated_at IS NULL;
-```
-
-### Step 2: Enforce Execution Gates in SignalCard.tsx
-
-Add a `canExecute` function that checks ALL safety gates before allowing the Execute button to be enabled.
-
-```typescript
-// Calculate execution eligibility
-const canExecuteSignal = (): { allowed: boolean; reason: string } => {
-  // Gate 1: Must have team in event name
-  if (betTarget) {
-    const teamLastWord = betTarget.split(' ').pop()?.toLowerCase() || '';
-    const eventNorm = signal.event_name.toLowerCase();
-    if (teamLastWord && !eventNorm.includes(teamLastWord)) {
-      return { allowed: false, reason: 'Team mismatch' };
-    }
-  }
-  
-  // Gate 2: Must have fresh price data (≤5 minutes)
-  const stalenessMinutes = polyUpdatedAt 
-    ? (Date.now() - new Date(polyUpdatedAt).getTime()) / 60000 
-    : Infinity;
-  if (stalenessMinutes > 5) {
-    return { allowed: false, reason: 'Stale price data' };
-  }
-  
-  // Gate 3: Must have minimum liquidity ($5K)
-  if (!polyVolume || polyVolume < 5000) {
-    return { allowed: false, reason: 'Insufficient liquidity' };
-  }
-  
-  // Gate 4: High-prob artifact check (85%+ fair prob needs extra fresh data)
-  if (bookmakerProbFair >= 0.85 && signal.edge_percent > 40) {
-    return { allowed: false, reason: 'Artifact edge detected' };
-  }
-  
-  // Gate 5: Must have positive execution decision
-  if (!signal.execution || signal.execution.execution_decision === 'NO_BET') {
-    return { allowed: false, reason: 'No bet recommended' };
-  }
-  
-  return { allowed: true, reason: 'Ready to execute' };
-};
-```
-
-**Execute Button Update:**
-
-```tsx
-const executionStatus = canExecuteSignal();
-
-<Button 
-  size="sm" 
-  className={cn(
-    "flex-1 gap-1",
-    executionStatus.allowed && signal.execution.execution_decision === 'STRONG_BET' && "bg-green-600 hover:bg-green-700",
-    executionStatus.allowed && signal.execution.execution_decision === 'BET' && "bg-green-600 hover:bg-green-700",
-    !executionStatus.allowed && "bg-muted text-muted-foreground"
-  )}
-  onClick={() => onExecute(signal.id, signal.polymarket_price)}
-  disabled={!executionStatus.allowed}
-  title={!executionStatus.allowed ? executionStatus.reason : undefined}
->
-  <Check className="h-3 w-3" />
-  {executionStatus.allowed ? (
-    <>
-      {signal.execution.execution_decision === 'STRONG_BET' && 'Execute (Strong)'}
-      {signal.execution.execution_decision === 'BET' && 'Execute Bet'}
-      {signal.execution.execution_decision === 'MARGINAL' && 'Execute (Caution)'}
-    </>
-  ) : (
-    `Watch Only (${executionStatus.reason})`
-  )}
-</Button>
-```
-
-### Step 3: Visual "LOCKED" State for Non-Executable Signals
-
-Add a distinct visual treatment when signals fail gates:
-
-```tsx
-{!executionStatus.allowed && (
-  <div className="flex items-center gap-2 p-2 rounded bg-red-500/10 border border-red-500/30 text-red-400 text-xs">
-    <AlertCircle className="h-4 w-4" />
-    <span>NOT EXECUTABLE: {executionStatus.reason}</span>
-  </div>
-)}
-```
-
-### Step 4: Redeploy Edge Function
-
-The `polymarket-monitor` edge function needs to be redeployed to activate the team validation, signal exclusivity, and staleness gating logic that was added in the previous commit.
+**Resolution Detection Methods:**
+1. **Gamma API Check**: Query `gamma-api.polymarket.com/markets?condition_id=X` - look for `closed: true`
+2. **CLOB Price Check**: Final price of 0.99+ or 0.01- indicates resolution
+3. **Time-Based**: If event date has passed by 24+ hours, mark for manual review
 
 ---
 
-## Files to Modify
+### Feature 2: Editable Bet History
 
-| File | Changes |
-|------|---------|
-| `src/components/terminal/SignalCard.tsx` | Add `canExecuteSignal()` gate function, update button logic, add LOCKED visual state |
-| Database (manual cleanup) | Expire Atlanta Hawks signal, expire Utah duplicate, expire zero-edge junk |
+**Editable Fields:**
+| Field | Type | Notes |
+|-------|------|-------|
+| Event Name | Text | Full event description |
+| Side | YES/NO | The position taken |
+| Entry Price | Number | Price paid (in cents) |
+| Stake Amount | Currency | Amount wagered |
+| Edge % | Number | Edge at signal time |
+| Status | Dropdown | pending/win/loss/void |
+| P/L | Currency | Auto-calculated on win/loss, or manual |
 
----
-
-## Execution Gate Rules Summary
-
-| Gate | Condition | Result if Failed |
-|------|-----------|------------------|
-| Team Validation | `teamLastWord` not in `event_name` | Button disabled, "Team mismatch" |
-| Freshness | `polymarket_updated_at` > 5 minutes ago | Button disabled, "Stale price data" |
-| Liquidity | `polyVolume` < $5,000 | Button disabled, "Insufficient liquidity" |
-| Artifact Check | Fair prob ≥85% AND edge >40% | Button disabled, "Artifact edge detected" |
-| Decision Check | `execution_decision` = NO_BET | Button disabled, "No bet recommended" |
-
----
-
-## Expected Result After Implementation
-
-1. **Atlanta Hawks signal** → Immediately expired from DB, and future ones blocked by team validation
-2. **Utah duplicates** → One expired from DB, future ones blocked by exclusivity rule
-3. **Stale signals (>5m)** → Show "Watch Only (Stale price data)" instead of Execute button
-4. **High-prob artifacts** → Show "Watch Only (Artifact edge detected)"
-5. **Clean signals** → Show normal green "Execute (Strong)" or "Execute Bet"
+**Edit Workflow:**
+1. Click any row in the Bet History table
+2. Opens a dialog/sheet with form fields
+3. Changing Status to "win" or "loss" auto-calculates P/L (user can override)
+4. Save updates the database and recalculates all stats
 
 ---
 
-## Before vs After
+### Technical Implementation
 
-**Before:**
-```
-Blackhawks vs. Penguins
-BUY YES: Atlanta Hawks
-[Execute (Strong)] ← DANGEROUS
+#### 1. New Edge Function: `settle-bets`
+Creates a dedicated function to check and settle pending bets:
+- Query `signal_logs` for `outcome = 'pending'` with a `polymarket_condition_id`
+- For each, call Polymarket API to check resolution status
+- Update outcome and calculate P/L
+- Set `settled_at` timestamp
+
+#### 2. Integration with Polling
+Add settlement check to existing `watch-mode-poll`:
+- After main scan logic, call settlement check for efficiency
+- Limits API calls by only checking bets older than 2 hours
+
+#### 3. Stats Page Enhancements
+- **Edit Button/Row Click**: Opens `EditBetDialog` component
+- **Bulk Actions**: "Check All Pending" button to trigger manual settlement
+- **Inline Status**: Show last checked timestamp, "Checking..." state
+
+#### 4. Database Updates
+None required - existing schema supports all needed fields
+
+---
+
+### UI Components
+
+**EditBetDialog Component:**
+- Form with all editable fields
+- Auto P/L calculation when status changes
+- Validation (stake must be positive, price between 0-1)
+- Delete button for removing incorrect entries
+
+**Settlement Status Indicator:**
+- Small icon next to pending bets showing "Auto-checking enabled"
+- Toast notification when bets are auto-settled
+
+---
+
+### Files to Create/Modify
+
+| File | Action | Purpose |
+|------|--------|---------|
+| `supabase/functions/settle-bets/index.ts` | Create | Settlement logic |
+| `supabase/functions/watch-mode-poll/index.ts` | Modify | Add settlement call |
+| `src/components/stats/EditBetDialog.tsx` | Create | Edit form dialog |
+| `src/pages/Stats.tsx` | Modify | Add edit functionality, check button |
+| `src/hooks/useSignalStats.ts` | Modify | Add update/delete mutations |
+
+---
+
+### P/L Calculation Logic
+
+```text
+If outcome = 'win':
+  P/L = stake_amount * (1 - entry_price) / entry_price
+  Example: $100 stake at 60c = $100 * 0.40 / 0.60 = $66.67 profit
+
+If outcome = 'loss':
+  P/L = -stake_amount
+  Example: $100 stake = -$100 loss
+
+If outcome = 'void':
+  P/L = 0 (stake returned)
 ```
 
-**After:**
-```
-Blackhawks vs. Penguins
-BUY YES: Atlanta Hawks
-[Watch Only (Team mismatch)] ← SAFE
-⚠️ NOT EXECUTABLE: Team mismatch
-```
+---
+
+### Summary
+
+This implementation provides:
+- Automatic bet settlement during regular polling cycles
+- Full manual override capability for all bet fields
+- P/L auto-calculation with the option to manually adjust
+- Seamless integration with existing stats and charts
 
