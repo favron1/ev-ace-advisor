@@ -1,37 +1,71 @@
 
+# Plan: Fix Polymarket Links and Add Alternate URL Support
 
-## Fix: Backfill Missing Team Names and Prevent Future Gaps
+## Problem
+You're getting an SSL certificate error (`NET::ERR_CERT_COMMON_NAME_INVALID`) when clicking "Trade on Poly" links. This is a local network/browser issue on your computer, but we can work around it by:
 
-### What Went Wrong
-The Utah vs. Hurricanes signal was created before the fix. The matching logic found a bookmaker match but failed to extract the specific team name due to nickname vs. full name mismatches. The signal was saved with `recommended_outcome: null`.
+1. Using direct market links instead of search queries
+2. Providing alternate URL formats to try
+3. Adding a copy-to-clipboard fallback
 
-### Why This Must Never Happen
-You're correct - if the system can't determine which side to bet, showing the signal is useless. A signal without a bet side is not actionable.
+## Root Cause Analysis
+- The current "Trade on Poly" button generates: `polymarket.com/search?query=Utah%20Jazz%20vs%20Golden%20State%20Warriors`
+- This search URL is unreliable AND may be blocked by your network
+- The system HAS the `condition_id` in the cache table but doesn't pass it to signals
 
-### Fix Plan
+## Solution
 
-**1. Update the signal creation logic to REQUIRE a team name**
-- In `polymarket-monitor`, if `match.teamName` is empty or null, don't create the signal
-- Only create signals when we can confidently identify the bet side
+### 1. Store condition_id in signals
+**File: `supabase/functions/polymarket-monitor/index.ts`**
 
-**2. Fix the existing Utah signal**
-- Query the Polymarket cache to get the extracted entity (team name)
-- Update the existing signal with the correct `recommended_outcome`
+Add `polymarket_condition_id` to the signal creation payload:
+```typescript
+.insert({
+  event_name: event.event_name,
+  polymarket_condition_id: event.polymarket_condition_id, // NEW
+  // ... rest of fields
+})
+```
 
-**3. Improve team name extraction**
-- Use the `extracted_entity` field from `polymarket_h2h_cache` which already has the team name parsed
-- This is more reliable than trying to parse it from matching logic
+### 2. Add condition_id column to signal_opportunities
+**Database Migration**
 
-### Technical Changes
+```sql
+ALTER TABLE signal_opportunities 
+ADD COLUMN IF NOT EXISTS polymarket_condition_id TEXT;
+```
 
-| File | Change |
-|------|--------|
-| `supabase/functions/polymarket-monitor/index.ts` | Add validation: if `teamName` is empty, skip signal creation |
-| `supabase/functions/polymarket-monitor/index.ts` | Use `extracted_entity` from cache as fallback for team name |
-| Database | Run update to backfill `recommended_outcome` from cache data |
+### 3. Update SignalCard with smart link handling
+**File: `src/components/terminal/SignalCard.tsx`**
 
-### Validation
-- Signals will only be created when we know the exact bet side
-- SMS and UI will always show the team name
-- No more "BET SIDE UNKNOWN" scenarios for true arbitrage
+Replace the simple link button with a dropdown that offers:
+- **Open in Polymarket** - Primary action using direct condition_id link
+- **Try alternate URL (www)** - Fallback using `www.polymarket.com`
+- **Copy link** - Copies the URL to clipboard for manual pasting
+- **Search Polymarket** - Falls back to search if no condition_id
 
+URL format options:
+```
+https://polymarket.com/event/[condition_id]
+https://www.polymarket.com/event/[condition_id]
+```
+
+### 4. Add visual feedback for copy action
+Show a toast notification when the link is copied, so you can paste it into a different browser or incognito window.
+
+## Files to Modify
+
+| File | Changes |
+|------|---------|
+| `supabase/functions/polymarket-monitor/index.ts` | Add `polymarket_condition_id` to signal insert |
+| `src/components/terminal/SignalCard.tsx` | Add dropdown with alternate URLs + copy button |
+| Database migration | Add `polymarket_condition_id` column |
+
+## Immediate Workaround
+While you wait for the fix, try these steps to resolve the SSL error:
+
+1. **Check system clock** - Ensure your date/time is correct
+2. **Clear Chrome SSL cache**: Settings > Privacy > Clear browsing data > Cookies and site data
+3. **Try incognito window** - Bypasses cached certificates
+4. **Try Safari or Firefox** - Different SSL certificate handling
+5. **Check for antivirus/firewall** - Some security software intercepts HTTPS traffic
