@@ -154,6 +154,40 @@ const TEAM_ALIASES: Record<string, string[]> = {
   'new england patriots': ['patriots', 'pats', 'new england'],
   'green bay packers': ['packers', 'green bay'],
   
+  // NHL Teams
+  'washington capitals': ['capitals', 'caps', 'washington'],
+  'detroit red wings': ['red wings', 'wings', 'detroit'],
+  'tampa bay lightning': ['lightning', 'bolts', 'tampa bay'],
+  'winnipeg jets': ['jets', 'winnipeg'],
+  'new jersey devils': ['devils', 'nj devils', 'new jersey'],
+  'nashville predators': ['predators', 'preds', 'nashville'],
+  'toronto maple leafs': ['maple leafs', 'leafs', 'toronto'],
+  'seattle kraken': ['kraken', 'seattle'],
+  'colorado avalanche': ['avalanche', 'avs', 'colorado'],
+  'montreal canadiens': ['canadiens', 'habs', 'montreal'],
+  'dallas stars': ['stars', 'dallas'],
+  'vegas golden knights': ['golden knights', 'knights', 'vegas'],
+  'philadelphia flyers': ['flyers', 'philly'],
+  'boston bruins': ['bruins', 'boston'],
+  'florida panthers': ['panthers', 'florida', 'cats'],
+  'st louis blues': ['blues', 'st louis'],
+  'carolina hurricanes': ['hurricanes', 'canes', 'carolina'],
+  'chicago blackhawks': ['blackhawks', 'hawks', 'chicago'],
+  'pittsburgh penguins': ['penguins', 'pens', 'pittsburgh'],
+  'san jose sharks': ['sharks', 'san jose'],
+  'edmonton oilers': ['oilers', 'edmonton'],
+  'calgary flames': ['flames', 'calgary'],
+  'minnesota wild': ['wild', 'minnesota'],
+  'anaheim ducks': ['ducks', 'anaheim'],
+  'vancouver canucks': ['canucks', 'vancouver'],
+  'new york islanders': ['islanders', 'isles', 'ny islanders'],
+  'new york rangers': ['rangers', 'ny rangers'],
+  'los angeles kings': ['kings', 'la kings', 'los angeles'],
+  'buffalo sabres': ['sabres', 'buffalo'],
+  'utah hockey club': ['utah', 'utah hc'],
+  'ottawa senators': ['senators', 'sens', 'ottawa'],
+  'columbus blue jackets': ['blue jackets', 'cbj', 'columbus'],
+  
   // ATP Tour - Men's Top 20
   'jannik sinner': ['sinner', 'jannik'],
   'carlos alcaraz': ['alcaraz', 'carlos'],
@@ -997,14 +1031,22 @@ Deno.serve(async (req) => {
       if (processedEvents.has(eventName)) continue;
       processedEvents.add(eventName);
 
-      // Skip 3-way markets (soccer with Draw)
-      if (signals.some(s => normalizeName(s.outcome) === 'draw')) {
-        console.log(`Skipping 3-way market: ${eventName}`);
+      // Filter out Draw outcomes for sports where they're not relevant to Polymarket (NHL, NBA have OT)
+      // Soccer 3-way markets should still be skipped since Polymarket doesn't offer those
+      const nonDrawSignals = signals.filter(s => normalizeName(s.outcome) !== 'draw');
+      
+      // If only Draw remains, skip this event (true 3-way soccer market)
+      if (nonDrawSignals.length === 0) {
+        console.log(`Skipping market with only Draw: ${eventName}`);
         continue;
       }
+      
+      // If it's a soccer match (detected by having Draw) with remaining non-draw signals,
+      // we can still try to match but flag it as partial
+      const has3WayMarket = signals.length !== nonDrawSignals.length;
 
       // Find best signal (prefer sharp books)
-      const sortedSignals = signals.sort((a, b) => {
+      const sortedSignals = nonDrawSignals.sort((a, b) => {
         if (a.is_sharp_book !== b.is_sharp_book) return a.is_sharp_book ? -1 : 1;
         return b.confirming_books - a.confirming_books;
       });
