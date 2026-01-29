@@ -212,13 +212,20 @@ export function useSignals() {
     minConfidence?: number;
     urgency?: string[];
     trueEdgesOnly?: boolean;
-    bettableOnly?: boolean; // NEW: Filter by execution decision
+    bettableOnly?: boolean;
+    movementConfirmedOnly?: boolean; // NEW: Filter for movement-confirmed signals
   }) => {
     return enrichedSignals.filter(s => {
       // Filter by true edges only (matched to Polymarket)
       if (filters.trueEdgesOnly && s.is_true_arbitrage !== true) return false;
       
-      // NEW: Filter by bettable only (BET or STRONG_BET decisions)
+      // NEW: Filter by movement-confirmed only (elite or strong tier)
+      if (filters.movementConfirmedOnly) {
+        const tier = s.signal_tier || 'static';
+        if (tier === 'static' && !s.movement_confirmed) return false;
+      }
+      
+      // Filter by bettable only (BET or STRONG_BET decisions)
       if (filters.bettableOnly && s.execution) {
         const decision = s.execution.execution_decision;
         if (decision !== 'BET' && decision !== 'STRONG_BET') return false;
