@@ -589,43 +589,104 @@ Deno.serve(async (req) => {
               
               edgesFound++;
 
-              // Create signal with validated team name and condition_id for direct linking
-              const { data: signal, error: signalError } = await supabase
+              // Check for existing active/executed signal for this event+outcome
+              const { data: existingSignals } = await supabase
                 .from('signal_opportunities')
-                .insert({
-                  event_name: event.event_name,
-                  recommended_outcome: teamName,
-                  side: 'YES',
-                  polymarket_price: livePolyPrice,
-                  bookmaker_probability: bookmakerFairProb,
-                  bookmaker_prob_fair: bookmakerFairProb,
-                  edge_percent: rawEdge * 100,
-                  confidence_score: Math.min(85, 50 + Math.floor(netEdge * 500)),
-                  urgency: eventStart.getTime() - now.getTime() < 3600000 ? 'critical' : 
-                          eventStart.getTime() - now.getTime() < 14400000 ? 'high' : 'normal',
-                  is_true_arbitrage: true,
-                  polymarket_yes_price: livePolyPrice,
-                  polymarket_volume: liveVolume,
-                  polymarket_updated_at: now.toISOString(),
-                  signal_strength: netEdge * 100,
-                  status: 'active',
-                   // IMPORTANT: Used by UI for kickoff countdown + by refresh-signals for urgency/time_label
-                   expires_at: event.commence_time,
-                  polymarket_condition_id: event.polymarket_condition_id, // NEW: for direct market links
-                  signal_factors: {
-                    raw_edge: rawEdge * 100,
-                    net_edge: netEdge * 100,
-                    market_type: marketType,
-                    sport: sport,
-                    volume: liveVolume,
-                    team_name: teamName,
-                  },
-                })
-                .select()
-                .single();
+                .select('id, status')
+                .eq('event_name', event.event_name)
+                .eq('recommended_outcome', teamName)
+                .in('status', ['active', 'executed']);
 
-              if (!signalError && signal) {
-                // Send SMS with team name
+              const existingSignal = existingSignals?.[0];
+
+              if (existingSignal?.status === 'executed') {
+                // User already placed this bet, skip
+                console.log(`[POLY-MONITOR] Skipping ${event.event_name} - already executed`);
+                continue;
+              }
+
+              let signal = null;
+              let signalError = null;
+
+              if (existingSignal) {
+                // UPDATE existing active signal with fresh data
+                const { data, error } = await supabase
+                  .from('signal_opportunities')
+                  .update({
+                    polymarket_price: livePolyPrice,
+                    bookmaker_probability: bookmakerFairProb,
+                    bookmaker_prob_fair: bookmakerFairProb,
+                    edge_percent: rawEdge * 100,
+                    confidence_score: Math.min(85, 50 + Math.floor(netEdge * 500)),
+                    urgency: eventStart.getTime() - now.getTime() < 3600000 ? 'critical' : 
+                            eventStart.getTime() - now.getTime() < 14400000 ? 'high' : 'normal',
+                    polymarket_yes_price: livePolyPrice,
+                    polymarket_volume: liveVolume,
+                    polymarket_updated_at: now.toISOString(),
+                    signal_strength: netEdge * 100,
+                    expires_at: event.commence_time,
+                    signal_factors: {
+                      raw_edge: rawEdge * 100,
+                      net_edge: netEdge * 100,
+                      market_type: marketType,
+                      sport: sport,
+                      volume: liveVolume,
+                      team_name: teamName,
+                      hours_until_event: Math.floor((eventStart.getTime() - now.getTime()) / 3600000),
+                      time_label: `${Math.floor((eventStart.getTime() - now.getTime()) / 3600000)}h`,
+                    },
+                  })
+                  .eq('id', existingSignal.id)
+                  .select()
+                  .single();
+
+                signal = data;
+                signalError = error;
+                console.log(`[POLY-MONITOR] Updated signal for ${event.event_name}`);
+              } else {
+                // INSERT new signal
+                const { data, error } = await supabase
+                  .from('signal_opportunities')
+                  .insert({
+                    event_name: event.event_name,
+                    recommended_outcome: teamName,
+                    side: 'YES',
+                    polymarket_price: livePolyPrice,
+                    bookmaker_probability: bookmakerFairProb,
+                    bookmaker_prob_fair: bookmakerFairProb,
+                    edge_percent: rawEdge * 100,
+                    confidence_score: Math.min(85, 50 + Math.floor(netEdge * 500)),
+                    urgency: eventStart.getTime() - now.getTime() < 3600000 ? 'critical' : 
+                            eventStart.getTime() - now.getTime() < 14400000 ? 'high' : 'normal',
+                    is_true_arbitrage: true,
+                    polymarket_yes_price: livePolyPrice,
+                    polymarket_volume: liveVolume,
+                    polymarket_updated_at: now.toISOString(),
+                    signal_strength: netEdge * 100,
+                    status: 'active',
+                    expires_at: event.commence_time,
+                    polymarket_condition_id: event.polymarket_condition_id,
+                    signal_factors: {
+                      raw_edge: rawEdge * 100,
+                      net_edge: netEdge * 100,
+                      market_type: marketType,
+                      sport: sport,
+                      volume: liveVolume,
+                      team_name: teamName,
+                      hours_until_event: Math.floor((eventStart.getTime() - now.getTime()) / 3600000),
+                      time_label: `${Math.floor((eventStart.getTime() - now.getTime()) / 3600000)}h`,
+                    },
+                  })
+                  .select()
+                  .single();
+
+                signal = data;
+                signalError = error;
+                console.log(`[POLY-MONITOR] Created new signal for ${event.event_name}`);
+              }
+
+              // Only send SMS for NEW signals (not updates)
+              if (!signalError && signal && !existingSignal) {
                 const alertSent = await sendSmsAlert(
                   supabase, event, livePolyPrice, bookmakerFairProb,
                   rawEdge, netEdge, liveVolume, stakeAmount, marketType, teamName
