@@ -219,18 +219,18 @@ Deno.serve(async (req) => {
   }
 
   const startTime = Date.now();
-  console.log('[POLY-SYNC-24H] Starting universal sports scan...');
+  console.log('[POLY-SYNC-24H] Starting universal sports scan with 7-DAY window...');
 
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // Calculate 24hr window
+    // Calculate 7-DAY window (expanded from 24h for comprehensive coverage)
     const now = new Date();
-    const in24Hours = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const in7Days = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
-    console.log(`[POLY-SYNC-24H] Window: now to ${in24Hours.toISOString()}`);
+    console.log(`[POLY-SYNC-24H] Window: now to ${in7Days.toISOString()} (7 days)`);
 
     // Fetch sports events using tag_slug=sports filter
     let allEvents: any[] = [];
@@ -271,7 +271,7 @@ Deno.serve(async (req) => {
       console.log(`  ${i + 1}. title="${e.title || 'N/A'}" endDate="${e.endDate || 'N/A'}"`);
     });
 
-    // Filter: ends within 24 hours (sports filter already applied via tag_slug)
+    // Filter: ends within 7 DAYS (sports filter already applied via tag_slug)
     const qualifying: any[] = [];
     let statsNoEndDate = 0;
     let statsOutsideWindow = 0;
@@ -292,9 +292,9 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      // End date must be within 24 hours
+      // End date must be within 7 DAYS (expanded window for early movement detection)
       const endDate = new Date(event.endDate);
-      if (endDate > in24Hours || endDate < now) {
+      if (endDate > in7Days || endDate < now) {
         statsOutsideWindow++;
         continue;
       }
@@ -359,7 +359,7 @@ Deno.serve(async (req) => {
 
     console.log(`[POLY-SYNC-24H] Filtering stats:`);
     console.log(`  - No end date: ${statsNoEndDate}`);
-    console.log(`  - Outside 24h window: ${statsOutsideWindow}`);
+    console.log(`  - Outside 7-day window: ${statsOutsideWindow}`);
     console.log(`  - No markets: ${statsNoMarkets}`);
     console.log(`  - No H2H market: ${statsNoH2H}`);
     console.log(`  - QUALIFYING: ${qualifying.length}`);
@@ -506,6 +506,7 @@ Deno.serve(async (req) => {
           token_id_yes: tokenIdYes,
           token_id_no: tokenIdNo,
           status: 'active',
+          monitoring_status: 'watching', // NEW: Mark for continuous monitoring
           last_price_update: now.toISOString(),
           last_bulk_sync: now.toISOString(),
         }, {

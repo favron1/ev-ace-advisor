@@ -224,79 +224,97 @@ function calculateSignalTier(
 
 // ============= END MOVEMENT DETECTION =============
 
-// Batch fetch CLOB prices for multiple tokens - FIXED: Use POST with JSON body
+// Batch fetch CLOB prices for multiple tokens - with chunking for large payloads
 async function fetchClobPrices(tokenIds: string[]): Promise<Map<string, { bid: number; ask: number }>> {
   const priceMap = new Map<string, { bid: number; ask: number }>();
   
   if (tokenIds.length === 0) return priceMap;
   
-  try {
-    // Build request body: array of { token_id, side } for both BUY and SELL
-    const requestBody = tokenIds.flatMap(tokenId => [
-      { token_id: tokenId, side: 'BUY' },
-      { token_id: tokenId, side: 'SELL' },
-    ]);
-    
-    const response = await fetch(`${CLOB_API_BASE}/prices`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody),
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.log(`[POLY-MONITOR] CLOB prices POST failed: ${response.status} - ${errorText.substring(0, 200)}`);
-      return priceMap;
-    }
-    
-    const data = await response.json();
-    
-    // Response format: { "token_id": { "BUY": "0.55", "SELL": "0.57" }, ... }
-    for (const [tokenId, priceData] of Object.entries(data)) {
-      if (typeof priceData === 'object' && priceData !== null) {
-        const pd = priceData as Record<string, string>;
-        priceMap.set(tokenId, {
-          bid: parseFloat(pd.BUY || '0'),
-          ask: parseFloat(pd.SELL || '0'),
-        });
-      }
-    }
-    
-    console.log(`[POLY-MONITOR] CLOB prices: got ${priceMap.size} token prices`);
-  } catch (error) {
-    console.error('[POLY-MONITOR] CLOB batch price fetch error:', error);
+  // Chunk tokens to avoid payload size limits (max 50 tokens per request = 100 price entries)
+  const CHUNK_SIZE = 50;
+  const chunks: string[][] = [];
+  for (let i = 0; i < tokenIds.length; i += CHUNK_SIZE) {
+    chunks.push(tokenIds.slice(i, i + CHUNK_SIZE));
   }
   
+  console.log(`[POLY-MONITOR] Fetching CLOB prices in ${chunks.length} chunks (${tokenIds.length} tokens)`);
+  
+  for (const chunk of chunks) {
+    try {
+      // Build request body: array of { token_id, side } for both BUY and SELL
+      const requestBody = chunk.flatMap(tokenId => [
+        { token_id: tokenId, side: 'BUY' },
+        { token_id: tokenId, side: 'SELL' },
+      ]);
+      
+      const response = await fetch(`${CLOB_API_BASE}/prices`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.log(`[POLY-MONITOR] CLOB prices chunk failed: ${response.status} - ${errorText.substring(0, 100)}`);
+        continue; // Continue with next chunk
+      }
+      
+      const data = await response.json();
+      
+      // Response format: { "token_id": { "BUY": "0.55", "SELL": "0.57" }, ... }
+      for (const [tokenId, priceData] of Object.entries(data)) {
+        if (typeof priceData === 'object' && priceData !== null) {
+          const pd = priceData as Record<string, string>;
+          priceMap.set(tokenId, {
+            bid: parseFloat(pd.BUY || '0'),
+            ask: parseFloat(pd.SELL || '0'),
+          });
+        }
+      }
+    } catch (error) {
+      console.error('[POLY-MONITOR] CLOB chunk price fetch error:', error);
+    }
+  }
+  
+  console.log(`[POLY-MONITOR] CLOB prices: got ${priceMap.size} token prices`);
   return priceMap;
 }
 
-// Fetch spreads for tokens
+// Fetch spreads for tokens - with chunking
 async function fetchClobSpreads(tokenIds: string[]): Promise<Map<string, number>> {
   const spreadMap = new Map<string, number>();
   
   if (tokenIds.length === 0) return spreadMap;
   
-  try {
-    const response = await fetch(`${CLOB_API_BASE}/spreads`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(tokenIds.map(id => ({ token_id: id }))),
-    });
-    
-    if (!response.ok) {
-      console.log(`[POLY-MONITOR] CLOB spreads fetch failed: ${response.status}`);
-      return spreadMap;
-    }
-    
-    const data = await response.json();
-    
-    for (const [tokenId, spread] of Object.entries(data)) {
-      if (typeof spread === 'string' || typeof spread === 'number') {
-        spreadMap.set(tokenId, parseFloat(String(spread)));
+  const CHUNK_SIZE = 50;
+  const chunks: string[][] = [];
+  for (let i = 0; i < tokenIds.length; i += CHUNK_SIZE) {
+    chunks.push(tokenIds.slice(i, i + CHUNK_SIZE));
+  }
+  
+  for (const chunk of chunks) {
+    try {
+      const response = await fetch(`${CLOB_API_BASE}/spreads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(chunk.map(id => ({ token_id: id }))),
+      });
+      
+      if (!response.ok) {
+        console.log(`[POLY-MONITOR] CLOB spreads chunk failed: ${response.status}`);
+        continue;
       }
+      
+      const data = await response.json();
+      
+      for (const [tokenId, spread] of Object.entries(data)) {
+        if (typeof spread === 'string' || typeof spread === 'number') {
+          spreadMap.set(tokenId, parseFloat(String(spread)));
+        }
+      }
+    } catch (error) {
+      console.error('[POLY-MONITOR] CLOB spreads chunk error:', error);
     }
-  } catch (error) {
-    console.error('[POLY-MONITOR] CLOB spreads fetch error:', error);
   }
   
   return spreadMap;
@@ -534,41 +552,73 @@ Deno.serve(async (req) => {
 
     const now = new Date();
 
-    // Load all MONITORED events with their cache data
-    const { data: monitoredEvents, error: loadError } = await supabase
-      .from('event_watch_state')
+    // Load markets marked for monitoring - filter to sports with bookmaker coverage
+    // This is the "Scan Once, Monitor Continuously" architecture
+    const supportedSports = Object.keys(SPORT_ENDPOINTS); // ['NBA', 'NFL', 'NHL', 'MLB', 'UFC', 'Tennis', 'EPL', 'UCL', 'LaLiga', 'SerieA', 'Bundesliga', 'Boxing']
+    
+    const { data: watchedMarkets, error: cacheLoadError } = await supabase
+      .from('polymarket_h2h_cache')
       .select('*')
-      .eq('watch_state', 'monitored')
-      .gt('commence_time', now.toISOString())
-      .order('commence_time', { ascending: true });
+      .in('monitoring_status', ['watching', 'triggered'])
+      .eq('status', 'active')
+      .in('extracted_league', supportedSports) // Only sports with bookmaker endpoints
+      .gte('volume', 5000) // Minimum liquidity filter
+      .order('event_date', { ascending: true })
+      .limit(200); // Cap at 200 markets per run to avoid timeout
 
-    if (loadError) throw new Error(`Failed to load events: ${loadError.message}`);
+    if (cacheLoadError) throw new Error(`Failed to load markets: ${cacheLoadError.message}`);
 
-    console.log(`[POLY-MONITOR] Loaded ${monitoredEvents?.length || 0} monitored events`);
+    console.log(`[POLY-MONITOR] Loaded ${watchedMarkets?.length || 0} watched markets from cache`);
 
-    if (!monitoredEvents || monitoredEvents.length === 0) {
+    if (!watchedMarkets || watchedMarkets.length === 0) {
       return new Response(
-        JSON.stringify({ success: true, events_polled: 0, edges_found: 0, message: 'No events to poll' }),
+        JSON.stringify({ success: true, events_polled: 0, edges_found: 0, message: 'No markets to monitor - run Full Scan first' }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    // Get cache data for market types and sports
-    const conditionIds = monitoredEvents
-      .map(e => e.polymarket_condition_id)
-      .filter(Boolean);
+    // Get matching event_watch_state entries for these markets
+    const marketConditionIds = watchedMarkets.map(m => m.condition_id).filter(Boolean);
+    
+    const { data: monitoredEvents } = await supabase
+      .from('event_watch_state')
+      .select('*')
+      .in('polymarket_condition_id', marketConditionIds)
+      .gt('commence_time', now.toISOString());
 
-    const { data: cacheData } = await supabase
-      .from('polymarket_h2h_cache')
-      .select('condition_id, market_type, extracted_league, extracted_entity, token_id_yes, token_id_no, best_bid, best_ask, spread_pct, volume')
-      .in('condition_id', conditionIds);
+    // Build cache map from watchedMarkets (already have all the data)
+    const cacheMap = new Map(watchedMarkets.map(c => [c.condition_id, c]));
 
-    const cacheMap = new Map(cacheData?.map(c => [c.condition_id, c]) || []);
+    // Build lookup map from event_watch_state for additional data
+    const eventStateMap = new Map((monitoredEvents || []).map(e => [e.polymarket_condition_id, e]));
+    
+    // Transform watchedMarkets into eventsToProcess format
+    // This ensures we process ALL watched markets, even those without event_watch_state entries
+    const eventsToProcess = watchedMarkets
+      .filter(m => new Date(m.event_date) > now) // Only future events
+      .map(market => {
+        // Use existing event_watch_state data if available, otherwise create synthetic entry
+        const existingState = eventStateMap.get(market.condition_id);
+        return existingState || {
+          id: null, // No DB id for synthetic entries
+          event_key: `poly_${market.condition_id}`,
+          event_name: market.event_title || market.question,
+          polymarket_condition_id: market.condition_id,
+          polymarket_question: market.question,
+          polymarket_yes_price: market.yes_price,
+          polymarket_volume: market.volume,
+          commence_time: market.event_date,
+          last_poly_refresh: market.last_price_update,
+          watch_state: 'monitored',
+        };
+      });
+
+    console.log(`[POLY-MONITOR] Processing ${eventsToProcess.length} markets (${eventStateMap.size} with event_watch_state)`);
 
     // Group events by detected sport
-    const sportGroups: Map<string, typeof monitoredEvents> = new Map();
+    const sportGroups: Map<string, typeof eventsToProcess> = new Map();
     
-    for (const event of monitoredEvents) {
+    for (const event of eventsToProcess) {
       const cache = cacheMap.get(event.polymarket_condition_id);
       const sport = cache?.extracted_league || 'Unknown';
       
@@ -580,13 +630,12 @@ Deno.serve(async (req) => {
 
     console.log(`[POLY-MONITOR] Sport groups: ${[...sportGroups.keys()].join(', ')}`);
 
-    // Collect all token IDs for batch CLOB fetch
+    // Collect all token IDs for batch CLOB fetch (limit to 100 per batch to avoid payload errors)
     const allTokenIds: string[] = [];
-    for (const event of monitoredEvents) {
-      const cache = cacheMap.get(event.polymarket_condition_id);
-      if (cache?.token_id_yes) allTokenIds.push(cache.token_id_yes);
+    for (const market of watchedMarkets) {
+      if (market.token_id_yes) allTokenIds.push(market.token_id_yes);
     }
-    
+
     // Batch fetch CLOB prices and spreads
     console.log(`[POLY-MONITOR] Batch fetching CLOB prices for ${allTokenIds.length} tokens`);
     const [clobPrices, clobSpreads] = await Promise.all([
@@ -665,7 +714,7 @@ Deno.serve(async (req) => {
     let eventsMatched = 0;
     let movementConfirmedCount = 0;
 
-    for (const event of monitoredEvents) {
+    for (const event of eventsToProcess) {
       try {
         // Check if event started
         const eventStart = new Date(event.commence_time);
@@ -837,23 +886,44 @@ Deno.serve(async (req) => {
             }
             
             const { netEdge } = calculateNetEdge(rawEdge, liveVolume, stakeAmount, spreadPct);
-            const signalTier = calculateSignalTier(movement.triggered, netEdge);
             
-            if (movement.triggered) {
+            // ========== DUAL TRIGGER SYSTEM ==========
+            // TRIGGER CONDITIONS (either/or):
+            // 1. Edge Trigger: raw_edge >= 5% (high static edge)
+            // 2. Movement Trigger: 2+ sharp books moved same direction
+            const edgeTriggered = rawEdge >= 0.05;
+            const movementTriggered = movement.triggered && movement.booksConfirming >= 2;
+            
+            let triggerReason: 'edge' | 'movement' | 'both' | null = null;
+            if (edgeTriggered && movementTriggered) {
+              triggerReason = 'both';
+            } else if (edgeTriggered) {
+              triggerReason = 'edge';
+            } else if (movementTriggered) {
+              triggerReason = 'movement';
+            }
+            
+            // Calculate signal tier based on trigger type
+            let signalTier: 'elite' | 'strong' | 'static' = 'static';
+            if (triggerReason === 'both') {
+              signalTier = 'elite';
+            } else if (triggerReason === 'edge' || triggerReason === 'movement') {
+              signalTier = rawEdge >= 0.05 ? 'elite' : 'strong';
+            }
+            
+            if (movementTriggered) {
               movementConfirmedCount++;
               console.log(`[POLY-MONITOR] Movement CONFIRMED for ${event.event_name}: ${movement.booksConfirming} books, ${movement.direction}, ${(movement.velocity * 100).toFixed(1)}% velocity -> ${betSide}`);
             }
             
-            // Only create signals if:
-            // 1. Movement confirmed (any tier) OR
-            // 2. Very high static edge (≥5% net)
-            if (!movement.triggered && netEdge < 0.05) {
-              console.log(`[POLY-MONITOR] Skipping static edge for ${event.event_name} (${(netEdge * 100).toFixed(1)}% net) - no movement detected`);
+            // SKIP if neither trigger fired
+            if (!triggerReason) {
+              console.log(`[POLY-MONITOR] No trigger for ${event.event_name} (${(rawEdge * 100).toFixed(1)}% edge, ${movement.booksConfirming || 0} books) - waiting`);
               continue;
             }
-            // ========== END MOVEMENT GATE ==========
             
-            console.log(`[POLY-MONITOR] ${signalTier.toUpperCase()} edge (${betSide}): ${event.event_name} - Raw: ${(rawEdge * 100).toFixed(1)}%, Net: ${(netEdge * 100).toFixed(1)}%`);
+            console.log(`[POLY-MONITOR] TRIGGER: ${triggerReason.toUpperCase()} | ${signalTier.toUpperCase()} (${betSide}): ${event.event_name} - Raw: ${(rawEdge * 100).toFixed(1)}%, Books: ${movement.booksConfirming || 0}`);
+            // ========== END DUAL TRIGGER SYSTEM ==========
             
             edgesFound++;
 
@@ -889,7 +959,7 @@ Deno.serve(async (req) => {
               signal_strength: netEdge * 100,
               expires_at: event.commence_time,
               // NEW: Movement detection fields
-              movement_confirmed: movement.triggered,
+              movement_confirmed: movementTriggered,
               movement_velocity: movement.velocity,
               signal_tier: signalTier,
               signal_factors: {
@@ -901,16 +971,25 @@ Deno.serve(async (req) => {
                 team_name: teamName,
                 hours_until_event: Math.floor((eventStart.getTime() - now.getTime()) / 3600000),
                 time_label: `${Math.floor((eventStart.getTime() - now.getTime()) / 3600000)}h`,
-                // Movement data
-                movement_confirmed: movement.triggered,
+                // Dual trigger system data
+                trigger_reason: triggerReason,
+                edge_triggered: edgeTriggered,
+                movement_triggered: movementTriggered,
+                movement_confirmed: movementTriggered,
                 movement_velocity: movement.velocity * 100,
                 movement_direction: movement.direction,
                 books_confirming_movement: movement.booksConfirming,
                 signal_tier: signalTier,
-                // NEW: Directional labeling
+                // Directional labeling
                 bet_direction: betSide === 'YES' ? 'BUY_YES' : 'BUY_NO',
               },
             };
+            
+            // Update polymarket_h2h_cache monitoring_status to 'triggered'
+            await supabase
+              .from('polymarket_h2h_cache')
+              .update({ monitoring_status: 'triggered' })
+              .eq('condition_id', event.polymarket_condition_id);
 
             // CRITICAL FIX #2: One-signal-per-event exclusivity
             // Before creating/updating signal, expire any opposing signal for this event
@@ -981,12 +1060,12 @@ Deno.serve(async (req) => {
     }
 
     const duration = Date.now() - startTime;
-    console.log(`[POLY-MONITOR] Complete: ${monitoredEvents.length} polled, ${eventsMatched} matched, ${edgesFound} edges (${movementConfirmedCount} movement-confirmed), ${alertsSent} alerts in ${duration}ms`);
+    console.log(`[POLY-MONITOR] Complete: ${eventsToProcess.length} polled, ${eventsMatched} matched, ${edgesFound} edges (${movementConfirmedCount} movement-confirmed), ${alertsSent} alerts in ${duration}ms`);
 
     return new Response(
       JSON.stringify({
         success: true,
-        events_polled: monitoredEvents.length,
+        events_polled: eventsToProcess.length,
         events_matched: eventsMatched,
         events_expired: eventsExpired,
         edges_found: edgesFound,

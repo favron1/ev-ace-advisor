@@ -264,6 +264,7 @@ export type Database = {
           last_price_update: string | null
           liquidity: number | null
           market_type: string | null
+          monitoring_status: string | null
           no_price: number
           orderbook_depth: number | null
           question: string
@@ -294,6 +295,7 @@ export type Database = {
           last_price_update?: string | null
           liquidity?: number | null
           market_type?: string | null
+          monitoring_status?: string | null
           no_price: number
           orderbook_depth?: number | null
           question: string
@@ -324,6 +326,7 @@ export type Database = {
           last_price_update?: string | null
           liquidity?: number | null
           market_type?: string | null
+          monitoring_status?: string | null
           no_price?: number
           orderbook_depth?: number | null
           question?: string
