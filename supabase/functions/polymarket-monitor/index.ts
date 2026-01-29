@@ -224,36 +224,45 @@ function calculateSignalTier(
 
 // ============= END MOVEMENT DETECTION =============
 
-// Batch fetch CLOB prices for multiple tokens
+// Batch fetch CLOB prices for multiple tokens - FIXED: Use POST with JSON body
 async function fetchClobPrices(tokenIds: string[]): Promise<Map<string, { bid: number; ask: number }>> {
   const priceMap = new Map<string, { bid: number; ask: number }>();
   
   if (tokenIds.length === 0) return priceMap;
   
   try {
-    const tokenIdsParam = tokenIds.join(',');
-    const url = `${CLOB_API_BASE}/prices?token_ids=${encodeURIComponent(tokenIdsParam)}`;
+    // Build request body: array of { token_id, side } for both BUY and SELL
+    const requestBody = tokenIds.flatMap(tokenId => [
+      { token_id: tokenId, side: 'BUY' },
+      { token_id: tokenId, side: 'SELL' },
+    ]);
     
-    const response = await fetch(url);
+    const response = await fetch(`${CLOB_API_BASE}/prices`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody),
+    });
+    
     if (!response.ok) {
-      console.log(`[POLY-MONITOR] CLOB prices fetch failed: ${response.status}`);
+      const errorText = await response.text();
+      console.log(`[POLY-MONITOR] CLOB prices POST failed: ${response.status} - ${errorText.substring(0, 200)}`);
       return priceMap;
     }
     
     const data = await response.json();
     
+    // Response format: { "token_id": { "BUY": "0.55", "SELL": "0.57" }, ... }
     for (const [tokenId, priceData] of Object.entries(data)) {
       if (typeof priceData === 'object' && priceData !== null) {
         const pd = priceData as Record<string, string>;
         priceMap.set(tokenId, {
-          bid: parseFloat(pd.bid || pd.BUY || '0'),
-          ask: parseFloat(pd.ask || pd.SELL || '0'),
+          bid: parseFloat(pd.BUY || '0'),
+          ask: parseFloat(pd.SELL || '0'),
         });
-      } else if (typeof priceData === 'string') {
-        const price = parseFloat(priceData);
-        priceMap.set(tokenId, { bid: price, ask: price });
       }
     }
+    
+    console.log(`[POLY-MONITOR] CLOB prices: got ${priceMap.size} token prices`);
   } catch (error) {
     console.error('[POLY-MONITOR] CLOB batch price fetch error:', error);
   }
