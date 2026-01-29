@@ -32,3 +32,6 @@ verify_jwt = false
 
 [functions.polymarket-monitor]
 verify_jwt = false
+
+[functions.settle-bets]
+verify_jwt = false

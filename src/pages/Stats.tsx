@@ -1,11 +1,13 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowLeft, TrendingUp, TrendingDown, DollarSign, Target, Percent, BarChart3, Calendar } from 'lucide-react';
+import { ArrowLeft, TrendingUp, TrendingDown, DollarSign, Target, Percent, BarChart3, Calendar, RefreshCw, Edit2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { useSignalStats } from '@/hooks/useSignalStats';
+import { useSignalStats, SignalLogEntry } from '@/hooks/useSignalStats';
 import { StatsCharts } from '@/components/stats/StatsCharts';
+import { EditBetDialog } from '@/components/stats/EditBetDialog';
 import { format } from 'date-fns';
 
 export default function Stats() {
@@ -15,8 +17,15 @@ export default function Stats() {
     overallStats, 
     dailyStats, 
     exposureByMarket, 
-    todayStaked 
+    todayStaked,
+    updateBet,
+    deleteBet,
+    checkPendingBets,
+    checkingPending,
   } = useSignalStats();
+
+  const [selectedBet, setSelectedBet] = useState<SignalLogEntry | null>(null);
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
 
   const formatCurrency = (value: number) => {
     const formatted = Math.abs(value).toFixed(2);
@@ -24,6 +33,13 @@ export default function Stats() {
   };
 
   const formatPercent = (value: number) => `${value.toFixed(1)}%`;
+
+  const handleRowClick = (log: SignalLogEntry) => {
+    setSelectedBet(log);
+    setEditDialogOpen(true);
+  };
+
+  const pendingCount = logs.filter(l => !l.outcome || l.outcome === 'pending').length;
 
   return (
     <div className="min-h-screen bg-background p-4 md:p-6">
@@ -136,10 +152,23 @@ export default function Stats() {
           {/* Bet Log Table */}
           <TabsContent value="logs">
             <Card>
-              <CardHeader>
+              <CardHeader className="flex flex-row items-center justify-between">
                 <CardTitle className="text-lg">Bet History</CardTitle>
+                {pendingCount > 0 && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={checkPendingBets}
+                    disabled={checkingPending}
+                    className="gap-2"
+                  >
+                    <RefreshCw className={`h-4 w-4 ${checkingPending ? 'animate-spin' : ''}`} />
+                    {checkingPending ? 'Checking...' : `Check ${pendingCount} Pending`}
+                  </Button>
+                )}
               </CardHeader>
               <CardContent>
+                <p className="text-xs text-muted-foreground mb-4">Click any row to edit</p>
                 {loading ? (
                   <p className="text-muted-foreground text-center py-8">Loading...</p>
                 ) : logs.length === 0 ? (
@@ -149,6 +178,7 @@ export default function Stats() {
                     <Table>
                       <TableHeader>
                         <TableRow>
+                          <TableHead className="w-8"></TableHead>
                           <TableHead>Date</TableHead>
                           <TableHead>Event</TableHead>
                           <TableHead>Side</TableHead>
@@ -161,7 +191,14 @@ export default function Stats() {
                       </TableHeader>
                       <TableBody>
                         {logs.slice(0, 100).map((log) => (
-                          <TableRow key={log.id}>
+                          <TableRow 
+                            key={log.id} 
+                            className="cursor-pointer hover:bg-muted/70"
+                            onClick={() => handleRowClick(log)}
+                          >
+                            <TableCell>
+                              <Edit2 className="h-3 w-3 text-muted-foreground" />
+                            </TableCell>
                             <TableCell className="font-mono text-xs">
                               {format(new Date(log.created_at), 'MMM d, HH:mm')}
                             </TableCell>
@@ -304,6 +341,15 @@ export default function Stats() {
             <StatsCharts />
           </TabsContent>
         </Tabs>
+
+        {/* Edit Dialog */}
+        <EditBetDialog
+          bet={selectedBet}
+          open={editDialogOpen}
+          onOpenChange={setEditDialogOpen}
+          onSave={updateBet}
+          onDelete={deleteBet}
+        />
       </div>
     </div>
   );
