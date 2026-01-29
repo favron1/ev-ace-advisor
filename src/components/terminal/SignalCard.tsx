@@ -7,6 +7,7 @@ import type { EnrichedSignal } from '@/types/arbitrage';
 import type { SignalState } from '@/types/scan-config';
 import { ExecutionDecision } from './ExecutionDecision';
 import { ManualPriceInput } from './ManualPriceInput';
+import { EvCalculator } from './EvCalculator';
 
 interface SignalCardProps {
   signal: EnrichedSignal;
@@ -321,7 +322,7 @@ export function SignalCard({
             )}
           </div>
 
-          {/* Right: Metrics */}
+          {/* Right: Metrics + EV Calculator */}
           <div className="flex flex-col items-end gap-1">
             <div className="flex items-center gap-2">
               <span className="text-xs text-muted-foreground">Confidence</span>
@@ -334,6 +335,11 @@ export function SignalCard({
                 SHARP
               </Badge>
             )}
+            {/* EV Calculator - pre-filled with signal data */}
+            <EvCalculator 
+              defaultOdds={polyYesPrice ? 1 / polyYesPrice : undefined}
+              defaultTrueProb={bookmakerProbFair}
+            />
           </div>
         </div>
 
