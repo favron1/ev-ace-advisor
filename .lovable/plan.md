@@ -1,52 +1,37 @@
 
-## Fix: Display Actual Bet Side (Team Name), Not Event Name
 
-### Problem
-Signal cards show "BET: Utah vs. Hurricanes" - which is the event name, not the bet. You need to know which team to back (e.g., "BET: Utah Utes" or "BET: Carolina Hurricanes").
+## Fix: Backfill Missing Team Names and Prevent Future Gaps
 
-The `recommended_outcome` column in `signal_opportunities` is empty/null because the edge function that creates signals from the polymarket-monitor flow doesn't populate it correctly.
+### What Went Wrong
+The Utah vs. Hurricanes signal was created before the fix. The matching logic found a bookmaker match but failed to extract the specific team name due to nickname vs. full name mismatches. The signal was saved with `recommended_outcome: null`.
 
-### Data Flow Issue
-1. **polymarket-monitor** creates signals but sets `recommended_outcome: null`
-2. **active-mode-poll** sets `recommended_outcome: event.bookmaker_market_key` - but this is often the matched team name from matching logic, not necessarily correct
-3. **detect-signals** correctly sets `recommended_outcome: recommendedOutcome` (the specific team name from bookmaker data)
-
-### Root Cause
-The `polymarket-monitor` edge function at line ~429 inserts signals without `recommended_outcome`:
-```typescript
-await supabase.from('signal_opportunities').insert({
-  event_name: event.event_name,
-  side: 'YES',
-  // MISSING: recommended_outcome
-  ...
-});
-```
+### Why This Must Never Happen
+You're correct - if the system can't determine which side to bet, showing the signal is useless. A signal without a bet side is not actionable.
 
 ### Fix Plan
 
-**1. Update `polymarket-monitor` to include recommended_outcome**
-- When creating a signal, extract the team name from the matched bookmaker data
-- The match function already identifies which team we're betting on
-- Store this in `recommended_outcome` column
+**1. Update the signal creation logic to REQUIRE a team name**
+- In `polymarket-monitor`, if `match.teamName` is empty or null, don't create the signal
+- Only create signals when we can confidently identify the bet side
 
-**2. Update SignalCard fallback logic**
-- If `recommended_outcome` is null AND `is_true_arbitrage` is true, show a warning
-- Never display the event name as the bet - that's misleading
-- Show "Bet side unknown - check data" if we can't determine the team
+**2. Fix the existing Utah signal**
+- Query the Polymarket cache to get the extracted entity (team name)
+- Update the existing signal with the correct `recommended_outcome`
 
-**3. Fix SMS message to include team name**
-- Update SMS template to include the specific team/outcome being recommended
+**3. Improve team name extraction**
+- Use the `extracted_entity` field from `polymarket_h2h_cache` which already has the team name parsed
+- This is more reliable than trying to parse it from matching logic
 
 ### Technical Changes
 
 | File | Change |
 |------|--------|
-| `supabase/functions/polymarket-monitor/index.ts` | Pass matched team name to signal creation |
-| `src/components/terminal/SignalCard.tsx` | Don't fallback to event_name; show error if no recommended_outcome |
-| `supabase/functions/active-mode-poll/index.ts` | Verify bookmaker_market_key contains the right team name |
-| SMS template | Include team name in alert message |
+| `supabase/functions/polymarket-monitor/index.ts` | Add validation: if `teamName` is empty, skip signal creation |
+| `supabase/functions/polymarket-monitor/index.ts` | Use `extracted_entity` from cache as fallback for team name |
+| Database | Run update to backfill `recommended_outcome` from cache data |
 
-### Expected Result
-- Cards show "BET: Utah Utes" or "BET: Carolina Hurricanes" (specific team)
-- SMS alerts include which team to back
-- If system can't determine the bet side, it shows an error rather than misleading info
+### Validation
+- Signals will only be created when we know the exact bet side
+- SMS and UI will always show the team name
+- No more "BET SIDE UNKNOWN" scenarios for true arbitrage
+
