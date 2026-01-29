@@ -225,15 +225,15 @@ export function ScanSettingsPanel({ config, onChange }: ScanSettingsPanelProps) 
         </CardContent>
       </Card>
 
-      {/* Legacy Scan Frequency */}
+      {/* Adaptive Scanning Toggle */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Clock className="h-4 w-4" />
-            Scan Frequency
+            Background Scanning
           </CardTitle>
           <CardDescription>
-            Configure how often the system scans for opportunities
+            Configure background scan behavior
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
@@ -248,41 +248,6 @@ export function ScanSettingsPanel({ config, onChange }: ScanSettingsPanelProps) 
               checked={config.adaptive_scanning_enabled}
               onCheckedChange={(v) => onChange({ adaptive_scanning_enabled: v })}
             />
-          </div>
-
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <Label>Base Frequency</Label>
-              <span className="text-sm font-mono">{config.base_frequency_minutes}m</span>
-            </div>
-            <Slider
-              value={[config.base_frequency_minutes || 30]}
-              onValueChange={([v]) => onChange({ base_frequency_minutes: v })}
-              min={15}
-              max={120}
-              step={5}
-            />
-            <div className="flex justify-between text-xs text-muted-foreground">
-              <span>15m (more requests)</span>
-              <span>120m (fewer requests)</span>
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <Label>Turbo Frequency</Label>
-              <span className="text-sm font-mono">{config.turbo_frequency_minutes}m</span>
-            </div>
-            <Slider
-              value={[config.turbo_frequency_minutes || 5]}
-              onValueChange={([v]) => onChange({ turbo_frequency_minutes: v })}
-              min={2}
-              max={15}
-              step={1}
-            />
-            <p className="text-xs text-muted-foreground">
-              Used when events are within {config.min_event_horizon_hours || 2} hours
-            </p>
           </div>
         </CardContent>
       </Card>

@@ -38,7 +38,7 @@ interface ScanControlPanelProps {
   scanning: boolean;
   onManualScan: () => void;
   onTogglePause: () => void;
-  onToggleTurbo: () => void;
+  onToggleFastMode: () => void;
   onOpenSettings: () => void;
   // Two-tier polling props
   onWatchModePoll?: () => void;
@@ -60,7 +60,7 @@ export function ScanControlPanel({
   scanning,
   onManualScan,
   onTogglePause,
-  onToggleTurbo,
+  onToggleFastMode,
   onOpenSettings,
   onWatchModePoll,
   onActiveModePoll,
@@ -117,8 +117,8 @@ export function ScanControlPanel({
             )}
             {status.isPaused ? (
               <Badge variant="secondary" className="text-xs">Paused</Badge>
-            ) : status.currentMode === 'turbo' ? (
-              <Badge className="bg-orange-500/20 text-orange-400 text-xs">Turbo</Badge>
+            ) : config?.watch_poll_interval_minutes === 2 ? (
+              <Badge className="bg-orange-500/20 text-orange-400 text-xs">Fast</Badge>
             ) : (
               <Badge variant="outline" className="text-xs">Active</Badge>
             )}
@@ -229,13 +229,13 @@ export function ScanControlPanel({
         <div className="flex items-center justify-between text-sm">
           <div className="flex items-center gap-2">
             <Switch
-              id="turbo-mode"
-              checked={config?.turbo_mode_enabled || false}
-              onCheckedChange={onToggleTurbo}
+              id="fast-mode"
+              checked={config?.watch_poll_interval_minutes === 2}
+              onCheckedChange={onToggleFastMode}
               disabled={status.isPaused}
             />
-            <Label htmlFor="turbo-mode" className="text-xs cursor-pointer">
-              Turbo Mode
+            <Label htmlFor="fast-mode" className="text-xs cursor-pointer">
+              Fast Mode (2m)
             </Label>
           </div>
           

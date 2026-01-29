@@ -80,7 +80,7 @@ export default function Terminal() {
     scanning,
     runManualScan,
     togglePause,
-    toggleTurboMode,
+    toggleFastMode,
   } = useScanConfig();
 
   // Two-tier polling state with notification callback
@@ -248,7 +248,7 @@ export default function Terminal() {
               scanning={scanning}
               onManualScan={handleManualScan}
               onTogglePause={togglePause}
-              onToggleTurbo={toggleTurboMode}
+              onToggleFastMode={toggleFastMode}
               onOpenSettings={() => navigate('/settings')}
               onWatchModePoll={handleWatchModePoll}
               onActiveModePoll={handleActiveModePoll}
