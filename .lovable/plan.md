@@ -1,99 +1,68 @@
 
 
-# Directional Signal Labeling: BUY YES vs BUY NO
+# Consolidation: Remove Legacy Turbo Mode & Integrate Speed Controls
 
-## Overview
+## Summary
 
-The system will now explicitly label whether to **BUY YES** or **BUY NO** on Polymarket based on the direction of sharp bookmaker movement:
+Turbo Mode is a legacy feature from an older polling system that no longer applies to the current two-tier Watch/Active architecture. This plan removes it and gives direct control over Watch Poll speed instead.
 
-| Movement Direction | Meaning | Polymarket Action |
-|---|---|---|
-| **Shortening** | Bookies increased probability (favoring outcome) | **BUY YES** |
-| **Drifting** | Bookies decreased probability (disfavoring outcome) | **BUY NO** |
+## The Problem
 
-This keeps the system **directionally neutral** and lets signal quality (edge, movement, liquidity) determine which opportunities surface.
+| Setting | Default | Actually Controls |
+|---------|---------|-------------------|
+| `turbo_mode_enabled` | false | Legacy Full Scan scheduler only |
+| `turbo_frequency_minutes` | 5m | Legacy Full Scan scheduler only |
+| `watch_poll_interval_minutes` | 5m | **Actual Watch Poll** (the real system) |
+
+**Result:** Toggling "Turbo Mode" ON changes nothing for Watch Poll—the system already polls every 5 minutes. It's confusing and useless.
 
 ---
 
-## Technical Changes
+## Changes Overview
 
-### 1. Backend: polymarket-monitor Edge Function
+### What Gets Removed
+- **Turbo Mode Switch** in ScanControlPanel
+- **Turbo Mode Badge** ("Turbo" status badge)
+- **Turbo Frequency slider** in ScanSettingsPanel
+- **toggleTurboMode function** in useScanConfig
+- Type references to `turbo_mode_enabled` and `turbo_frequency_minutes`
 
-**Current logic (line 715-827):**
-```javascript
-const rawEdge = bookmakerFairProb - livePolyPrice;
-// Always sets side: 'YES'
+### What Gets Added
+- **Fast Mode Switch** — toggles Watch Poll between 5m (normal) and 2m (fast)
+- **Fast Badge** — shows when Fast Mode is active
+- Clearer UI language
+
+---
+
+## UI Before vs After
+
+**Control Panel - Before:**
+```
+[Turbo Mode Switch] ← confusing, does nothing useful
+Status: [Turbo] badge when enabled
 ```
 
-**New logic:**
-```javascript
-// Determine bet side based on movement direction and edge
-let betSide: 'YES' | 'NO' = 'YES';
-let rawEdge = bookmakerFairProb - livePolyPrice;
-
-if (movement.triggered && movement.direction === 'drifting') {
-  // Bookies drifted (prob DOWN) - bet NO on Polymarket
-  // Edge = (1 - bookmakerFairProb) - (1 - livePolyPrice) = livePolyPrice - bookmakerFairProb
-  betSide = 'NO';
-  rawEdge = (1 - livePolyPrice) - (1 - bookmakerFairProb);
-}
-
-if (rawEdge >= 0.02) {
-  // ... signal creation with side: betSide
-}
+**Control Panel - After:**
+```
+[Fast Mode Switch] ← toggles Watch Poll 5m → 2m
+Status: [Fast] badge when enabled
 ```
 
-**SMS message update:**
+**Settings Panel - Before:**
 ```
-BUY YES: Edmonton Oilers  (or)
-BUY NO: San Jose Sharks
-```
+Legacy Scan Frequency:
+  - Base Frequency: 30m slider
+  - Turbo Frequency: 5m slider ← redundant
 
-### 2. Types: Update SignalFactors
-
-Add `bet_direction` field to signal_factors for explicit tracking:
-
-```typescript
-interface SignalFactors {
-  // ... existing fields
-  bet_direction?: 'BUY_YES' | 'BUY_NO';
-}
+Two-Tier Polling:
+  - Watch Poll Interval: 5m slider
 ```
 
-### 3. Frontend: SignalCard Updates
-
-**Bet badge logic:**
-```tsx
-const betDirection = signal.side === 'YES' ? 'BUY YES' : 'BUY NO';
-const directionColor = signal.side === 'YES' 
-  ? 'bg-green-500/20 text-green-400' 
-  : 'bg-blue-500/20 text-blue-400';
-
-<Badge className={directionColor}>
-  {betDirection}: {betTarget}
-</Badge>
+**Settings Panel - After:**
 ```
-
-**Action text update:**
-```tsx
-// Current: "Back Edmonton Oilers to win"
-// New (YES): "BUY YES: Back Edmonton Oilers to win"
-// New (NO): "BUY NO: Fade San Jose Sharks"
-```
-
-### 4. Frontend: FiltersBar Enhancement
-
-Add optional filter for users who only want BUY YES signals:
-
-```tsx
-<div className="flex items-center space-x-2">
-  <Switch
-    id="buy-yes-only"
-    checked={showBuyYesOnly}
-    onCheckedChange={onShowBuyYesOnlyChange}
-  />
-  <Label>BUY YES Only</Label>
-</div>
+Two-Tier Polling:
+  - Watch Poll Interval: 2-15m slider
+  (Legacy section removed entirely)
 ```
 
 ---
@@ -102,73 +71,86 @@ Add optional filter for users who only want BUY YES signals:
 
 | File | Changes |
 |------|---------|
-| `supabase/functions/polymarket-monitor/index.ts` | Calculate edge/side based on movement direction, update SMS format |
-| `src/types/arbitrage.ts` | Add `bet_direction` to SignalFactors |
-| `src/components/terminal/SignalCard.tsx` | Display BUY YES/BUY NO badges with colors, update action text |
-| `src/components/terminal/FiltersBar.tsx` | Add optional "BUY YES Only" filter toggle |
-| `src/hooks/useSignals.ts` | Add `buyYesOnly` filter option |
-| `src/pages/Terminal.tsx` | Wire up new filter state |
+| `src/types/scan-config.ts` | Remove `turbo_mode_enabled` from ScanConfig interface, remove `'turbo'` from currentMode type |
+| `src/hooks/useScanConfig.ts` | Remove `toggleTurboMode`, add `toggleFastMode`, update DEFAULT_CONFIG, remove turbo logic from status |
+| `src/components/terminal/ScanControlPanel.tsx` | Replace Turbo Switch with Fast Mode Switch, update badge logic |
+| `src/components/terminal/ScanSettingsPanel.tsx` | Remove entire "Legacy Scan Frequency" card (Base Frequency + Turbo Frequency sliders) |
+| `src/pages/Terminal.tsx` | Update handler from `onToggleTurbo` to `onToggleFastMode` |
 
 ---
 
-## Example Signal Display
+## Technical Details
 
-**BUY YES Signal (Shortening):**
-```
-ELITE +4.2%
-Event: Sharks vs. Oilers
-BUY YES: Edmonton Oilers  [green badge]
-Action: Back Edmonton Oilers to win
-Poly: 34¢ | Fair: 61% | Edge: +27%
-Movement: Sharp books SHORTENING (favoring Oilers)
+### New toggleFastMode Function (useScanConfig.ts)
+
+```typescript
+const toggleFastMode = useCallback(async () => {
+  if (!config) return;
+  const newInterval = config.watch_poll_interval_minutes === 2 ? 5 : 2;
+  await updateConfig({ watch_poll_interval_minutes: newInterval });
+  toast({
+    title: newInterval === 2 ? 'Fast Mode Enabled' : 'Fast Mode Disabled',
+    description: `Watch Poll now every ${newInterval} minutes`,
+  });
+}, [config, updateConfig, toast]);
 ```
 
-**BUY NO Signal (Drifting):**
+### Updated Status Badge Logic (ScanControlPanel.tsx)
+
+```tsx
+// Before
+status.currentMode === 'turbo' ? (
+  <Badge className="bg-orange-500/20 text-orange-400">Turbo</Badge>
+)
+
+// After
+config?.watch_poll_interval_minutes === 2 ? (
+  <Badge className="bg-orange-500/20 text-orange-400">Fast</Badge>
+)
 ```
-STRONG +3.1%
-Event: Sharks vs. Oilers  
-BUY NO: San Jose Sharks  [blue badge]
-Action: Fade San Jose Sharks (buy NO)
-Poly: 66¢ | Fair: 39% | Edge: +27%
-Movement: Sharp books DRIFTING (disfavoring Sharks)
+
+### Updated Switch (ScanControlPanel.tsx)
+
+```tsx
+// Before
+<Switch
+  id="turbo-mode"
+  checked={config?.turbo_mode_enabled || false}
+  onCheckedChange={onToggleTurbo}
+/>
+<Label>Turbo Mode</Label>
+
+// After
+<Switch
+  id="fast-mode"
+  checked={config?.watch_poll_interval_minutes === 2}
+  onCheckedChange={onToggleFastMode}
+/>
+<Label>Fast Mode (2m)</Label>
 ```
 
 ---
 
-## SMS Alert Format
+## Database Consideration
 
-**Current:**
-```
-ELITE: Sharks vs. Oilers
-BET: Edmonton Oilers
-Poly: 34¢ ($26K)
-```
-
-**New:**
-```
-ELITE: Sharks vs. Oilers
-BUY YES: Edmonton Oilers
-Poly YES: 34¢ ($26K)
-Sharp books SHORTENING +4.2%
-```
-
-or
-
-```
-STRONG: Sharks vs. Oilers
-BUY NO: San Jose Sharks
-Poly NO: 66¢ ($26K)
-Sharp books DRIFTING -3.8%
-```
+The `scan_config` table has `turbo_mode_enabled` and `turbo_frequency_minutes` columns. These will be left in place to avoid migration complexity—they simply won't be used. A future cleanup migration can remove them.
 
 ---
 
-## Summary
+## What Stays Unchanged
 
-This implementation:
-1. Detects BOTH shortening (BUY YES) and drifting (BUY NO) movements
-2. Labels signals clearly with the required action
-3. Keeps movement gate, liquidity checks, and edge thresholds unchanged
-4. Allows optional frontend filter to hide BUY NO signals
-5. Does NOT remove drifting signals at detection level - quality determines action
+- **News Spike Mode** — still triggers 60-second burst polling for 5 minutes
+- **Watch Poll Interval slider** in settings — still adjustable from 2-15m
+- **Active Poll Interval** — still 60 seconds for escalated events
+- All movement detection, edge calculation, and signal logic
+
+---
+
+## Result
+
+| User Action | Before | After |
+|-------------|--------|-------|
+| Toggle "Fast Mode" | Changed legacy scheduler (unused) | Changes Watch Poll from 5m → 2m |
+| News Spike | Temporary 60s active polling | Unchanged |
+| Settings → Watch Interval | Adjustable 2-15m | Adjustable 2-15m (auto-set to 2m if Fast enabled) |
 
