@@ -253,7 +253,9 @@ async function sendSmsAlert(supabase: any, event: WatchState, edgePct: number, p
       return;
     }
 
-    const smsMessage = `🚨 EDGE CONFIRMED: ${event.event_name?.substring(0, 40)}\n+${edgePct.toFixed(1)}% edge. Poly: ${(polyPrice * 100).toFixed(0)}c. Execute now!`;
+    // Get team name from bookmaker_market_key
+    const teamName = event.bookmaker_market_key || 'YES';
+    const smsMessage = `🚨 EDGE CONFIRMED: ${event.event_name?.substring(0, 40)}\nBET: ${teamName}\n+${edgePct.toFixed(1)}% edge. Poly: ${(polyPrice * 100).toFixed(0)}c. Execute now!`;
     
     const smsResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/send-sms-alert`, {
       method: 'POST',
