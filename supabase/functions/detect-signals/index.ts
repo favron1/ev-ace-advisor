@@ -1023,6 +1023,13 @@ Deno.serve(async (req) => {
       // NEW: Try cache-based matching first, then fall back to legacy enhanced matching
       let cacheMatch = findCacheMatch(eventName, recommendedOutcome, polymarketCache, ['h2h']);
       
+      // VALIDATION: Ensure the matched cache entry is actually an H2H market
+      // Skip if the matched market is a total, spread, or other non-H2H type
+      if (cacheMatch && cacheMatch.entry.market_type && cacheMatch.entry.market_type !== 'h2h') {
+        console.log(`[DETECT] Skipping ${eventName}: Matched market is ${cacheMatch.entry.market_type}, not H2H`);
+        cacheMatch = null; // Treat as no match
+      }
+      
       // If cache matched, prefer the Polymarket team name for display (it may be cleaner)
       // e.g., bookmaker says "New York Rangers" but Polymarket shows "Rangers" - use "Rangers" for clarity
       if (cacheMatch && cacheMatch.matchedTeam) {
