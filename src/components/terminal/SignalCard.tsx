@@ -295,6 +295,45 @@ export function SignalCard({
   const stateConfig = stateBadges[displayState];
   const StateIcon = stateConfig.icon;
 
+  // HARD EXECUTION GATES - Enforced safety controls
+  const canExecuteSignal = (): { allowed: boolean; reason: string } => {
+    // Gate 1: Must have team name present in event name
+    if (betTarget) {
+      const teamLastWord = betTarget.split(' ').pop()?.toLowerCase() || '';
+      const eventNorm = signal.event_name.toLowerCase();
+      if (teamLastWord && !eventNorm.includes(teamLastWord)) {
+        return { allowed: false, reason: 'Team mismatch' };
+      }
+    }
+    
+    // Gate 2: Must have fresh price data (≤5 minutes)
+    const stalenessMinutes = polyUpdatedAt 
+      ? (Date.now() - new Date(polyUpdatedAt).getTime()) / 60000 
+      : Infinity;
+    if (stalenessMinutes > 5) {
+      return { allowed: false, reason: 'Stale price data' };
+    }
+    
+    // Gate 3: Must have minimum liquidity ($5K)
+    if (!polyVolume || polyVolume < 5000) {
+      return { allowed: false, reason: 'Insufficient liquidity' };
+    }
+    
+    // Gate 4: High-prob artifact check (85%+ fair prob needs very fresh data)
+    if (bookmakerProbFair >= 0.85 && signal.edge_percent > 40) {
+      return { allowed: false, reason: 'Artifact edge detected' };
+    }
+    
+    // Gate 5: Must have positive execution decision
+    if (!signal.execution || signal.execution.execution_decision === 'NO_BET') {
+      return { allowed: false, reason: 'No bet recommended' };
+    }
+    
+    return { allowed: true, reason: 'Ready to execute' };
+  };
+
+  const executionStatus = canExecuteSignal();
+
   return (
     <Card className={cn(
       "group hover:border-primary/50 transition-all duration-200",
@@ -510,6 +549,13 @@ export function SignalCard({
                   </div>
                 )}
                 
+                {/* NOT EXECUTABLE warning banner */}
+                {!executionStatus.allowed && (
+                  <div className="mt-2 flex items-center gap-2 p-2 rounded bg-red-500/10 border border-red-500/30 text-red-400 text-xs">
+                    <AlertCircle className="h-4 w-4" />
+                    <span className="font-medium">NOT EXECUTABLE: {executionStatus.reason}</span>
+                  </div>
+                )}
                 {/* High-prob artifact edge warning */}
                 {bookmakerProbFair >= 0.85 && signal.edge_percent > 40 && (
                   <div className="mt-2 text-xs text-yellow-500 flex items-center gap-1">
@@ -615,19 +661,25 @@ export function SignalCard({
                 size="sm" 
                 className={cn(
                   "flex-1 gap-1",
-                  signal.execution.execution_decision === 'STRONG_BET' && "bg-green-600 hover:bg-green-700",
-                  signal.execution.execution_decision === 'BET' && "bg-green-600 hover:bg-green-700",
-                  signal.execution.execution_decision === 'MARGINAL' && "bg-yellow-600 hover:bg-yellow-700",
-                  signal.execution.execution_decision === 'NO_BET' && "bg-muted text-muted-foreground hover:bg-muted"
+                  executionStatus.allowed && signal.execution.execution_decision === 'STRONG_BET' && "bg-green-600 hover:bg-green-700",
+                  executionStatus.allowed && signal.execution.execution_decision === 'BET' && "bg-green-600 hover:bg-green-700",
+                  executionStatus.allowed && signal.execution.execution_decision === 'MARGINAL' && "bg-yellow-600 hover:bg-yellow-700",
+                  !executionStatus.allowed && "bg-muted text-muted-foreground hover:bg-muted"
                 )}
                 onClick={() => onExecute(signal.id, signal.polymarket_price)}
-                disabled={signal.execution.execution_decision === 'NO_BET'}
+                disabled={!executionStatus.allowed}
+                title={!executionStatus.allowed ? executionStatus.reason : undefined}
               >
                 <Check className="h-3 w-3" />
-                {signal.execution.execution_decision === 'STRONG_BET' && 'Execute (Strong)'}
-                {signal.execution.execution_decision === 'BET' && 'Execute Bet'}
-                {signal.execution.execution_decision === 'MARGINAL' && 'Execute (Caution)'}
-                {signal.execution.execution_decision === 'NO_BET' && 'No Bet'}
+                {executionStatus.allowed ? (
+                  <>
+                    {signal.execution.execution_decision === 'STRONG_BET' && 'Execute (Strong)'}
+                    {signal.execution.execution_decision === 'BET' && 'Execute Bet'}
+                    {signal.execution.execution_decision === 'MARGINAL' && 'Execute (Caution)'}
+                  </>
+                ) : (
+                  `Watch Only (${executionStatus.reason})`
+                )}
               </Button>
               <Button 
                 size="sm" 
