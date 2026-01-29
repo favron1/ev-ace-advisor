@@ -1,4 +1,4 @@
-import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle, Eye, Zap, DollarSign, Timer } from 'lucide-react';
+import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle, Eye, Zap, DollarSign, Timer, ExternalLink } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -313,6 +313,21 @@ export function SignalCard({
         <div className="flex items-center gap-2 mt-4 pt-3 border-t border-border">
           {isTrueArbitrage && signal.execution ? (
             <>
+              <Button 
+                size="sm" 
+                variant="outline"
+                className="gap-1 bg-primary/10 hover:bg-primary/20 text-primary border-primary/30"
+                asChild
+              >
+                <a 
+                  href={`https://polymarket.com/search?query=${encodeURIComponent(betTarget || signal.event_name)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <ExternalLink className="h-3 w-3" />
+                  Trade on Poly
+                </a>
+              </Button>
               <Button 
                 size="sm" 
                 className={cn(
