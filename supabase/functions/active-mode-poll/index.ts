@@ -239,7 +239,7 @@ async function refreshBookmakerPrice(
 // SMS ALERT
 // ============================================================================
 
-async function sendSmsAlert(supabase: any, event: WatchState, edgePct: number, polyPrice: number) {
+async function sendSmsAlert(supabase: any, event: WatchState, edgePct: number, polyPrice: number, signalId?: string) {
   try {
     const { data: profile } = await supabase
       .from('profiles')
@@ -255,7 +255,13 @@ async function sendSmsAlert(supabase: any, event: WatchState, edgePct: number, p
 
     // Get team name from bookmaker_market_key
     const teamName = event.bookmaker_market_key || 'YES';
-    const smsMessage = `🚨 EDGE CONFIRMED: ${event.event_name?.substring(0, 40)}\nBET: ${teamName}\n+${edgePct.toFixed(1)}% edge. Poly: ${(polyPrice * 100).toFixed(0)}c. Execute now!`;
+    
+    // Build mark-executed link if we have a signal ID
+    const markExecutedLink = signalId 
+      ? `\n\n✅ Placed? Tap to stop updates:\n${Deno.env.get('SUPABASE_URL')}/functions/v1/mark-executed?id=${signalId}`
+      : '';
+    
+    const smsMessage = `🚨 EDGE CONFIRMED: ${event.event_name?.substring(0, 35)}\nBET: ${teamName}\n+${edgePct.toFixed(1)}% edge. Poly: ${(polyPrice * 100).toFixed(0)}c${markExecutedLink}`;
     
     const smsResponse = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/send-sms-alert`, {
       method: 'POST',
@@ -289,7 +295,7 @@ async function surfaceConfirmedSignal(
   liveEdge: number,
   livePolyPrice: number,
   bookmakerProb: number
-) {
+): Promise<string | null> {
   // Determine urgency
   let urgency = 'normal';
   if (liveEdge >= 5) urgency = 'critical';
@@ -298,10 +304,16 @@ async function surfaceConfirmedSignal(
   // First, check if an active signal already exists for this event
   const { data: existing } = await supabase
     .from('signal_opportunities')
-    .select('id')
+    .select('id, status')
     .eq('event_name', event.event_name)
-    .eq('status', 'active')
+    .in('status', ['active', 'executed'])
     .maybeSingle();
+
+  // If already executed, don't send more SMS alerts
+  if (existing?.status === 'executed') {
+    console.log(`[ACTIVE-MODE-POLL] Signal already executed, skipping: ${event.event_name?.substring(0, 40)}`);
+    return null;
+  }
 
   if (existing) {
     // Update existing signal
@@ -322,12 +334,14 @@ async function surfaceConfirmedSignal(
 
     if (updateError) {
       console.error('[ACTIVE-MODE-POLL] Failed to update signal:', updateError);
+      return null;
     } else {
       console.log(`[ACTIVE-MODE-POLL] Updated signal: ${event.event_name?.substring(0, 40)}`);
+      return existing.id;
     }
   } else {
     // Insert new signal
-    const { error: insertError } = await supabase.from('signal_opportunities').insert({
+    const { data: newSignal, error: insertError } = await supabase.from('signal_opportunities').insert({
       event_name: event.event_name,
       recommended_outcome: event.bookmaker_market_key,
       side: 'YES',
@@ -350,12 +364,14 @@ async function surfaceConfirmedSignal(
         persistence_confirmed: true,
         polymarket_question: event.polymarket_question,
       },
-    });
+    }).select('id').single();
 
-    if (insertError) {
+    if (insertError || !newSignal) {
       console.error('[ACTIVE-MODE-POLL] Failed to insert signal:', insertError);
+      return null;
     } else {
       console.log(`[ACTIVE-MODE-POLL] Created signal: ${event.event_name?.substring(0, 40)}`);
+      return newSignal.id;
     }
   }
 }
@@ -550,14 +566,16 @@ Deno.serve(async (req) => {
           })
           .eq('id', event.id);
 
-        // Surface signal
-        await surfaceConfirmedSignal(supabase, event, liveEdge, livePolyPrice, liveBookmakerProb);
+        // Surface signal and get the signal ID
+        const signalId = await surfaceConfirmedSignal(supabase, event, liveEdge, livePolyPrice, liveBookmakerProb);
         
         // Log movement
         await logMovement(supabase, event, 'confirmed', liveEdge, holdDurationMinutes);
 
-        // Send SMS alert
-        await sendSmsAlert(supabase, event, liveEdge, livePolyPrice);
+        // Send SMS alert with mark-executed link (only if signal was created/updated, not if already executed)
+        if (signalId) {
+          await sendSmsAlert(supabase, event, liveEdge, livePolyPrice, signalId);
+        }
 
         results.confirmed++;
       } else {
