@@ -610,9 +610,11 @@ export type Database = {
           id: string
           opportunity_id: string | null
           outcome: string | null
+          polymarket_condition_id: string | null
           profit_loss: number | null
           settled_at: string | null
           side: string
+          stake_amount: number | null
         }
         Insert: {
           actual_result?: boolean | null
@@ -624,9 +626,11 @@ export type Database = {
           id?: string
           opportunity_id?: string | null
           outcome?: string | null
+          polymarket_condition_id?: string | null
           profit_loss?: number | null
           settled_at?: string | null
           side: string
+          stake_amount?: number | null
         }
         Update: {
           actual_result?: boolean | null
@@ -638,9 +642,11 @@ export type Database = {
           id?: string
           opportunity_id?: string | null
           outcome?: string | null
+          polymarket_condition_id?: string | null
           profit_loss?: number | null
           settled_at?: string | null
           side?: string
+          stake_amount?: number | null
         }
         Relationships: [
           {

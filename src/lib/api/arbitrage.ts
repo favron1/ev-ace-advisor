@@ -120,8 +120,8 @@ export const arbitrageApi = {
     if (error) throw error;
   },
 
-  // Mark signal as executed
-  async executeSignal(signalId: string, entryPrice: number): Promise<void> {
+  // Mark signal as executed with stake tracking
+  async executeSignal(signalId: string, entryPrice: number, stakeAmount?: number): Promise<void> {
     const { data: signal } = await supabase
       .from('signal_opportunities')
       .select('*')
@@ -136,7 +136,7 @@ export const arbitrageApi = {
       .update({ status: 'executed' })
       .eq('id', signalId);
 
-    // Create log entry
+    // Create log entry with stake tracking
     await supabase
       .from('signal_logs')
       .insert({
@@ -146,7 +146,9 @@ export const arbitrageApi = {
         entry_price: entryPrice,
         edge_at_signal: (signal as any).edge_percent,
         confidence_at_signal: (signal as any).confidence_score,
-        outcome: 'pending'
+        outcome: 'pending',
+        stake_amount: stakeAmount || null,
+        polymarket_condition_id: (signal as any).polymarket_condition_id || null,
       });
   }
 };

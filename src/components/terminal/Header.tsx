@@ -1,4 +1,4 @@
-import { Activity, Settings, LogOut, Zap } from 'lucide-react';
+import { Activity, Settings, LogOut, Zap, BarChart3 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { supabase } from '@/integrations/supabase/client';
 import { useNavigate } from 'react-router-dom';
@@ -71,7 +71,10 @@ export function Header({
               {detecting ? 'Detecting...' : 'Run Detection'}
             </Button>
           )}
-          <Button variant="ghost" size="icon" onClick={() => navigate('/settings')}>
+          <Button variant="ghost" size="icon" onClick={() => navigate('/stats')} title="Stats">
+            <BarChart3 className="h-4 w-4" />
+          </Button>
+          <Button variant="ghost" size="icon" onClick={() => navigate('/settings')} title="Settings">
             <Settings className="h-4 w-4" />
           </Button>
           <Button variant="ghost" size="icon" onClick={handleLogout}>
