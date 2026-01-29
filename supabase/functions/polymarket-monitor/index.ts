@@ -315,7 +315,9 @@ async function sendSmsAlert(
   marketType: string,
   teamName: string | null,
   signalTier: string,
-  movementVelocity: number
+  movementVelocity: number,
+  betSide: 'YES' | 'NO',
+  movementDirection: 'shortening' | 'drifting' | null
 ): Promise<boolean> {
   // Only send SMS for ELITE and STRONG signals
   if (signalTier !== 'elite' && signalTier !== 'strong') {
@@ -340,15 +342,24 @@ async function sendSmsAlert(
     const timeUntil = formatTimeUntil(eventDate);
     const netEv = (netEdge * stakeAmount).toFixed(2);
     
-    const betSide = teamName || 'YES';
+    // Directional labeling: BUY YES vs BUY NO
+    const betDirectionLabel = betSide === 'YES' ? 'BUY YES' : 'BUY NO';
+    const polyPriceLabel = betSide === 'YES' ? 'Poly YES' : 'Poly NO';
     const tierEmoji = signalTier === 'elite' ? '🚨' : '🎯';
-    const movementInfo = movementVelocity > 0 ? ` +${(movementVelocity * 100).toFixed(1)}% move` : '';
+    
+    // Movement direction text
+    const movementText = movementDirection === 'shortening' 
+      ? `SHORTENING +${(movementVelocity * 100).toFixed(1)}%`
+      : movementDirection === 'drifting'
+        ? `DRIFTING ${(movementVelocity * 100).toFixed(1)}%`
+        : '';
     
     const message = `${tierEmoji} ${signalTier.toUpperCase()}: ${event.event_name}
-BET: ${betSide}
-Poly: ${(polyPrice * 100).toFixed(0)}¢ ($${(volume / 1000).toFixed(0)}K)
+${betDirectionLabel}: ${teamName}
+${polyPriceLabel}: ${(polyPrice * 100).toFixed(0)}¢ ($${(volume / 1000).toFixed(0)}K)
 Book: ${(bookmakerFairProb * 100).toFixed(0)}%
-Edge: +${(rawEdge * 100).toFixed(1)}% raw, +$${netEv} net EV${movementInfo}
+Edge: +${(rawEdge * 100).toFixed(1)}% raw, +$${netEv} net EV
+Sharp books ${movementText}
 ⏰ ${timeUntil} - ACT NOW`;
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
@@ -712,31 +723,43 @@ Deno.serve(async (req) => {
 
         // Check for edge
         if (bookmakerFairProb !== null && liveVolume >= 5000) {
-          const rawEdge = bookmakerFairProb - livePolyPrice;
+          // SKIP if we can't determine the bet side
+          if (!teamName) {
+            teamName = cache?.extracted_entity || null;
+          }
+          
+          if (!teamName) {
+            console.log(`[POLY-MONITOR] SKIPPING signal for ${event.event_name} - no team name could be determined`);
+            continue;
+          }
+          
+          // Generate event key for movement detection
+          const eventKey = generateEventKey(event.event_name, teamName);
+          
+          // ========== MOVEMENT DETECTION GATE ==========
+          const movement = await detectSharpMovement(supabase, eventKey, teamName);
+          
+          // ========== DIRECTIONAL EDGE CALCULATION ==========
+          // Determine bet side based on movement direction
+          let betSide: 'YES' | 'NO' = 'YES';
+          let rawEdge = bookmakerFairProb - livePolyPrice;
+          
+          if (movement.triggered && movement.direction === 'drifting') {
+            // Bookies drifted (prob DOWN) - bet NO on Polymarket
+            // Edge = (1 - bookmakerFairProb) - (1 - livePolyPrice) = livePolyPrice - bookmakerFairProb
+            betSide = 'NO';
+            rawEdge = (1 - livePolyPrice) - (1 - bookmakerFairProb);
+            // rawEdge simplifies to: livePolyPrice - bookmakerFairProb
+          }
+          // ========== END DIRECTIONAL CALCULATION ==========
           
           if (rawEdge >= 0.02) {
             const { netEdge } = calculateNetEdge(rawEdge, liveVolume, stakeAmount, spreadPct);
-            
-            // SKIP if we can't determine the bet side
-            if (!teamName) {
-              teamName = cache?.extracted_entity || null;
-            }
-            
-            if (!teamName) {
-              console.log(`[POLY-MONITOR] SKIPPING signal for ${event.event_name} - no team name could be determined`);
-              continue;
-            }
-            
-            // Generate event key for movement detection
-            const eventKey = generateEventKey(event.event_name, teamName);
-            
-            // ========== MOVEMENT DETECTION GATE ==========
-            const movement = await detectSharpMovement(supabase, eventKey, teamName);
             const signalTier = calculateSignalTier(movement.triggered, netEdge);
             
             if (movement.triggered) {
               movementConfirmedCount++;
-              console.log(`[POLY-MONITOR] Movement CONFIRMED for ${event.event_name}: ${movement.booksConfirming} books, ${(movement.velocity * 100).toFixed(1)}% velocity`);
+              console.log(`[POLY-MONITOR] Movement CONFIRMED for ${event.event_name}: ${movement.booksConfirming} books, ${movement.direction}, ${(movement.velocity * 100).toFixed(1)}% velocity -> ${betSide}`);
             }
             
             // Only create signals if:
@@ -748,7 +771,7 @@ Deno.serve(async (req) => {
             }
             // ========== END MOVEMENT GATE ==========
             
-            console.log(`[POLY-MONITOR] ${signalTier.toUpperCase()} edge: ${event.event_name} - Raw: ${(rawEdge * 100).toFixed(1)}%, Net: ${(netEdge * 100).toFixed(1)}%`);
+            console.log(`[POLY-MONITOR] ${signalTier.toUpperCase()} edge (${betSide}): ${event.event_name} - Raw: ${(rawEdge * 100).toFixed(1)}%, Net: ${(netEdge * 100).toFixed(1)}%`);
             
             edgesFound++;
 
@@ -796,12 +819,14 @@ Deno.serve(async (req) => {
                 team_name: teamName,
                 hours_until_event: Math.floor((eventStart.getTime() - now.getTime()) / 3600000),
                 time_label: `${Math.floor((eventStart.getTime() - now.getTime()) / 3600000)}h`,
-                // NEW: Movement data
+                // Movement data
                 movement_confirmed: movement.triggered,
                 movement_velocity: movement.velocity * 100,
                 movement_direction: movement.direction,
                 books_confirming_movement: movement.booksConfirming,
                 signal_tier: signalTier,
+                // NEW: Directional labeling
+                bet_direction: betSide === 'YES' ? 'BUY_YES' : 'BUY_NO',
               },
             };
 
@@ -809,14 +834,17 @@ Deno.serve(async (req) => {
               // UPDATE existing active signal with fresh data
               const { data, error } = await supabase
                 .from('signal_opportunities')
-                .update(signalData)
+                .update({
+                  ...signalData,
+                  side: betSide, // Update side based on movement direction
+                })
                 .eq('id', existingSignal.id)
                 .select()
                 .single();
 
               signal = data;
               signalError = error;
-              console.log(`[POLY-MONITOR] Updated ${signalTier} signal for ${event.event_name}`);
+              console.log(`[POLY-MONITOR] Updated ${signalTier} ${betSide} signal for ${event.event_name}`);
             } else {
               // INSERT new signal
               const { data, error } = await supabase
@@ -824,7 +852,7 @@ Deno.serve(async (req) => {
                 .insert({
                   event_name: event.event_name,
                   recommended_outcome: teamName,
-                  side: 'YES',
+                  side: betSide, // NEW: Use calculated bet side
                   is_true_arbitrage: true,
                   status: 'active',
                   polymarket_condition_id: event.polymarket_condition_id,
@@ -835,7 +863,7 @@ Deno.serve(async (req) => {
 
               signal = data;
               signalError = error;
-              console.log(`[POLY-MONITOR] Created new ${signalTier} signal for ${event.event_name}`);
+              console.log(`[POLY-MONITOR] Created new ${signalTier} ${betSide} signal for ${event.event_name}`);
             }
 
             // Only send SMS for NEW ELITE/STRONG signals (not updates)
@@ -843,7 +871,7 @@ Deno.serve(async (req) => {
               const alertSent = await sendSmsAlert(
                 supabase, event, livePolyPrice, bookmakerFairProb,
                 rawEdge, netEdge, liveVolume, stakeAmount, marketType, teamName,
-                signalTier, movement.velocity
+                signalTier, movement.velocity, betSide, movement.direction
               );
               
               if (alertSent) {
