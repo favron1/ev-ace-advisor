@@ -72,24 +72,65 @@ function detectSport(title: string, question: string): string | null {
   return null;
 }
 
-// Detect market type from question
+// Detect market type from question with improved patterns
 function detectMarketType(question: string): string {
   const q = question.toLowerCase();
   
-  if (/over|under|o\/u|total|combined|points scored|more than|less than|at least \d+|exactly \d+/.test(q)) {
-    return 'total';
-  }
-  if (/spread|handicap|\+\d+\.?\d*|\-\d+\.?\d*|cover|margin/.test(q)) {
-    return 'spread';
-  }
-  if (/prop|player|score|yards|touchdowns|assists|rebounds|strikeouts|home runs|goals scored by/.test(q)) {
-    return 'player_prop';
-  }
-  if (/championship|winner|mvp|award|season|division|conference|super bowl|world series|stanley cup/.test(q)) {
+  // Totals (Over/Under) - expanded patterns
+  if (/\bover\s+\d+\.?\d*/i.test(q) || /\bunder\s+\d+\.?\d*/i.test(q)) return 'total';
+  if (/total\s+(?:points|goals|runs|score)/i.test(q)) return 'total';
+  if (/score\s+over|score\s+under/i.test(q)) return 'total';
+  if (/combined\s+(?:score|points|total)/i.test(q)) return 'total';
+  if (/o\/u|over\/under/i.test(q)) return 'total';
+  if (/more than \d+|less than \d+|at least \d+|exactly \d+/i.test(q)) return 'total';
+  
+  // Spreads - expanded patterns
+  if (/cover\s+[\-\+]?\d+\.?\d*/i.test(q)) return 'spread';
+  if (/win\s+by\s+\d+\+?/i.test(q)) return 'spread';
+  if (/\b[\-\+]\d+\.5\b/.test(q)) return 'spread'; // -5.5, +3.5 patterns
+  if (/spread|handicap|margin\s+of/i.test(q)) return 'spread';
+  
+  // Player props - expanded patterns
+  if (/\d+\+?\s+(?:points|rebounds|assists|yards|touchdowns|goals|strikeouts|home runs|hits|saves)/i.test(q)) return 'player_prop';
+  if (/score\s+\d+\+?\s+points/i.test(q)) return 'player_prop';
+  if (/throw\s+\d+\+?\s+(?:tds|touchdowns)/i.test(q)) return 'player_prop';
+  if (/record\s+\d+\+?\s+(?:rebounds|assists)/i.test(q)) return 'player_prop';
+  if (/rush\s+for\s+\d+\+?\s+yards/i.test(q)) return 'player_prop';
+  
+  // Futures
+  if (/championship|winner|mvp|award|season|division|conference|super bowl|world series|stanley cup/i.test(q)) {
     return 'futures';
   }
+  
   // Default to h2h for "vs", "beat", "win" patterns
   return 'h2h';
+}
+
+// Extract numeric threshold from question (e.g., "over 220.5" -> 220.5)
+function extractThreshold(question: string): number | null {
+  const q = question.toLowerCase();
+  
+  // Over/under patterns: "over 220.5", "under 110.5"
+  const overUnderMatch = q.match(/(?:over|under)\s+(\d+\.?\d*)/i);
+  if (overUnderMatch) return parseFloat(overUnderMatch[1]);
+  
+  // Spread patterns: "cover -5.5", "+3.5"
+  const spreadMatch = q.match(/(?:cover\s+)?([\-\+]\d+\.?\d*)/i);
+  if (spreadMatch) return parseFloat(spreadMatch[1]);
+  
+  // Win by patterns: "win by 5+"
+  const winByMatch = q.match(/win\s+by\s+(\d+)\+?/i);
+  if (winByMatch) return parseFloat(winByMatch[1]);
+  
+  // Prop patterns: "score 25+ points"
+  const propMatch = q.match(/(?:score|throw|record|rush\s+for)\s+(\d+)\+?/i);
+  if (propMatch) return parseFloat(propMatch[1]);
+  
+  // General number extraction for totals
+  const totalMatch = q.match(/total.*?(\d+\.?\d*)/i);
+  if (totalMatch) return parseFloat(totalMatch[1]);
+  
+  return null;
 }
 
 // Extract entity (team/player name) from question
@@ -333,6 +374,18 @@ Deno.serve(async (req) => {
       const teamHomeNormalized = teamHome ? normalizeTeamName(teamHome) : null;
       const teamAwayNormalized = teamAway ? normalizeTeamName(teamAway) : null;
 
+      // Extract token IDs from Gamma response (clobTokenIds field)
+      let tokenIdYes: string | null = null;
+      let tokenIdNo: string | null = null;
+      
+      if (market.clobTokenIds && Array.isArray(market.clobTokenIds)) {
+        tokenIdYes = market.clobTokenIds[0] || null;
+        tokenIdNo = market.clobTokenIds[1] || null;
+      }
+      
+      // Extract threshold for totals/spreads/props
+      const extractedThreshold = extractThreshold(question);
+
       // Upsert to polymarket_h2h_cache
       const { error: cacheError } = await supabase
         .from('polymarket_h2h_cache')
@@ -353,6 +406,9 @@ Deno.serve(async (req) => {
           extracted_league: detectedSport,
           extracted_entity: extractedEntity,
           market_type: marketType,
+          extracted_threshold: extractedThreshold,
+          token_id_yes: tokenIdYes,
+          token_id_no: tokenIdNo,
           status: 'active',
           last_price_update: now.toISOString(),
           last_bulk_sync: now.toISOString(),
