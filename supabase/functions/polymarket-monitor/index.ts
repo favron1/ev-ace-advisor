@@ -39,6 +39,11 @@ function normalizeName(name: string): string {
     .trim();
 }
 
+// Generate event key for movement detection
+function generateEventKey(eventName: string, outcome: string): string {
+  return `${eventName.toLowerCase().replace(/[^a-z0-9]/g, '_')}::${outcome.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
+}
+
 // Calculate fair probability by removing vig (supports 2-way and 3-way markets)
 function calculateFairProb(odds: number[], targetIndex: number): number {
   const probs = odds.map(o => 1 / o);
@@ -60,7 +65,6 @@ function calculateNetEdge(
 } {
   const platformFee = rawEdge > 0 ? rawEdge * 0.01 : 0;
   
-  // Use actual spread if available, otherwise estimate based on volume
   let spreadCost = actualSpreadPct !== null ? actualSpreadPct : 0.03;
   if (actualSpreadPct === null) {
     if (volume >= 500000) spreadCost = 0.005;
@@ -81,6 +85,145 @@ function calculateNetEdge(
   return { netEdge: rawEdge - platformFee - spreadCost - slippage, platformFee, spreadCost, slippage };
 }
 
+// ============= MOVEMENT DETECTION FUNCTIONS =============
+
+interface MovementResult {
+  triggered: boolean;
+  velocity: number;
+  booksConfirming: number;
+  direction: 'shortening' | 'drifting' | null;
+}
+
+// Get movement threshold based on baseline probability (probability-relative)
+function getMovementThreshold(baselineProb: number): number {
+  // 3% move from 20% is massive, 3% from 75% is less meaningful
+  return Math.max(0.02, 0.12 * baselineProb);
+}
+
+// Check if recent move accounts for 70%+ of total movement (recency bias)
+function checkRecencyBias(snapshots: any[]): boolean {
+  if (snapshots.length < 2) return false;
+  
+  const oldest = snapshots[0].implied_probability;
+  const newest = snapshots[snapshots.length - 1].implied_probability;
+  const totalMove = Math.abs(newest - oldest);
+  
+  if (totalMove < 0.01) return false; // Negligible total movement
+  
+  // Find price ~10 minutes ago
+  const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000);
+  const recentSnapshot = snapshots.find((s: any) => new Date(s.captured_at) >= tenMinAgo);
+  
+  if (!recentSnapshot) return true; // All movement is recent
+  
+  const recentMove = Math.abs(newest - recentSnapshot.implied_probability);
+  return (recentMove / totalMove) >= 0.70;
+}
+
+// Check that no sharp book moved meaningfully in opposite direction
+function checkNoCounterMoves(movements: { book: string; change: number; direction: number }[]): boolean {
+  if (movements.length === 0) return false;
+  
+  const primaryDirection = movements[0].direction;
+  
+  for (const movement of movements) {
+    // If any book moved meaningfully (>=2%) in opposite direction, fail
+    if (movement.direction !== primaryDirection && Math.abs(movement.change) >= 0.02) {
+      return false;
+    }
+  }
+  
+  return true;
+}
+
+// Main movement detection function
+async function detectSharpMovement(
+  supabase: any,
+  eventKey: string,
+  outcome: string
+): Promise<MovementResult> {
+  const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000);
+  
+  // Get last 30 minutes of sharp book data for this event/outcome
+  const { data: snapshots, error } = await supabase
+    .from('sharp_book_snapshots')
+    .select('*')
+    .eq('event_key', eventKey)
+    .eq('outcome', outcome)
+    .gte('captured_at', thirtyMinAgo.toISOString())
+    .order('captured_at', { ascending: true });
+  
+  if (error || !snapshots || snapshots.length < 2) {
+    return { triggered: false, velocity: 0, booksConfirming: 0, direction: null };
+  }
+  
+  // Group by bookmaker
+  const byBook: Record<string, any[]> = {};
+  for (const snap of snapshots) {
+    if (!byBook[snap.bookmaker]) {
+      byBook[snap.bookmaker] = [];
+    }
+    byBook[snap.bookmaker].push(snap);
+  }
+  
+  // Calculate movement for each sharp book
+  const movements: { book: string; change: number; direction: number }[] = [];
+  const sharpBooks = ['pinnacle', 'betfair', 'circa', 'betonline', 'bookmaker'];
+  
+  for (const book of sharpBooks) {
+    const bookSnapshots = byBook[book];
+    if (!bookSnapshots || bookSnapshots.length < 2) continue;
+    
+    const oldest = bookSnapshots[0].implied_probability;
+    const newest = bookSnapshots[bookSnapshots.length - 1].implied_probability;
+    const change = newest - oldest;
+    
+    // Probability-relative threshold
+    const threshold = getMovementThreshold(oldest);
+    
+    if (Math.abs(change) >= threshold) {
+      // Check recency bias
+      if (checkRecencyBias(bookSnapshots)) {
+        movements.push({
+          book,
+          change,
+          direction: Math.sign(change),
+        });
+      }
+    }
+  }
+  
+  // Coordination check: ≥2 books, same direction, no counter-moves
+  if (movements.length >= 2) {
+    if (checkNoCounterMoves(movements)) {
+      const avgVelocity = movements.reduce((sum, m) => sum + Math.abs(m.change), 0) / movements.length;
+      const direction = movements[0].direction > 0 ? 'shortening' : 'drifting';
+      
+      return {
+        triggered: true,
+        velocity: avgVelocity,
+        booksConfirming: movements.length,
+        direction,
+      };
+    }
+  }
+  
+  return { triggered: false, velocity: 0, booksConfirming: 0, direction: null };
+}
+
+// Determine signal tier based on movement + edge
+function calculateSignalTier(
+  movementTriggered: boolean,
+  netEdge: number
+): 'elite' | 'strong' | 'static' {
+  if (!movementTriggered) return 'static';
+  if (netEdge >= 0.05) return 'elite';
+  if (netEdge >= 0.03) return 'strong';
+  return 'static';
+}
+
+// ============= END MOVEMENT DETECTION =============
+
 // Batch fetch CLOB prices for multiple tokens
 async function fetchClobPrices(tokenIds: string[]): Promise<Map<string, { bid: number; ask: number }>> {
   const priceMap = new Map<string, { bid: number; ask: number }>();
@@ -88,7 +231,6 @@ async function fetchClobPrices(tokenIds: string[]): Promise<Map<string, { bid: n
   if (tokenIds.length === 0) return priceMap;
   
   try {
-    // CLOB prices endpoint uses query params with comma-separated token IDs
     const tokenIdsParam = tokenIds.join(',');
     const url = `${CLOB_API_BASE}/prices?token_ids=${encodeURIComponent(tokenIdsParam)}`;
     
@@ -100,8 +242,6 @@ async function fetchClobPrices(tokenIds: string[]): Promise<Map<string, { bid: n
     
     const data = await response.json();
     
-    // Response format: { "tokenId": { "bid": "0.45", "ask": "0.46" }, ... }
-    // or: { "tokenId": "0.45" } for simple price
     for (const [tokenId, priceData] of Object.entries(data)) {
       if (typeof priceData === 'object' && priceData !== null) {
         const pd = priceData as Record<string, string>;
@@ -141,7 +281,6 @@ async function fetchClobSpreads(tokenIds: string[]): Promise<Map<string, number>
     
     const data = await response.json();
     
-    // Response format: { "tokenId": "0.02", ... }
     for (const [tokenId, spread] of Object.entries(data)) {
       if (typeof spread === 'string' || typeof spread === 'number') {
         spreadMap.set(tokenId, parseFloat(String(spread)));
@@ -163,7 +302,7 @@ function formatTimeUntil(eventDate: Date): string {
   return hours >= 1 ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
-// Send SMS alert
+// Send SMS alert - only for ELITE and STRONG signals
 async function sendSmsAlert(
   supabase: any,
   event: any,
@@ -174,8 +313,16 @@ async function sendSmsAlert(
   volume: number,
   stakeAmount: number,
   marketType: string,
-  teamName: string | null
+  teamName: string | null,
+  signalTier: string,
+  movementVelocity: number
 ): Promise<boolean> {
+  // Only send SMS for ELITE and STRONG signals
+  if (signalTier !== 'elite' && signalTier !== 'strong') {
+    console.log(`[POLY-MONITOR] Skipping SMS for ${signalTier} tier signal`);
+    return false;
+  }
+  
   try {
     const { data: profiles } = await supabase
       .from('profiles')
@@ -194,11 +341,14 @@ async function sendSmsAlert(
     const netEv = (netEdge * stakeAmount).toFixed(2);
     
     const betSide = teamName || 'YES';
-    const message = `🎯 EDGE: ${event.event_name}
+    const tierEmoji = signalTier === 'elite' ? '🚨' : '🎯';
+    const movementInfo = movementVelocity > 0 ? ` +${(movementVelocity * 100).toFixed(1)}% move` : '';
+    
+    const message = `${tierEmoji} ${signalTier.toUpperCase()}: ${event.event_name}
 BET: ${betSide}
 Poly: ${(polyPrice * 100).toFixed(0)}¢ ($${(volume / 1000).toFixed(0)}K)
 Book: ${(bookmakerFairProb * 100).toFixed(0)}%
-Edge: +${(rawEdge * 100).toFixed(1)}% raw, +$${netEv} net EV
+Edge: +${(rawEdge * 100).toFixed(1)}% raw, +$${netEv} net EV${movementInfo}
 ⏰ ${timeUntil} - ACT NOW`;
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
@@ -218,7 +368,7 @@ Edge: +${(rawEdge * 100).toFixed(1)}% raw, +$${netEv} net EV
       return false;
     }
     
-    console.log('[POLY-MONITOR] SMS sent');
+    console.log(`[POLY-MONITOR] SMS sent for ${signalTier} signal`);
     return true;
   } catch (error) {
     console.error('[POLY-MONITOR] SMS error:', error);
@@ -259,7 +409,6 @@ function findBookmakerMatch(
     const homeNorm = normalizeName(game.home_team);
     const awayNorm = normalizeName(game.away_team);
     
-    // Check if event matches this game
     const homeWords = homeNorm.split(' ').filter((w: string) => w.length > 2);
     const awayWords = awayNorm.split(' ').filter((w: string) => w.length > 2);
     
@@ -268,23 +417,19 @@ function findBookmakerMatch(
     
     if (!containsHome && !containsAway) continue;
     
-    // Determine which market type to match
     let targetMarketKey = 'h2h';
     if (marketType === 'total') targetMarketKey = 'totals';
     else if (marketType === 'spread') targetMarketKey = 'spreads';
     
-    // Find the market in bookmaker data
     const bookmaker = game.bookmakers?.[0];
     const market = bookmaker?.markets?.find((m: any) => m.key === targetMarketKey);
     
     if (!market || !market.outcomes) continue;
     
-    // Determine target outcome index and extract team name
     let targetIndex = 0;
     let teamName = '';
     
     if (targetMarketKey === 'h2h') {
-      // For H2H, determine if we're betting home or away
       if (containsHome && !containsAway) {
         targetIndex = market.outcomes.findIndex((o: any) => normalizeName(o.name).includes(homeNorm.split(' ').pop() || ''));
         teamName = game.home_team;
@@ -292,7 +437,6 @@ function findBookmakerMatch(
         targetIndex = market.outcomes.findIndex((o: any) => normalizeName(o.name).includes(awayNorm.split(' ').pop() || ''));
         teamName = game.away_team;
       } else {
-        // Both teams mentioned - check question for team name
         const questionNorm = normalizeName(question);
         if (homeWords.some((w: string) => questionNorm.includes(w))) {
           targetIndex = 0;
@@ -301,13 +445,11 @@ function findBookmakerMatch(
           targetIndex = 1;
           teamName = game.away_team;
         } else {
-          // Default to first outcome
           targetIndex = 0;
           teamName = market.outcomes[0]?.name || game.home_team;
         }
       }
     } else if (targetMarketKey === 'totals') {
-      // For totals, check if "over" or "under" is in question
       const isOver = /\bover\b/i.test(question);
       targetIndex = market.outcomes.findIndex((o: any) => 
         isOver ? o.name.toLowerCase().includes('over') : o.name.toLowerCase().includes('under')
@@ -320,7 +462,6 @@ function findBookmakerMatch(
       teamName = market.outcomes[0]?.name || '';
     }
     
-    // Ensure we have a team name
     if (!teamName && market.outcomes[targetIndex]) {
       teamName = market.outcomes[targetIndex].name;
     }
@@ -359,7 +500,7 @@ Deno.serve(async (req) => {
   }
 
   const startTime = Date.now();
-  console.log('[POLY-MONITOR] Starting multi-sport polling...');
+  console.log('[POLY-MONITOR] Starting multi-sport polling with movement detection...');
 
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
@@ -463,6 +604,7 @@ Deno.serve(async (req) => {
     let alertsSent = 0;
     let eventsExpired = 0;
     let eventsMatched = 0;
+    let movementConfirmedCount = 0;
 
     for (const event of monitoredEvents) {
       try {
@@ -498,7 +640,6 @@ Deno.serve(async (req) => {
           const prices = clobPrices.get(tokenIdYes)!;
           bestBid = prices.bid;
           bestAsk = prices.ask;
-          // Use best_ask as the actual buy price (what you pay)
           livePolyPrice = bestAsk > 0 ? bestAsk : livePolyPrice;
           
           if (clobSpreads.has(tokenIdYes)) {
@@ -535,10 +676,12 @@ Deno.serve(async (req) => {
         );
 
         let bookmakerFairProb: number | null = null;
+        let teamName: string | null = null;
         
         if (match) {
           eventsMatched++;
           bookmakerFairProb = calculateConsensusFairProb(match.game, match.marketKey, match.targetIndex);
+          teamName = match.teamName;
         }
 
         // Update event state and cache with CLOB data
@@ -572,133 +715,143 @@ Deno.serve(async (req) => {
           const rawEdge = bookmakerFairProb - livePolyPrice;
           
           if (rawEdge >= 0.02) {
-            // Use actual spread for more accurate net edge calculation
             const { netEdge } = calculateNetEdge(rawEdge, liveVolume, stakeAmount, spreadPct);
             
-            console.log(`[POLY-MONITOR] Edge found: ${event.event_name} - Raw: ${(rawEdge * 100).toFixed(1)}%, Net: ${(netEdge * 100).toFixed(1)}%${spreadPct !== null ? ` (spread: ${(spreadPct * 100).toFixed(2)}%)` : ''}`);
+            // SKIP if we can't determine the bet side
+            if (!teamName) {
+              teamName = cache?.extracted_entity || null;
+            }
             
-            if (netEdge >= 0.02) {
-              // Extract team name: prefer match result, fallback to cache extracted_entity
-              const teamName = match?.teamName || cache?.extracted_entity || null;
-              
-              // CRITICAL: Skip signal creation if we can't determine the bet side
-              if (!teamName) {
-                console.log(`[POLY-MONITOR] SKIPPING signal for ${event.event_name} - no team name could be determined`);
-                continue;
-              }
-              
-              edgesFound++;
+            if (!teamName) {
+              console.log(`[POLY-MONITOR] SKIPPING signal for ${event.event_name} - no team name could be determined`);
+              continue;
+            }
+            
+            // Generate event key for movement detection
+            const eventKey = generateEventKey(event.event_name, teamName);
+            
+            // ========== MOVEMENT DETECTION GATE ==========
+            const movement = await detectSharpMovement(supabase, eventKey, teamName);
+            const signalTier = calculateSignalTier(movement.triggered, netEdge);
+            
+            if (movement.triggered) {
+              movementConfirmedCount++;
+              console.log(`[POLY-MONITOR] Movement CONFIRMED for ${event.event_name}: ${movement.booksConfirming} books, ${(movement.velocity * 100).toFixed(1)}% velocity`);
+            }
+            
+            // Only create signals if:
+            // 1. Movement confirmed (any tier) OR
+            // 2. Very high static edge (≥5% net)
+            if (!movement.triggered && netEdge < 0.05) {
+              console.log(`[POLY-MONITOR] Skipping static edge for ${event.event_name} (${(netEdge * 100).toFixed(1)}% net) - no movement detected`);
+              continue;
+            }
+            // ========== END MOVEMENT GATE ==========
+            
+            console.log(`[POLY-MONITOR] ${signalTier.toUpperCase()} edge: ${event.event_name} - Raw: ${(rawEdge * 100).toFixed(1)}%, Net: ${(netEdge * 100).toFixed(1)}%`);
+            
+            edgesFound++;
 
-              // Check for existing active/executed signal for this event+outcome
-              const { data: existingSignals } = await supabase
+            // Check for existing active/executed signal for this event+outcome
+            const { data: existingSignals } = await supabase
+              .from('signal_opportunities')
+              .select('id, status')
+              .eq('event_name', event.event_name)
+              .eq('recommended_outcome', teamName)
+              .in('status', ['active', 'executed']);
+
+            const existingSignal = existingSignals?.[0];
+
+            if (existingSignal?.status === 'executed') {
+              console.log(`[POLY-MONITOR] Skipping ${event.event_name} - already executed`);
+              continue;
+            }
+
+            let signal = null;
+            let signalError = null;
+
+            const signalData = {
+              polymarket_price: livePolyPrice,
+              bookmaker_probability: bookmakerFairProb,
+              bookmaker_prob_fair: bookmakerFairProb,
+              edge_percent: rawEdge * 100,
+              confidence_score: Math.min(85, 50 + Math.floor(netEdge * 500)),
+              urgency: eventStart.getTime() - now.getTime() < 3600000 ? 'critical' : 
+                      eventStart.getTime() - now.getTime() < 14400000 ? 'high' : 'normal',
+              polymarket_yes_price: livePolyPrice,
+              polymarket_volume: liveVolume,
+              polymarket_updated_at: now.toISOString(),
+              signal_strength: netEdge * 100,
+              expires_at: event.commence_time,
+              // NEW: Movement detection fields
+              movement_confirmed: movement.triggered,
+              movement_velocity: movement.velocity,
+              signal_tier: signalTier,
+              signal_factors: {
+                raw_edge: rawEdge * 100,
+                net_edge: netEdge * 100,
+                market_type: marketType,
+                sport: sport,
+                volume: liveVolume,
+                team_name: teamName,
+                hours_until_event: Math.floor((eventStart.getTime() - now.getTime()) / 3600000),
+                time_label: `${Math.floor((eventStart.getTime() - now.getTime()) / 3600000)}h`,
+                // NEW: Movement data
+                movement_confirmed: movement.triggered,
+                movement_velocity: movement.velocity * 100,
+                movement_direction: movement.direction,
+                books_confirming_movement: movement.booksConfirming,
+                signal_tier: signalTier,
+              },
+            };
+
+            if (existingSignal) {
+              // UPDATE existing active signal with fresh data
+              const { data, error } = await supabase
                 .from('signal_opportunities')
-                .select('id, status')
-                .eq('event_name', event.event_name)
-                .eq('recommended_outcome', teamName)
-                .in('status', ['active', 'executed']);
+                .update(signalData)
+                .eq('id', existingSignal.id)
+                .select()
+                .single();
 
-              const existingSignal = existingSignals?.[0];
+              signal = data;
+              signalError = error;
+              console.log(`[POLY-MONITOR] Updated ${signalTier} signal for ${event.event_name}`);
+            } else {
+              // INSERT new signal
+              const { data, error } = await supabase
+                .from('signal_opportunities')
+                .insert({
+                  event_name: event.event_name,
+                  recommended_outcome: teamName,
+                  side: 'YES',
+                  is_true_arbitrage: true,
+                  status: 'active',
+                  polymarket_condition_id: event.polymarket_condition_id,
+                  ...signalData,
+                })
+                .select()
+                .single();
 
-              if (existingSignal?.status === 'executed') {
-                // User already placed this bet, skip
-                console.log(`[POLY-MONITOR] Skipping ${event.event_name} - already executed`);
-                continue;
-              }
+              signal = data;
+              signalError = error;
+              console.log(`[POLY-MONITOR] Created new ${signalTier} signal for ${event.event_name}`);
+            }
 
-              let signal = null;
-              let signalError = null;
-
-              if (existingSignal) {
-                // UPDATE existing active signal with fresh data
-                const { data, error } = await supabase
-                  .from('signal_opportunities')
-                  .update({
-                    polymarket_price: livePolyPrice,
-                    bookmaker_probability: bookmakerFairProb,
-                    bookmaker_prob_fair: bookmakerFairProb,
-                    edge_percent: rawEdge * 100,
-                    confidence_score: Math.min(85, 50 + Math.floor(netEdge * 500)),
-                    urgency: eventStart.getTime() - now.getTime() < 3600000 ? 'critical' : 
-                            eventStart.getTime() - now.getTime() < 14400000 ? 'high' : 'normal',
-                    polymarket_yes_price: livePolyPrice,
-                    polymarket_volume: liveVolume,
-                    polymarket_updated_at: now.toISOString(),
-                    signal_strength: netEdge * 100,
-                    expires_at: event.commence_time,
-                    signal_factors: {
-                      raw_edge: rawEdge * 100,
-                      net_edge: netEdge * 100,
-                      market_type: marketType,
-                      sport: sport,
-                      volume: liveVolume,
-                      team_name: teamName,
-                      hours_until_event: Math.floor((eventStart.getTime() - now.getTime()) / 3600000),
-                      time_label: `${Math.floor((eventStart.getTime() - now.getTime()) / 3600000)}h`,
-                    },
-                  })
-                  .eq('id', existingSignal.id)
-                  .select()
-                  .single();
-
-                signal = data;
-                signalError = error;
-                console.log(`[POLY-MONITOR] Updated signal for ${event.event_name}`);
-              } else {
-                // INSERT new signal
-                const { data, error } = await supabase
-                  .from('signal_opportunities')
-                  .insert({
-                    event_name: event.event_name,
-                    recommended_outcome: teamName,
-                    side: 'YES',
-                    polymarket_price: livePolyPrice,
-                    bookmaker_probability: bookmakerFairProb,
-                    bookmaker_prob_fair: bookmakerFairProb,
-                    edge_percent: rawEdge * 100,
-                    confidence_score: Math.min(85, 50 + Math.floor(netEdge * 500)),
-                    urgency: eventStart.getTime() - now.getTime() < 3600000 ? 'critical' : 
-                            eventStart.getTime() - now.getTime() < 14400000 ? 'high' : 'normal',
-                    is_true_arbitrage: true,
-                    polymarket_yes_price: livePolyPrice,
-                    polymarket_volume: liveVolume,
-                    polymarket_updated_at: now.toISOString(),
-                    signal_strength: netEdge * 100,
-                    status: 'active',
-                    expires_at: event.commence_time,
-                    polymarket_condition_id: event.polymarket_condition_id,
-                    signal_factors: {
-                      raw_edge: rawEdge * 100,
-                      net_edge: netEdge * 100,
-                      market_type: marketType,
-                      sport: sport,
-                      volume: liveVolume,
-                      team_name: teamName,
-                      hours_until_event: Math.floor((eventStart.getTime() - now.getTime()) / 3600000),
-                      time_label: `${Math.floor((eventStart.getTime() - now.getTime()) / 3600000)}h`,
-                    },
-                  })
-                  .select()
-                  .single();
-
-                signal = data;
-                signalError = error;
-                console.log(`[POLY-MONITOR] Created new signal for ${event.event_name}`);
-              }
-
-              // Only send SMS for NEW signals (not updates)
-              if (!signalError && signal && !existingSignal) {
-                const alertSent = await sendSmsAlert(
-                  supabase, event, livePolyPrice, bookmakerFairProb,
-                  rawEdge, netEdge, liveVolume, stakeAmount, marketType, teamName
-                );
-                
-                if (alertSent) {
-                  alertsSent++;
-                  await supabase
-                    .from('event_watch_state')
-                    .update({ watch_state: 'alerted', updated_at: now.toISOString() })
-                    .eq('id', event.id);
-                }
+            // Only send SMS for NEW ELITE/STRONG signals (not updates)
+            if (!signalError && signal && !existingSignal && (signalTier === 'elite' || signalTier === 'strong')) {
+              const alertSent = await sendSmsAlert(
+                supabase, event, livePolyPrice, bookmakerFairProb,
+                rawEdge, netEdge, liveVolume, stakeAmount, marketType, teamName,
+                signalTier, movement.velocity
+              );
+              
+              if (alertSent) {
+                alertsSent++;
+                await supabase
+                  .from('event_watch_state')
+                  .update({ watch_state: 'alerted', updated_at: now.toISOString() })
+                  .eq('id', event.id);
               }
             }
           }
@@ -709,7 +862,7 @@ Deno.serve(async (req) => {
     }
 
     const duration = Date.now() - startTime;
-    console.log(`[POLY-MONITOR] Complete: ${monitoredEvents.length} polled, ${eventsMatched} matched, ${edgesFound} edges, ${alertsSent} alerts in ${duration}ms`);
+    console.log(`[POLY-MONITOR] Complete: ${monitoredEvents.length} polled, ${eventsMatched} matched, ${edgesFound} edges (${movementConfirmedCount} movement-confirmed), ${alertsSent} alerts in ${duration}ms`);
 
     return new Response(
       JSON.stringify({
@@ -718,6 +871,7 @@ Deno.serve(async (req) => {
         events_matched: eventsMatched,
         events_expired: eventsExpired,
         edges_found: edgesFound,
+        movement_confirmed: movementConfirmedCount,
         alerts_sent: alertsSent,
         duration_ms: duration,
       }),

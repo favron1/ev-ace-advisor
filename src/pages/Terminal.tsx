@@ -32,6 +32,7 @@ export default function Terminal() {
   const [selectedUrgency, setSelectedUrgency] = useState<string[]>([]);
   const [showTrueEdgesOnly, setShowTrueEdgesOnly] = useState(false);
   const [showBettableOnly, setShowBettableOnly] = useState(false);
+  const [showMovementConfirmedOnly, setShowMovementConfirmedOnly] = useState(true); // Default ON
 
   // Notifications hook
   const {
@@ -166,6 +167,7 @@ export default function Terminal() {
     urgency: selectedUrgency.length > 0 ? selectedUrgency : undefined,
     trueEdgesOnly: showTrueEdgesOnly,
     bettableOnly: showBettableOnly,
+    movementConfirmedOnly: showMovementConfirmedOnly,
   });
 
   if (!user) {
@@ -193,11 +195,13 @@ export default function Terminal() {
           selectedUrgency={selectedUrgency}
           showTrueEdgesOnly={showTrueEdgesOnly}
           showBettableOnly={showBettableOnly}
+          showMovementConfirmedOnly={showMovementConfirmedOnly}
           onMinEdgeChange={setMinEdge}
           onMinConfidenceChange={setMinConfidence}
           onUrgencyChange={setSelectedUrgency}
           onShowTrueEdgesOnlyChange={setShowTrueEdgesOnly}
           onShowBettableOnlyChange={setShowBettableOnly}
+          onShowMovementConfirmedOnlyChange={setShowMovementConfirmedOnly}
         />
 
         {/* Main Content */}

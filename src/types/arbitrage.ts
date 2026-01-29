@@ -55,6 +55,10 @@ export interface SignalOpportunity {
   polymarket_updated_at?: string;
   bookmaker_prob_fair?: number;
   signal_strength?: number;
+  // Movement detection fields
+  movement_confirmed?: boolean;
+  movement_velocity?: number;
+  signal_tier?: 'elite' | 'strong' | 'static';
 }
 
 export interface SignalFactors {
@@ -64,6 +68,12 @@ export interface SignalFactors {
   time_to_resolution?: number;
   liquidity_score?: number;
   market_maturity?: number;
+  // Movement detection data
+  movement_confirmed?: boolean;
+  movement_velocity?: number;
+  movement_direction?: 'shortening' | 'drifting';
+  books_confirming_movement?: number;
+  signal_tier?: 'elite' | 'strong' | 'static';
 }
 
 export interface SignalLog {

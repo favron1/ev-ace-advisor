@@ -566,6 +566,39 @@ export type Database = {
         }
         Relationships: []
       }
+      sharp_book_snapshots: {
+        Row: {
+          bookmaker: string
+          captured_at: string
+          event_key: string
+          event_name: string
+          id: string
+          implied_probability: number
+          outcome: string
+          raw_odds: number | null
+        }
+        Insert: {
+          bookmaker: string
+          captured_at?: string
+          event_key: string
+          event_name: string
+          id?: string
+          implied_probability: number
+          outcome: string
+          raw_odds?: number | null
+        }
+        Update: {
+          bookmaker?: string
+          captured_at?: string
+          event_key?: string
+          event_name?: string
+          id?: string
+          implied_probability?: number
+          outcome?: string
+          raw_odds?: number | null
+        }
+        Relationships: []
+      }
       signal_logs: {
         Row: {
           actual_result: boolean | null
@@ -630,6 +663,8 @@ export type Database = {
           expires_at: string | null
           id: string
           is_true_arbitrage: boolean | null
+          movement_confirmed: boolean | null
+          movement_velocity: number | null
           polymarket_condition_id: string | null
           polymarket_market_id: string | null
           polymarket_match_confidence: number | null
@@ -641,6 +676,7 @@ export type Database = {
           side: string
           signal_factors: Json | null
           signal_strength: number | null
+          signal_tier: string | null
           status: string | null
           urgency: string | null
           user_id: string | null
@@ -655,6 +691,8 @@ export type Database = {
           expires_at?: string | null
           id?: string
           is_true_arbitrage?: boolean | null
+          movement_confirmed?: boolean | null
+          movement_velocity?: number | null
           polymarket_condition_id?: string | null
           polymarket_market_id?: string | null
           polymarket_match_confidence?: number | null
@@ -666,6 +704,7 @@ export type Database = {
           side: string
           signal_factors?: Json | null
           signal_strength?: number | null
+          signal_tier?: string | null
           status?: string | null
           urgency?: string | null
           user_id?: string | null
@@ -680,6 +719,8 @@ export type Database = {
           expires_at?: string | null
           id?: string
           is_true_arbitrage?: boolean | null
+          movement_confirmed?: boolean | null
+          movement_velocity?: number | null
           polymarket_condition_id?: string | null
           polymarket_market_id?: string | null
           polymarket_match_confidence?: number | null
@@ -691,6 +732,7 @@ export type Database = {
           side?: string
           signal_factors?: Json | null
           signal_strength?: number | null
+          signal_tier?: string | null
           status?: string | null
           urgency?: string | null
           user_id?: string | null
@@ -710,7 +752,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      cleanup_old_sharp_book_snapshots: { Args: never; Returns: undefined }
     }
     Enums: {
       bet_result: "pending" | "win" | "loss" | "void"

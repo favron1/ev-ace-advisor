@@ -12,6 +12,15 @@ const SHARP_BOOKMAKERS = [
   'Circa Sports',
 ];
 
+// Canonical names for database storage
+const SHARP_BOOK_CANONICAL: Record<string, string> = {
+  'Pinnacle': 'pinnacle',
+  'Betfair': 'betfair',
+  'BetOnline.ag': 'betonline',
+  'Bookmaker': 'bookmaker',
+  'Circa Sports': 'circa',
+};
+
 interface RequestBody {
   eventHorizonHours?: number;
   sharpBookWeighting?: boolean;
@@ -22,6 +31,15 @@ interface OutcomeOdds {
   odds: number;
   bookmaker: string;
   isSharp: boolean;
+}
+
+interface SharpBookSnapshot {
+  event_key: string;
+  event_name: string;
+  outcome: string;
+  bookmaker: string;
+  implied_probability: number;
+  raw_odds: number;
 }
 
 // Calculate vig-removed fair probability for 2-way markets
@@ -71,6 +89,11 @@ function calculateFairProbability(
   };
 }
 
+// Generate event key for matching
+function generateEventKey(eventName: string, outcome: string): string {
+  return `${eventName.toLowerCase().replace(/[^a-z0-9]/g, '_')}::${outcome.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -113,14 +136,9 @@ Deno.serve(async (req) => {
     ];
 
     // H2H sports for individual match betting - PRIORITIZED FOR SHORT-TERM SIGNALS
-    // Order matters: Top priority first (NBA, UFC, Tennis)
     const h2hSports = [
-      // TOP PRIORITY: Short-term, news-sensitive markets
       'basketball_nba',
       'mma_mixed_martial_arts',
-      
-      // TENNIS: All available tournaments for year-round coverage
-      // Grand Slams
       'tennis_atp_aus_open_singles',
       'tennis_wta_aus_open_singles',
       'tennis_atp_french_open',
@@ -129,7 +147,6 @@ Deno.serve(async (req) => {
       'tennis_wta_wimbledon',
       'tennis_atp_us_open',
       'tennis_wta_us_open',
-      // Masters 1000 / WTA 1000
       'tennis_atp_indian_wells',
       'tennis_wta_indian_wells',
       'tennis_atp_miami_open',
@@ -145,7 +162,6 @@ Deno.serve(async (req) => {
       'tennis_wta_cincinnati_open',
       'tennis_atp_shanghai_masters',
       'tennis_atp_paris_masters',
-      // ATP 500 / WTA 500
       'tennis_atp_qatar_open',
       'tennis_atp_dubai',
       'tennis_atp_acapulco_open',
@@ -162,8 +178,6 @@ Deno.serve(async (req) => {
       'tennis_wta_china_open',
       'tennis_wta_wuhan_open',
       'tennis_wta_tokyo_open',
-      
-      // OTHER H2H SPORTS
       'americanfootball_nfl',
       'icehockey_nhl',
       'basketball_euroleague',
@@ -175,6 +189,7 @@ Deno.serve(async (req) => {
     ];
 
     const allSignals: any[] = [];
+    const sharpBookSnapshots: SharpBookSnapshot[] = [];
 
     // Fetch outrights (championship winners) - long-term signals
     for (const sport of outrightSports) {
@@ -211,13 +226,28 @@ Deno.serve(async (req) => {
                 bookmaker: bookmaker.title,
                 isSharp,
               });
+
+              // Store individual sharp book snapshots for movement detection
+              if (isSharp && SHARP_BOOK_CANONICAL[bookmaker.title]) {
+                const eventName = `${sportTitle}: ${outcome.name}`;
+                const eventKey = generateEventKey(eventName, outcome.name);
+                const impliedProb = 1 / outcome.price;
+                
+                sharpBookSnapshots.push({
+                  event_key: eventKey,
+                  event_name: eventName,
+                  outcome: outcome.name,
+                  bookmaker: SHARP_BOOK_CANONICAL[bookmaker.title],
+                  implied_probability: impliedProb,
+                  raw_odds: outcome.price,
+                });
+              }
             }
           }
 
           for (const [outcomeName, oddsArray] of Object.entries(outcomeOdds)) {
             if (oddsArray.length < 2) continue;
 
-            // Calculate vig-removed fair probability
             const { fairProb, avgOdds } = calculateFairProbability(
               outcomeOdds,
               outcomeName,
@@ -233,13 +263,13 @@ Deno.serve(async (req) => {
               outcome: outcomeName,
               bookmaker: 'consensus',
               odds: avgOdds,
-              implied_probability: fairProb, // Now using vig-removed fair probability
+              implied_probability: fairProb,
               previous_odds: null,
               odds_movement: 0,
               movement_speed: 0,
               confirming_books: oddsArray.length,
               is_sharp_book: hasSharpBook,
-              commence_time: null, // Outrights don't have specific times
+              commence_time: null,
             });
           }
         }
@@ -265,10 +295,10 @@ Deno.serve(async (req) => {
         for (const event of events) {
           if (!event.bookmakers || event.bookmakers.length < 2) continue;
 
-          // Filter by event horizon - only include events within the specified window
+          // Filter by event horizon
           const commenceTime = new Date(event.commence_time);
           if (commenceTime > horizonCutoff) {
-            continue; // Skip events too far in the future
+            continue;
           }
 
           const eventName = `${event.home_team} vs ${event.away_team}`;
@@ -289,13 +319,27 @@ Deno.serve(async (req) => {
                 bookmaker: bookmaker.title,
                 isSharp,
               });
+
+              // Store individual sharp book snapshots for movement detection
+              if (isSharp && SHARP_BOOK_CANONICAL[bookmaker.title]) {
+                const eventKey = generateEventKey(eventName, outcome.name);
+                const impliedProb = 1 / outcome.price;
+                
+                sharpBookSnapshots.push({
+                  event_key: eventKey,
+                  event_name: eventName,
+                  outcome: outcome.name,
+                  bookmaker: SHARP_BOOK_CANONICAL[bookmaker.title],
+                  implied_probability: impliedProb,
+                  raw_odds: outcome.price,
+                });
+              }
             }
           }
 
           for (const [outcomeName, oddsArray] of Object.entries(outcomeOdds)) {
             if (oddsArray.length < 2) continue;
 
-            // Calculate vig-removed fair probability for H2H
             const { fairProb, avgOdds } = calculateFairProbability(
               outcomeOdds,
               outcomeName,
@@ -311,7 +355,7 @@ Deno.serve(async (req) => {
               outcome: outcomeName,
               bookmaker: 'consensus',
               odds: avgOdds,
-              implied_probability: fairProb, // Now using vig-removed fair probability
+              implied_probability: fairProb,
               previous_odds: null,
               odds_movement: 0,
               movement_speed: 0,
@@ -326,11 +370,34 @@ Deno.serve(async (req) => {
       }
     }
 
-    console.log(`Generated ${allSignals.length} total signals with vig-removed probabilities`);
+    console.log(`Generated ${allSignals.length} total signals, ${sharpBookSnapshots.length} sharp book snapshots`);
 
     // Store signals in database
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+
+    // Store sharp book snapshots for movement detection
+    if (sharpBookSnapshots.length > 0) {
+      const snapshotResponse = await fetch(
+        `${supabaseUrl}/rest/v1/sharp_book_snapshots`,
+        {
+          method: 'POST',
+          headers: {
+            'apikey': supabaseKey,
+            'Authorization': `Bearer ${supabaseKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(sharpBookSnapshots),
+        }
+      );
+
+      if (!snapshotResponse.ok) {
+        const error = await snapshotResponse.text();
+        console.error('Sharp book snapshot insert error:', error);
+      } else {
+        console.log(`Inserted ${sharpBookSnapshots.length} sharp book snapshots`);
+      }
+    }
 
     if (allSignals.length > 0) {
       const latestSignals = allSignals.slice(0, 1000);
@@ -368,6 +435,7 @@ Deno.serve(async (req) => {
       JSON.stringify({
         success: true,
         signals_captured: allSignals.length,
+        sharp_book_snapshots: sharpBookSnapshots.length,
         outright_signals: outrightCount,
         h2h_signals: h2hCount,
         near_term_events: nearTermCount,

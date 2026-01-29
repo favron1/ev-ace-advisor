@@ -318,6 +318,23 @@ export function SignalCard({
                 {stateConfig.text}
               </Badge>
               
+              {/* NEW: Signal Tier badge for movement-confirmed signals */}
+              {signal.signal_tier && signal.signal_tier !== 'static' && (
+                <Badge 
+                  variant="outline" 
+                  className={cn(
+                    "flex items-center gap-1 animate-pulse",
+                    signal.signal_tier === 'elite' 
+                      ? "bg-red-500/20 text-red-400 border-red-500/50" 
+                      : "bg-yellow-500/20 text-yellow-400 border-yellow-500/50"
+                  )}
+                >
+                  <Zap className="h-3 w-3" />
+                  {signal.signal_tier.toUpperCase()}
+                  {signal.movement_velocity && ` +${(signal.movement_velocity * 100).toFixed(1)}%`}
+                </Badge>
+              )}
+              
               {/* Edge/Signal indicator */}
               {isTrueArbitrage ? (
                 <Badge variant="outline" className="bg-green-500/10 text-green-500 border-green-500/30">
