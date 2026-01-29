@@ -1,149 +1,205 @@
 
+## Fix Fair Probability Calculation - Proper Per-Book Vig Removal
 
-## Automatic Bet Settlement + Editable Bet History
+### The Problem
 
-### Overview
-This plan adds two key features to the Stats page:
-1. **Automatic Result Checking** - The polling system automatically updates bet outcomes when markets resolve
-2. **Editable Fields** - Manual override capability for all bet history fields
+The current implementation in `ingest-odds/index.ts` calculates fair probability incorrectly:
+
+```text
+CURRENT (WRONG):
+Book A: 2.10 odds   Book B: 2.05 odds   Book C: 2.00 odds
+        ↓                   ↓                   ↓
+        Average odds = 2.05
+        ↓
+        1 / 2.05 = 48.8% raw prob
+        ↓
+        Normalize against other side
+        ↓
+        "Fair" probability (still includes vig artifacts!)
+```
+
+This fails because:
+- Each book has different vig levels (Pinnacle ~2%, recreational books ~5-8%)
+- Averaging odds preserves vig in the calculation
+- The "normalization" step only removes the combined vig, not individual book overround
 
 ---
 
-### How It Works
+### Correct Approach
 
 ```text
-                         AUTOMATIC SETTLEMENT FLOW
-+----------------+     +------------------+     +----------------+
-| Polling System |---->| Check Polymarket |---->| Update         |
-| (every 5 min)  |     | for resolved     |     | signal_logs    |
-|                |     | markets          |     | with outcome   |
-+----------------+     +------------------+     +----------------+
-        |                      |
-        v                      v
-+----------------+     +------------------+
-| pending bets   |     | Gamma API:       |
-| with           |     | closed=true or   |
-| condition_id   |     | event passed     |
-+----------------+     +------------------+
+CORRECT:
+For EACH bookmaker:
+  1. Convert both sides to implied probabilities
+  2. Remove vig by normalizing to sum = 100%
+  3. Extract the vig-free probability for target outcome
 
+Then aggregate across books:
+  - Use median or trimmed mean of the vig-free probabilities
+  - Weight sharp books higher (Pinnacle, Betfair, Circa)
+```
 
-                         MANUAL EDITING FLOW
-+----------------+     +------------------+     +----------------+
-| Click row in   |---->| Edit dialog      |---->| Save to        |
-| Bet History    |     | with all fields  |     | signal_logs    |
-+----------------+     +------------------+     +----------------+
+**Example:**
+```text
+Book A (Pinnacle, low vig):
+  Home: 2.10 → 47.6%   Away: 1.85 → 54.1%   Total: 101.7%
+  Vig-free: 46.8% / 53.2%
+
+Book B (FanDuel, high vig):
+  Home: 2.00 → 50.0%   Away: 1.80 → 55.6%   Total: 105.6%
+  Vig-free: 47.3% / 52.7%
+
+Book C (DraftKings):
+  Home: 2.05 → 48.8%   Away: 1.82 → 54.9%   Total: 103.7%
+  Vig-free: 47.0% / 53.0%
+
+Aggregated fair prob for Home: median(46.8%, 47.3%, 47.0%) = 47.0%
 ```
 
 ---
 
-### Feature 1: Automatic Settlement
+### Implementation Changes
 
-**When Markets Resolve:**
-- The `watch-mode-poll` function (runs every 5 minutes) will check for pending bets
-- For each pending bet with a `polymarket_condition_id`, query Polymarket to check resolution
-- If the market is closed, determine win/loss based on the final price (YES > 0.9 = Yes won)
-- Calculate P/L: win = `stake * (1 - entry_price) / entry_price`, loss = `-stake`
+**File: `supabase/functions/ingest-odds/index.ts`**
 
-**Resolution Detection Methods:**
-1. **Gamma API Check**: Query `gamma-api.polymarket.com/markets?condition_id=X` - look for `closed: true`
-2. **CLOB Price Check**: Final price of 0.99+ or 0.01- indicates resolution
-3. **Time-Based**: If event date has passed by 24+ hours, mark for manual review
+Replace the `calculateFairProbability` function with proper per-book vig removal:
 
----
+```typescript
+// Remove vig for a single bookmaker's 2-way market
+function removeVigForBook(
+  homeOdds: number,
+  awayOdds: number
+): { homeFair: number; awayFair: number } {
+  const homeRaw = 1 / homeOdds;
+  const awayRaw = 1 / awayOdds;
+  const total = homeRaw + awayRaw;
+  
+  return {
+    homeFair: homeRaw / total,
+    awayFair: awayRaw / total,
+  };
+}
 
-### Feature 2: Editable Bet History
-
-**Editable Fields:**
-| Field | Type | Notes |
-|-------|------|-------|
-| Event Name | Text | Full event description |
-| Side | YES/NO | The position taken |
-| Entry Price | Number | Price paid (in cents) |
-| Stake Amount | Currency | Amount wagered |
-| Edge % | Number | Edge at signal time |
-| Status | Dropdown | pending/win/loss/void |
-| P/L | Currency | Auto-calculated on win/loss, or manual |
-
-**Edit Workflow:**
-1. Click any row in the Bet History table
-2. Opens a dialog/sheet with form fields
-3. Changing Status to "win" or "loss" auto-calculates P/L (user can override)
-4. Save updates the database and recalculates all stats
-
----
-
-### Technical Implementation
-
-#### 1. New Edge Function: `settle-bets`
-Creates a dedicated function to check and settle pending bets:
-- Query `signal_logs` for `outcome = 'pending'` with a `polymarket_condition_id`
-- For each, call Polymarket API to check resolution status
-- Update outcome and calculate P/L
-- Set `settled_at` timestamp
-
-#### 2. Integration with Polling
-Add settlement check to existing `watch-mode-poll`:
-- After main scan logic, call settlement check for efficiency
-- Limits API calls by only checking bets older than 2 hours
-
-#### 3. Stats Page Enhancements
-- **Edit Button/Row Click**: Opens `EditBetDialog` component
-- **Bulk Actions**: "Check All Pending" button to trigger manual settlement
-- **Inline Status**: Show last checked timestamp, "Checking..." state
-
-#### 4. Database Updates
-None required - existing schema supports all needed fields
-
----
-
-### UI Components
-
-**EditBetDialog Component:**
-- Form with all editable fields
-- Auto P/L calculation when status changes
-- Validation (stake must be positive, price between 0-1)
-- Delete button for removing incorrect entries
-
-**Settlement Status Indicator:**
-- Small icon next to pending bets showing "Auto-checking enabled"
-- Toast notification when bets are auto-settled
-
----
-
-### Files to Create/Modify
-
-| File | Action | Purpose |
-|------|--------|---------|
-| `supabase/functions/settle-bets/index.ts` | Create | Settlement logic |
-| `supabase/functions/watch-mode-poll/index.ts` | Modify | Add settlement call |
-| `src/components/stats/EditBetDialog.tsx` | Create | Edit form dialog |
-| `src/pages/Stats.tsx` | Modify | Add edit functionality, check button |
-| `src/hooks/useSignalStats.ts` | Modify | Add update/delete mutations |
-
----
-
-### P/L Calculation Logic
-
-```text
-If outcome = 'win':
-  P/L = stake_amount * (1 - entry_price) / entry_price
-  Example: $100 stake at 60c = $100 * 0.40 / 0.60 = $66.67 profit
-
-If outcome = 'loss':
-  P/L = -stake_amount
-  Example: $100 stake = -$100 loss
-
-If outcome = 'void':
-  P/L = 0 (stake returned)
+// Calculate fair probability with proper per-book vig removal
+function calculateFairProbability(
+  outcomeOdds: Record<string, OutcomeOdds[]>,
+  targetOutcome: string,
+  sharpBookWeighting: boolean,
+  sharpBookWeight: number
+): { fairProb: number; rawProb: number; avgOdds: number } {
+  const outcomes = Object.keys(outcomeOdds);
+  
+  // For 2-way markets, calculate per-book vig-free probabilities
+  if (outcomes.length === 2) {
+    const [outcome1, outcome2] = outcomes;
+    const bookFairProbs: { prob: number; weight: number }[] = [];
+    
+    // Find matching book pairs (same bookmaker has both outcomes)
+    const bookmakers = new Set<string>();
+    for (const odds of outcomeOdds[outcome1]) {
+      bookmakers.add(odds.bookmaker);
+    }
+    
+    for (const bookmaker of bookmakers) {
+      const odds1 = outcomeOdds[outcome1].find(o => o.bookmaker === bookmaker);
+      const odds2 = outcomeOdds[outcome2].find(o => o.bookmaker === bookmaker);
+      
+      if (odds1 && odds2) {
+        // Calculate vig-free probability for this book
+        const raw1 = 1 / odds1.odds;
+        const raw2 = 1 / odds2.odds;
+        const total = raw1 + raw2;
+        const fair1 = raw1 / total;
+        const fair2 = raw2 / total;
+        
+        const targetFair = targetOutcome === outcome1 ? fair1 : fair2;
+        const weight = odds1.isSharp ? sharpBookWeight : 1;
+        
+        bookFairProbs.push({ prob: targetFair, weight });
+      }
+    }
+    
+    if (bookFairProbs.length > 0) {
+      // Weighted average of vig-free probabilities
+      let totalWeight = 0;
+      let weightedSum = 0;
+      for (const { prob, weight } of bookFairProbs) {
+        weightedSum += prob * weight;
+        totalWeight += weight;
+      }
+      const fairProb = weightedSum / totalWeight;
+      
+      // Also calculate average odds for display
+      const targetOdds = outcomeOdds[targetOutcome];
+      const avgOdds = targetOdds.reduce((sum, o) => sum + o.odds, 0) / targetOdds.length;
+      const rawProb = 1 / avgOdds;
+      
+      return { fairProb, rawProb, avgOdds };
+    }
+  }
+  
+  // Fallback for 3+ way markets or incomplete data: use original logic
+  // (outrights with many outcomes can't be perfectly devigged)
+  const avgOddsMap: Record<string, number> = {};
+  for (const outcome of outcomes) {
+    const oddsArray = outcomeOdds[outcome];
+    avgOddsMap[outcome] = oddsArray.reduce((sum, o) => sum + o.odds, 0) / oddsArray.length;
+  }
+  
+  const rawProbs: Record<string, number> = {};
+  let totalRawProb = 0;
+  for (const outcome of outcomes) {
+    rawProbs[outcome] = 1 / avgOddsMap[outcome];
+    totalRawProb += rawProbs[outcome];
+  }
+  
+  const targetRawProb = rawProbs[targetOutcome] || 0;
+  const targetFairProb = totalRawProb > 0 ? targetRawProb / totalRawProb : 0;
+  
+  return {
+    fairProb: targetFairProb,
+    rawProb: targetRawProb,
+    avgOdds: avgOddsMap[targetOutcome] || 0,
+  };
+}
 ```
+
+---
+
+### Key Improvements
+
+| Aspect | Before | After |
+|--------|--------|-------|
+| Vig removal | Once, after averaging | Per-book, before averaging |
+| Book pairing | None - sides averaged independently | Matches both sides from same book |
+| Sharp weighting | Applied to raw odds | Applied to vig-free probs |
+| 3-way markets | Same flawed method | Falls back gracefully |
+
+---
+
+### Edge Impact
+
+With proper vig removal:
+- Edges will be **more accurate** (no vig inflation/deflation)
+- Sharp book opinions will be **properly weighted** after devigging
+- False positives from high-vig books will be reduced
+- True edges will be more precisely calculated
+
+---
+
+### Files to Modify
+
+| File | Change |
+|------|--------|
+| `supabase/functions/ingest-odds/index.ts` | Replace `calculateFairProbability` function with per-book vig removal logic |
 
 ---
 
 ### Summary
 
-This implementation provides:
-- Automatic bet settlement during regular polling cycles
-- Full manual override capability for all bet fields
-- P/L auto-calculation with the option to manually adjust
-- Seamless integration with existing stats and charts
+This fix implements the correct methodology:
+1. Convert odds → implied probabilities **per bookmaker**
+2. Remove vig (normalize) **per bookmaker**  
+3. Aggregate vig-free probabilities across books (weighted by sharpness)
 
+This eliminates the "average odds then invert" anti-pattern and ensures fair probabilities are truly vig-free.
