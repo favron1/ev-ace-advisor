@@ -111,6 +111,10 @@ function expandTeamNamesLocally(
 
 // ============= END NICKNAME EXPANSION =============
 
+// Track AI calls per run to avoid timeouts
+let aiCallsThisRun = 0;
+const MAX_AI_CALLS_PER_RUN = 5;
+
 // Resolve abbreviated team names using AI
 async function resolveTeamNamesWithAI(
   eventName: string,
@@ -127,22 +131,33 @@ async function resolveTeamNamesWithAI(
     return cached || null;
   }
   
+  // Limit AI calls per run to prevent timeouts
+  if (aiCallsThisRun >= MAX_AI_CALLS_PER_RUN) {
+    return null;
+  }
+  
   const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
   if (!LOVABLE_API_KEY) {
     console.log('[POLY-MONITOR] No LOVABLE_API_KEY - skipping AI resolution');
     return null;
   }
 
+  aiCallsThisRun++;
   const prompt = `What exact sports matchup is being referred to here: "${eventName}" in ${sport}?
 Return the full official team names (e.g., "Philadelphia Flyers" not "Flyers").`;
 
   try {
+    // Add timeout to AI call (5 seconds max)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${LOVABLE_API_KEY}`,
         "Content-Type": "application/json",
       },
+      signal: controller.signal,
       body: JSON.stringify({
         model: "google/gemini-2.5-flash-lite",
         messages: [
@@ -171,6 +186,8 @@ Return the full official team names (e.g., "Philadelphia Flyers" not "Flyers").`
         tool_choice: { type: "function", function: { name: "resolve_matchup" } }
       }),
     });
+    
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       console.log(`[POLY-MONITOR] AI resolution failed: ${response.status}`);
