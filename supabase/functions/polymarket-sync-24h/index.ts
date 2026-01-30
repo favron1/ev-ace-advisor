@@ -447,123 +447,121 @@ Deno.serve(async (req) => {
       });
     }
 
-    // ============= UPSERT FIRECRAWL GAMES WITH CLOB VOLUME LOOKUP =============
+    // ============= UPSERT FIRECRAWL GAMES WITH VOLUME ENRICHMENT =============
     let firecrawlUpserted = 0;
     let firecrawlVolumeEnriched = 0;
     
     // Set a default event_date for scraped games (today + 12 hours since we don't know exact time)
     const defaultEventDate = new Date(now.getTime() + 12 * 60 * 60 * 1000);
     
-    // CLOB API for volume enrichment
-    const CLOB_API_BASE = 'https://clob.polymarket.com';
-    
-    // Helper: Lookup real market from CLOB by team names and get volume
-    async function lookupClobVolume(
-      team1Name: string,
-      team2Name: string,
-      sportCategory: string
-    ): Promise<{ volume: number; liquidity: number; conditionId: string | null }> {
+    // OPTIMIZED: Pre-fetch ALL sports events from Gamma API ONCE for volume enrichment
+    // This avoids calling the API 39 times (once per Firecrawl game) - major perf fix
+    let gammaEventsForVolume: any[] = [];
+    if (firecrawlGames.length > 0) {
       try {
-        // Query CLOB for sports markets
-        const searchTerms = [
-          team1Name.split(' ').pop()?.toLowerCase() || '', // Last word (nickname)
-          team2Name.split(' ').pop()?.toLowerCase() || '',
-        ].filter(t => t.length > 2);
-        
-        if (searchTerms.length === 0) {
-          return { volume: 0, liquidity: 0, conditionId: null };
+        const gammaUrl = `https://gamma-api.polymarket.com/events?active=true&closed=false&tag_slug=sports&limit=200`;
+        const gammaResponse = await fetch(gammaUrl);
+        if (gammaResponse.ok) {
+          gammaEventsForVolume = await gammaResponse.json();
+          console.log(`[POLY-SYNC-24H] Pre-fetched ${gammaEventsForVolume.length} Gamma events for volume enrichment`);
         }
-        
-        // Try to find matching market in Gamma API (which has volume)
-        const gammaUrl = `https://gamma-api.polymarket.com/events?active=true&closed=false&tag_slug=sports&limit=100`;
-        const response = await fetch(gammaUrl);
-        
-        if (!response.ok) {
-          return { volume: 0, liquidity: 0, conditionId: null };
-        }
-        
-        const events = await response.json();
-        
-        // Find best matching event
-        for (const event of events) {
-          const title = (event.title || '').toLowerCase();
-          const question = (event.markets?.[0]?.question || '').toLowerCase();
-          const combined = `${title} ${question}`;
-          
-          // Check if both team nicknames appear
-          const matchesTeam1 = searchTerms[0] && combined.includes(searchTerms[0]);
-          const matchesTeam2 = searchTerms[1] && combined.includes(searchTerms[1]);
-          
-          if (matchesTeam1 && matchesTeam2) {
-            const market = event.markets?.[0];
-            if (market) {
-              const volume = parseFloat(market.volume || event.volume || '0') || 0;
-              const liquidity = parseFloat(market.liquidity || event.liquidity || '0') || 0;
-              const conditionId = market.conditionId || market.id || event.id;
-              
-              if (volume > 0) {
-                console.log(`[CLOB-LOOKUP] Found match for ${team1Name} vs ${team2Name}: vol=$${volume.toLocaleString()}, cid=${conditionId}`);
-                return { volume, liquidity, conditionId };
-              }
-            }
-          }
-        }
-        
-        return { volume: 0, liquidity: 0, conditionId: null };
-      } catch (error) {
-        console.error(`[CLOB-LOOKUP] Error for ${team1Name} vs ${team2Name}:`, error);
-        return { volume: 0, liquidity: 0, conditionId: null };
+      } catch (e) {
+        console.log(`[POLY-SYNC-24H] Gamma pre-fetch failed, continuing without volume enrichment`);
       }
     }
     
-    for (const { game, sport, sportCode } of firecrawlGames) {
-      let conditionId = `firecrawl_${sportCode}_${game.team1Code}_${game.team2Code}`;
-      let volume = 0;
-      let liquidity = 0;
+    // Helper: Lookup volume from pre-fetched Gamma events (no API call)
+    function lookupClobVolumeFromCache(
+      team1Name: string,
+      team2Name: string
+    ): { volume: number; liquidity: number; conditionId: string | null } {
+      const searchTerms = [
+        team1Name.split(' ').pop()?.toLowerCase() || '',
+        team2Name.split(' ').pop()?.toLowerCase() || '',
+      ].filter(t => t.length > 2);
       
-      // NEW: Try to enrich with real CLOB volume data
-      const clobData = await lookupClobVolume(game.team1Name, game.team2Name, sport);
-      if (clobData.volume > 0) {
-        volume = clobData.volume;
-        liquidity = clobData.liquidity;
-        firecrawlVolumeEnriched++;
+      if (searchTerms.length < 2) {
+        return { volume: 0, liquidity: 0, conditionId: null };
+      }
+      
+      for (const event of gammaEventsForVolume) {
+        const title = (event.title || '').toLowerCase();
+        const question = (event.markets?.[0]?.question || '').toLowerCase();
+        const combined = `${title} ${question}`;
         
-        // If we found the real condition_id, use that instead of synthetic one
-        if (clobData.conditionId) {
-          conditionId = clobData.conditionId;
+        const matchesTeam1 = searchTerms[0] && combined.includes(searchTerms[0]);
+        const matchesTeam2 = searchTerms[1] && combined.includes(searchTerms[1]);
+        
+        if (matchesTeam1 && matchesTeam2) {
+          const market = event.markets?.[0];
+          if (market) {
+            const volume = parseFloat(market.volume || event.volume || '0') || 0;
+            const liquidity = parseFloat(market.liquidity || event.liquidity || '0') || 0;
+            const conditionId = market.conditionId || market.id || event.id;
+            
+            if (volume > 0) {
+              return { volume, liquidity, conditionId };
+            }
+          }
         }
       }
       
-      const { error: fcError } = await supabase
-        .from('polymarket_h2h_cache')
-        .upsert({
-          condition_id: conditionId,
-          event_title: `${game.team1Name} vs ${game.team2Name}`,
-          question: `Will ${game.team1Name} beat ${game.team2Name}?`,
-          team_home: game.team1Name,
-          team_away: game.team2Name,
-          team_home_normalized: game.team1Name.toLowerCase(),
-          team_away_normalized: game.team2Name.toLowerCase(),
-          yes_price: game.team1Price,
-          no_price: game.team2Price,
-          volume: volume,
-          liquidity: liquidity,
-          event_date: defaultEventDate.toISOString(), // Set default event date for monitor filter
-          sport_category: sport,
-          extracted_league: sport,
-          market_type: 'h2h',
-          status: 'active',
-          monitoring_status: 'watching',
-          source: 'firecrawl',
-          last_price_update: now.toISOString(),
-          last_bulk_sync: now.toISOString(),
-        }, {
-          onConflict: 'condition_id',
-        });
+      return { volume: 0, liquidity: 0, conditionId: null };
+    }
+    
+    // Process Firecrawl games in parallel batches
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < firecrawlGames.length; i += BATCH_SIZE) {
+      const batch = firecrawlGames.slice(i, i + BATCH_SIZE);
       
-      if (!fcError) {
-        firecrawlUpserted++;
-      }
+      await Promise.all(batch.map(async ({ game, sport, sportCode }) => {
+        let conditionId = `firecrawl_${sportCode}_${game.team1Code}_${game.team2Code}`;
+        let volume = 0;
+        let liquidity = 0;
+        
+        // OPTIMIZED: Use pre-fetched cache (no API call per game)
+        const clobData = lookupClobVolumeFromCache(game.team1Name, game.team2Name);
+        if (clobData.volume > 0) {
+          volume = clobData.volume;
+          liquidity = clobData.liquidity;
+          firecrawlVolumeEnriched++;
+          
+          if (clobData.conditionId) {
+            conditionId = clobData.conditionId;
+          }
+        }
+        
+        const { error: fcError } = await supabase
+          .from('polymarket_h2h_cache')
+          .upsert({
+            condition_id: conditionId,
+            event_title: `${game.team1Name} vs ${game.team2Name}`,
+            question: `Will ${game.team1Name} beat ${game.team2Name}?`,
+            team_home: game.team1Name,
+            team_away: game.team2Name,
+            team_home_normalized: game.team1Name.toLowerCase(),
+            team_away_normalized: game.team2Name.toLowerCase(),
+            yes_price: game.team1Price,
+            no_price: game.team2Price,
+            volume: volume,
+            liquidity: liquidity,
+            event_date: defaultEventDate.toISOString(),
+            sport_category: sport,
+            extracted_league: sport,
+            market_type: 'h2h',
+            status: 'active',
+            monitoring_status: 'watching',
+            source: 'firecrawl',
+            last_price_update: now.toISOString(),
+            last_bulk_sync: now.toISOString(),
+          }, {
+            onConflict: 'condition_id',
+          });
+        
+        if (!fcError) {
+          firecrawlUpserted++;
+        }
+      }));
     }
     
     console.log(`[POLY-SYNC-24H] Firecrawl games upserted: ${firecrawlUpserted} (${firecrawlVolumeEnriched} enriched with volume)`);
@@ -649,23 +647,8 @@ Deno.serve(async (req) => {
         tokenIdNo = market.outcomes[1]?.clobTokenId || market.outcomes[1]?.tokenId || null;
       }
       
-      // Fallback: Fetch token IDs directly from CLOB markets endpoint if not found
-      if (!tokenIdYes && conditionId) {
-        try {
-          const clobResp = await fetch(`https://clob.polymarket.com/markets/${conditionId}`);
-          if (clobResp.ok) {
-            const clobData = await clobResp.json();
-            if (clobData.tokens && Array.isArray(clobData.tokens)) {
-              const yesToken = clobData.tokens.find((t: any) => t.outcome === 'Yes');
-              const noToken = clobData.tokens.find((t: any) => t.outcome === 'No');
-              tokenIdYes = yesToken?.token_id || null;
-              tokenIdNo = noToken?.token_id || null;
-            }
-          }
-        } catch (e) {
-          // Silent fail - token IDs not critical for basic sync
-        }
-      }
+      // REMOVED: CLOB token ID fallback was causing CPU timeout
+      // Token IDs will be fetched by polymarket-monitor when needed
       
       // Extract threshold for totals/spreads/props
       const extractedThreshold = extractThreshold(question);
