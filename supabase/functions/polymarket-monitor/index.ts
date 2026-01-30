@@ -113,7 +113,7 @@ function expandTeamNamesLocally(
 
 // Track AI calls per run to avoid timeouts
 let aiCallsThisRun = 0;
-const MAX_AI_CALLS_PER_RUN = 5;
+const MAX_AI_CALLS_PER_RUN = 15; // Increased from 5 for better match rate
 
 // Resolve abbreviated team names using AI
 async function resolveTeamNamesWithAI(
@@ -147,9 +147,9 @@ async function resolveTeamNamesWithAI(
 Return the full official team names (e.g., "Philadelphia Flyers" not "Flyers").`;
 
   try {
-    // Add timeout to AI call (5 seconds max)
+    // Add timeout to AI call (8 seconds max, increased from 5)
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
     
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",

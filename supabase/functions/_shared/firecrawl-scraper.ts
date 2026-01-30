@@ -29,6 +29,7 @@ export type { SportCode };
 export const getSportCodeFromLeague = getSportCodeFromLeagueConfig;
 
 // Parse games from Firecrawl markdown response
+// CRITICAL: Only accept games where BOTH teams are recognized in the teamMap
 export function parseGamesFromMarkdown(
   markdown: string, 
   teamMap: Record<string, string>,
@@ -48,11 +49,12 @@ export function parseGamesFromMarkdown(
       const team1Price = parseInt(team1Match[2], 10) / 100;
       const team2Price = parseInt(team2Match[2], 10) / 100;
       
-      const team1Name = teamMap[team1Code] || team1Code.toUpperCase();
-      const team2Name = teamMap[team2Code] || team2Code.toUpperCase();
+      // CRITICAL: Only accept if BOTH teams are in the teamMap
+      // This prevents garbage like "HIOST", "VTECH", "SC" etc from polluting the cache
+      const team1Name = teamMap[team1Code];
+      const team2Name = teamMap[team2Code];
       
-      // Only add if we recognize at least one team
-      if (teamMap[team1Code] || teamMap[team2Code]) {
+      if (team1Name && team2Name) {
         games.push({ 
           team1Code, team1Name, team1Price, 
           team2Code, team2Name, team2Price,
