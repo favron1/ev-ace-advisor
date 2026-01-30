@@ -40,6 +40,22 @@ const NFL_TEAM_MAP: Record<string, string> = {
   'ten': 'Tennessee Titans', 'was': 'Washington Commanders',
 };
 
+// NHL team code to full name mapping (Polymarket uses 3-letter abbreviations)
+const NHL_TEAM_MAP: Record<string, string> = {
+  'ana': 'Anaheim Ducks', 'ari': 'Arizona Coyotes', 'bos': 'Boston Bruins',
+  'buf': 'Buffalo Sabres', 'cgy': 'Calgary Flames', 'car': 'Carolina Hurricanes',
+  'chi': 'Chicago Blackhawks', 'col': 'Colorado Avalanche', 'cbj': 'Columbus Blue Jackets',
+  'dal': 'Dallas Stars', 'det': 'Detroit Red Wings', 'edm': 'Edmonton Oilers',
+  'fla': 'Florida Panthers', 'la': 'Los Angeles Kings', 'lak': 'Los Angeles Kings',
+  'min': 'Minnesota Wild', 'mtl': 'Montreal Canadiens', 'nsh': 'Nashville Predators',
+  'njd': 'New Jersey Devils', 'nyi': 'New York Islanders', 'nyr': 'New York Rangers',
+  'ott': 'Ottawa Senators', 'phi': 'Philadelphia Flyers', 'pit': 'Pittsburgh Penguins',
+  'sjs': 'San Jose Sharks', 'sea': 'Seattle Kraken', 'stl': 'St. Louis Blues',
+  'tb': 'Tampa Bay Lightning', 'tbl': 'Tampa Bay Lightning', 'tor': 'Toronto Maple Leafs',
+  'van': 'Vancouver Canucks', 'vgk': 'Vegas Golden Knights', 'wsh': 'Washington Capitals',
+  'wpg': 'Winnipeg Jets', 'uta': 'Utah Hockey Club',
+};
+
 interface ParsedGame {
   team1Code: string;
   team1Name: string;
@@ -80,16 +96,24 @@ function parseGamesFromMarkdown(markdown: string, teamMap: Record<string, string
 
 // Scrape Polymarket sport page via Firecrawl
 async function scrapePolymarketGames(
-  sport: 'nba' | 'cbb' | 'nfl',
+  sport: 'nba' | 'cbb' | 'nfl' | 'nhl',
   firecrawlApiKey: string
 ): Promise<ParsedGame[]> {
-  const sportUrl = sport === 'cbb' 
-    ? 'https://polymarket.com/sports/cbb/games'
-    : sport === 'nfl'
-      ? 'https://polymarket.com/sports/nfl/games'
-      : 'https://polymarket.com/sports/nba/games';
+  const sportUrls: Record<string, string> = {
+    nba: 'https://polymarket.com/sports/nba/games',
+    cbb: 'https://polymarket.com/sports/cbb/games',
+    nfl: 'https://polymarket.com/sports/nfl/games',
+    nhl: 'https://polymarket.com/sports/nhl/games',
+  };
+  const sportUrl = sportUrls[sport];
   
-  const teamMap = sport === 'nfl' ? NFL_TEAM_MAP : NBA_TEAM_MAP;
+  const teamMaps: Record<string, Record<string, string>> = {
+    nba: NBA_TEAM_MAP,
+    cbb: NBA_TEAM_MAP, // CBB uses same format as NBA
+    nfl: NFL_TEAM_MAP,
+    nhl: NHL_TEAM_MAP,
+  };
+  const teamMap = teamMaps[sport];
   
   try {
     console.log(`[FIRECRAWL] Scraping ${sport.toUpperCase()} from ${sportUrl}`);
@@ -402,22 +426,25 @@ Deno.serve(async (req) => {
     let scrapedNba: ParsedGame[] = [];
     let scrapedCbb: ParsedGame[] = [];
     let scrapedNfl: ParsedGame[] = [];
+    let scrapedNhl: ParsedGame[] = [];
     
     if (firecrawlApiKey) {
-      console.log(`[POLY-SYNC-24H] Firecrawl key found - scraping NBA/CBB/NFL pages...`);
+      console.log(`[POLY-SYNC-24H] Firecrawl key found - scraping NBA/CBB/NFL/NHL pages...`);
       
-      // Scrape all three in parallel
-      const [nbaGames, cbbGames, nflGames] = await Promise.all([
+      // Scrape all four in parallel
+      const [nbaGames, cbbGames, nflGames, nhlGames] = await Promise.all([
         scrapePolymarketGames('nba', firecrawlApiKey),
         scrapePolymarketGames('cbb', firecrawlApiKey),
         scrapePolymarketGames('nfl', firecrawlApiKey),
+        scrapePolymarketGames('nhl', firecrawlApiKey),
       ]);
       
       scrapedNba = nbaGames;
       scrapedCbb = cbbGames;
       scrapedNfl = nflGames;
+      scrapedNhl = nhlGames;
       
-      console.log(`[POLY-SYNC-24H] Firecrawl totals: NBA=${scrapedNba.length}, CBB=${scrapedCbb.length}, NFL=${scrapedNfl.length}`);
+      console.log(`[POLY-SYNC-24H] Firecrawl totals: NBA=${scrapedNba.length}, CBB=${scrapedCbb.length}, NFL=${scrapedNfl.length}, NHL=${scrapedNhl.length}`);
     } else {
       console.log(`[POLY-SYNC-24H] No FIRECRAWL_API_KEY - skipping basketball/football scrape`);
     }
@@ -586,6 +613,7 @@ Deno.serve(async (req) => {
       ...scrapedNba.map(g => ({ game: g, sport: 'NBA', sportCode: 'nba' })),
       ...scrapedCbb.map(g => ({ game: g, sport: 'NCAA', sportCode: 'cbb' })),
       ...scrapedNfl.map(g => ({ game: g, sport: 'NFL', sportCode: 'nfl' })),
+      ...scrapedNhl.map(g => ({ game: g, sport: 'NHL', sportCode: 'nhl' })),
     ];
     
     console.log(`[POLY-SYNC-24H] Adding ${firecrawlGames.length} Firecrawl-scraped games to qualifying`);
