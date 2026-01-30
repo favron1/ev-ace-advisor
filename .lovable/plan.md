@@ -1,86 +1,211 @@
 
-# Fix: Add NHL to Firecrawl Scraping for Accurate Prices
 
-## Problem Identified
+# Refactor: Unified Sport Configuration System
 
-Your screenshots show Polymarket has **real prices** for all games:
-- Avalanche vs Red Wings: COL 61¢ / DET 40¢ ($87.80k volume)
-- Jets vs Panthers: WPG 39¢ / FLA 62¢
-- Spurs vs Hornets: SAS 62¢ / CHA 40¢
+## Problem Summary
+The system requires manual code changes in 4+ files whenever a new sport needs to be added (like NHL was). This is error-prone and violates DRY (Don't Repeat Yourself) principles.
 
-But our database shows **stale 50¢/50¢ placeholders** for NHL games while NBA games have correct prices.
+**Current State - Hardcoded in multiple places:**
+- Team mappings duplicated in 2 files
+- Sport endpoints defined in 2 files  
+- Explicit variable names per sport (`scrapedNba`, `scrapedNhl`)
+- Union types that must be manually extended
 
-**Root Cause:** The `polymarket-sync-24h` function only scrapes NBA, CBB, and NFL via Firecrawl. NHL is missing, so NHL games rely on the Gamma API which returns stale/placeholder prices.
+## Solution: Single Configuration Object
 
-## Solution
+Create one `SPORTS_CONFIG` object that defines everything for each sport, then use it dynamically everywhere.
 
-Add NHL scraping to the Firecrawl pipeline, matching the pattern already used for NBA, CBB, and NFL.
+---
 
-### Changes Required
+## Technical Changes
 
-**1. Add NHL team mapping** (in `polymarket-sync-24h`)
-```typescript
-const NHL_TEAM_MAP: Record<string, string> = {
-  'col': 'Colorado Avalanche', 'det': 'Detroit Red Wings',
-  'wpg': 'Winnipeg Jets', 'fla': 'Florida Panthers',
-  // ... full NHL team mapping
+### 1. Create Shared Sports Configuration Module
+
+**New file:** `supabase/functions/_shared/sports-config.ts`
+
+```text
+// All sport configuration in ONE place
+export const SPORTS_CONFIG = {
+  nhl: {
+    name: 'NHL',
+    polymarketUrl: 'https://polymarket.com/sports/nhl/games',
+    oddsApiSport: 'icehockey_nhl',
+    oddsApiMarkets: 'h2h',
+    oddsApiOutright: 'icehockey_nhl_championship_winner',
+    teamMap: {
+      'ana': 'Anaheim Ducks',
+      'bos': 'Boston Bruins',
+      // ... all NHL teams
+    },
+    detectionPatterns: [/\bnhl\b/, /blackhawks|maple leafs|bruins.../]
+  },
+  nba: {
+    name: 'NBA',
+    polymarketUrl: 'https://polymarket.com/sports/nba/games',
+    oddsApiSport: 'basketball_nba',
+    oddsApiMarkets: 'h2h',
+    oddsApiOutright: 'basketball_nba_championship_winner',
+    teamMap: { ... },
+    detectionPatterns: [...]
+  },
+  nfl: { ... },
+  cbb: { ... },
+  // Future: mlb, soccer_epl, etc. - just add here!
 };
+
+// Derived values (computed once)
+export const ALLOWED_SPORT_CODES = Object.keys(SPORTS_CONFIG);
+export const ALLOWED_SPORT_NAMES = Object.values(SPORTS_CONFIG).map(s => s.name);
 ```
 
-**2. Add NHL to Firecrawl scrape targets** (line 410-414)
-```typescript
-const [nbaGames, cbbGames, nflGames, nhlGames] = await Promise.all([
-  scrapePolymarketGames('nba', firecrawlApiKey),
-  scrapePolymarketGames('cbb', firecrawlApiKey),
-  scrapePolymarketGames('nfl', firecrawlApiKey),
-  scrapePolymarketGames('nhl', firecrawlApiKey),  // NEW
-]);
-```
+### 2. Update Firecrawl Scraper to Use Config
 
-**3. Update `scrapePolymarketGames` function** to support NHL
-```typescript
-async function scrapePolymarketGames(
-  sport: 'nba' | 'cbb' | 'nfl' | 'nhl',  // Add nhl
+**File:** `supabase/functions/_shared/firecrawl-scraper.ts`
+
+```text
+import { SPORTS_CONFIG } from './sports-config.ts';
+
+export type SportCode = keyof typeof SPORTS_CONFIG;
+
+export async function scrapePolymarketGames(
+  sport: SportCode,  // Now type-safe and auto-complete
   firecrawlApiKey: string
 ): Promise<ParsedGame[]> {
-  const sportUrl = sport === 'nhl'
-    ? 'https://polymarket.com/sports/nhl/games'
-    : sport === 'cbb'
-      ? 'https://polymarket.com/sports/cbb/games'
-      : sport === 'nfl'
-        ? 'https://polymarket.com/sports/nfl/games'
-        : 'https://polymarket.com/sports/nba/games';
-  
-  const teamMap = sport === 'nhl' 
-    ? NHL_TEAM_MAP 
-    : sport === 'nfl' 
-      ? NFL_TEAM_MAP 
-      : NBA_TEAM_MAP;
-  // ...
+  const config = SPORTS_CONFIG[sport];
+  const sportUrl = config.polymarketUrl;
+  const teamMap = config.teamMap;
+  // ... rest of function unchanged
 }
 ```
 
-**4. Include NHL games in Firecrawl upsert** (line 584-589)
-```typescript
-const firecrawlGames: Array<{ game: ParsedGame; sport: string; sportCode: string }> = [
-  ...scrapedNba.map(g => ({ game: g, sport: 'NBA', sportCode: 'nba' })),
-  ...scrapedCbb.map(g => ({ game: g, sport: 'NCAA', sportCode: 'cbb' })),
-  ...scrapedNfl.map(g => ({ game: g, sport: 'NFL', sportCode: 'nfl' })),
-  ...scrapedNhl.map(g => ({ game: g, sport: 'NHL', sportCode: 'nhl' })), // NEW
-];
+### 3. Update Sync Function to Use Dynamic Scraping
+
+**File:** `supabase/functions/polymarket-sync-24h/index.ts`
+
+Replace:
+```text
+const [nbaGames, cbbGames, nflGames, nhlGames] = await Promise.all([
+  scrapePolymarketGames('nba', ...),
+  scrapePolymarketGames('cbb', ...),
+  scrapePolymarketGames('nfl', ...),
+  scrapePolymarketGames('nhl', ...),
+]);
 ```
 
-## Expected Outcome
+With:
+```text
+import { SPORTS_CONFIG, ALLOWED_SPORT_CODES } from './_shared/sports-config.ts';
 
-After this fix:
-- NHL games will have **real prices** (e.g., 61¢/40¢ instead of 50¢/50¢)
-- NHL games will have **real volumes** (e.g., $87k instead of $339)
-- Edge detection will work correctly for NHL (it currently can't detect edges when prices are 50¢/50¢)
-- NHL signals will appear in the feed just like they did when you won those previous bets
+// Scrape ALL configured sports dynamically
+const scrapeResults = await Promise.all(
+  ALLOWED_SPORT_CODES.map(sport => 
+    scrapePolymarketGames(sport, firecrawlApiKey)
+      .then(games => ({ sport, games }))
+  )
+);
 
-## Technical Notes
+// Flatten into array with sport metadata
+const allScrapedGames = scrapeResults.flatMap(({ sport, games }) =>
+  games.map(game => ({ 
+    game, 
+    sport: SPORTS_CONFIG[sport].name, 
+    sportCode: sport 
+  }))
+);
+```
 
-- The NHL team codes on Polymarket appear to be 3-letter abbreviations (COL, DET, WPG, FLA, etc.)
-- Firecrawl scraping pattern `([a-z]{2,3})(\d+)¢` should work for NHL
-- No database schema changes required
-- Deploy will be automatic after code changes
+### 4. Update Monitor to Use Config
+
+**File:** `supabase/functions/polymarket-monitor/index.ts`
+
+Replace static `SPORT_ENDPOINTS`:
+```text
+import { SPORTS_CONFIG, ALLOWED_SPORT_CODES } from './_shared/sports-config.ts';
+
+// Build endpoints dynamically from config
+const SPORT_ENDPOINTS = Object.fromEntries(
+  ALLOWED_SPORT_CODES.map(code => [
+    SPORTS_CONFIG[code].name,
+    { 
+      sport: SPORTS_CONFIG[code].oddsApiSport, 
+      markets: SPORTS_CONFIG[code].oddsApiMarkets 
+    }
+  ])
+);
+```
+
+### 5. Update Sport Detection
+
+**File:** Multiple functions use regex patterns for sport detection
+
+Replace hardcoded patterns with config-driven detection:
+```text
+function detectSport(text: string): string | null {
+  for (const [code, config] of Object.entries(SPORTS_CONFIG)) {
+    if (config.detectionPatterns.some(p => p.test(text))) {
+      return config.name;
+    }
+  }
+  return null;
+}
+```
+
+---
+
+## Files to Modify
+
+| File | Change |
+|------|--------|
+| `_shared/sports-config.ts` | **NEW** - Central configuration |
+| `_shared/firecrawl-scraper.ts` | Import config, remove duplicate team maps |
+| `polymarket-sync-24h/index.ts` | Use dynamic scraping, import config |
+| `polymarket-monitor/index.ts` | Build SPORT_ENDPOINTS from config |
+| `active-mode-poll/index.ts` | Import shared SPORT_ENDPOINTS |
+
+---
+
+## Benefits After Refactor
+
+1. **Add new sport = 1 place to edit**
+   - Just add a new entry to `SPORTS_CONFIG`
+   - All functions automatically pick it up
+
+2. **Type safety**
+   - `SportCode` type auto-updates with config
+   - IDE auto-completion for sport codes
+
+3. **No more duplicate team mappings**
+   - Single source of truth for team name normalization
+
+4. **Easier testing**
+   - Can mock `SPORTS_CONFIG` for unit tests
+
+5. **Future extensibility**
+   - Add MLB, Soccer, Tennis by adding config entries
+   - No code changes needed in scraping/monitoring logic
+
+---
+
+## Example: Adding MLB in the Future
+
+After this refactor, adding MLB would be:
+
+```text
+// In sports-config.ts, just add:
+mlb: {
+  name: 'MLB',
+  polymarketUrl: 'https://polymarket.com/sports/mlb/games',
+  oddsApiSport: 'baseball_mlb',
+  oddsApiMarkets: 'h2h',
+  oddsApiOutright: 'baseball_mlb_world_series_winner',
+  teamMap: {
+    'nyy': 'New York Yankees',
+    'lad': 'Los Angeles Dodgers',
+    // ...
+  },
+  detectionPatterns: [/\bmlb\b/, /yankees|dodgers|red sox.../]
+}
+```
+
+Done! All functions would automatically scrape MLB, monitor MLB odds, and detect MLB markets.
+
