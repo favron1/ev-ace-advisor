@@ -34,6 +34,22 @@ export const NFL_TEAM_MAP: Record<string, string> = {
   'ten': 'Tennessee Titans', 'was': 'Washington Commanders',
 };
 
+// NHL team code to full name mapping
+export const NHL_TEAM_MAP: Record<string, string> = {
+  'ana': 'Anaheim Ducks', 'ari': 'Arizona Coyotes', 'bos': 'Boston Bruins',
+  'buf': 'Buffalo Sabres', 'cgy': 'Calgary Flames', 'car': 'Carolina Hurricanes',
+  'chi': 'Chicago Blackhawks', 'col': 'Colorado Avalanche', 'cbj': 'Columbus Blue Jackets',
+  'dal': 'Dallas Stars', 'det': 'Detroit Red Wings', 'edm': 'Edmonton Oilers',
+  'fla': 'Florida Panthers', 'la': 'Los Angeles Kings', 'lak': 'Los Angeles Kings',
+  'min': 'Minnesota Wild', 'mtl': 'Montreal Canadiens', 'nsh': 'Nashville Predators',
+  'njd': 'New Jersey Devils', 'nyi': 'New York Islanders', 'nyr': 'New York Rangers',
+  'ott': 'Ottawa Senators', 'phi': 'Philadelphia Flyers', 'pit': 'Pittsburgh Penguins',
+  'sjs': 'San Jose Sharks', 'sea': 'Seattle Kraken', 'stl': 'St. Louis Blues',
+  'tb': 'Tampa Bay Lightning', 'tbl': 'Tampa Bay Lightning', 'tor': 'Toronto Maple Leafs',
+  'van': 'Vancouver Canucks', 'vgk': 'Vegas Golden Knights', 'wsh': 'Washington Capitals',
+  'wpg': 'Winnipeg Jets', 'uta': 'Utah Hockey Club',
+};
+
 // NCAA team code mapping (common abbreviations)
 export const NCAA_TEAM_MAP: Record<string, string> = {
   'duke': 'Duke Blue Devils', 'unc': 'North Carolina Tar Heels',
@@ -58,14 +74,14 @@ export interface ParsedGame {
   team2Code: string;
   team2Name: string;
   team2Price: number;
-  sport: 'nba' | 'nfl' | 'cbb';
+  sport: 'nba' | 'nfl' | 'cbb' | 'nhl';
 }
 
 // Parse games from Firecrawl markdown response
 export function parseGamesFromMarkdown(
   markdown: string, 
   teamMap: Record<string, string>,
-  sport: 'nba' | 'nfl' | 'cbb'
+  sport: 'nba' | 'nfl' | 'cbb' | 'nhl'
 ): ParsedGame[] {
   const games: ParsedGame[] = [];
   const pricePattern = /([a-z]{2,5})(\d+)¢/gi;
@@ -99,36 +115,39 @@ export function parseGamesFromMarkdown(
 }
 
 // Get the URL for a sport's games page
-export function getSportUrl(sport: 'nba' | 'nfl' | 'cbb'): string {
+export function getSportUrl(sport: 'nba' | 'nfl' | 'cbb' | 'nhl'): string {
   switch (sport) {
     case 'nba': return 'https://polymarket.com/sports/nba/games';
     case 'nfl': return 'https://polymarket.com/sports/nfl/games';
     case 'cbb': return 'https://polymarket.com/sports/cbb/games';
+    case 'nhl': return 'https://polymarket.com/sports/nhl/games';
   }
 }
 
 // Get the team map for a sport
-export function getTeamMapForSport(sport: 'nba' | 'nfl' | 'cbb'): Record<string, string> {
+export function getTeamMapForSport(sport: 'nba' | 'nfl' | 'cbb' | 'nhl'): Record<string, string> {
   switch (sport) {
     case 'nba': return NBA_TEAM_MAP;
     case 'nfl': return NFL_TEAM_MAP;
     case 'cbb': return NCAA_TEAM_MAP;
+    case 'nhl': return NHL_TEAM_MAP;
   }
 }
 
 // Get sport code from extracted league
-export function getSportCodeFromLeague(league: string | null): 'nba' | 'nfl' | 'cbb' | null {
+export function getSportCodeFromLeague(league: string | null): 'nba' | 'nfl' | 'cbb' | 'nhl' | null {
   if (!league) return null;
   const l = league.toUpperCase();
   if (l === 'NBA') return 'nba';
   if (l === 'NFL') return 'nfl';
   if (l === 'NCAA' || l === 'CBB') return 'cbb';
+  if (l === 'NHL') return 'nhl';
   return null;
 }
 
 // Scrape Polymarket sport page via Firecrawl
 export async function scrapePolymarketGames(
-  sport: 'nba' | 'nfl' | 'cbb',
+  sport: 'nba' | 'nfl' | 'cbb' | 'nhl',
   firecrawlApiKey: string
 ): Promise<ParsedGame[]> {
   const sportUrl = getSportUrl(sport);
@@ -219,7 +238,7 @@ export function findMatchingGame(
 
 // Refresh prices for a specific market via Firecrawl
 export async function refreshPriceViaFirecrawl(
-  sport: 'nba' | 'nfl' | 'cbb',
+  sport: 'nba' | 'nfl' | 'cbb' | 'nhl',
   teamHome: string | null,
   teamAway: string | null,
   firecrawlApiKey: string
