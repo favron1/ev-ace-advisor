@@ -180,8 +180,7 @@ export default function Stats() {
                         <TableRow>
                           <TableHead className="w-8"></TableHead>
                           <TableHead>Date</TableHead>
-                          <TableHead>Event</TableHead>
-                          <TableHead>Side</TableHead>
+                          <TableHead>Event / Bet</TableHead>
                           <TableHead className="text-right">Entry</TableHead>
                           <TableHead className="text-right">Stake</TableHead>
                           <TableHead className="text-right">Edge</TableHead>
@@ -202,15 +201,15 @@ export default function Stats() {
                             <TableCell className="font-mono text-xs">
                               {format(new Date(log.created_at), 'MMM d, HH:mm')}
                             </TableCell>
-                            <TableCell className="max-w-[200px] truncate" title={log.event_name}>
-                              {log.event_name}
-                            </TableCell>
-                            <TableCell>
-                              <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                log.side === 'YES' ? 'bg-green-500/20 text-green-500' : 'bg-red-500/20 text-red-500'
-                              }`}>
-                                {log.side}
-                              </span>
+                            <TableCell className="max-w-[280px]" title={log.event_name}>
+                              <div className="flex items-center gap-2">
+                                <span className="truncate">{log.event_name}</span>
+                                <span className={`shrink-0 px-2 py-0.5 rounded text-xs font-medium ${
+                                  log.side === 'YES' ? 'bg-green-500/20 text-green-500' : 'bg-red-500/20 text-red-500'
+                                }`}>
+                                  {log.side}
+                                </span>
+                              </div>
                             </TableCell>
                             <TableCell className="text-right font-mono">
                               {(log.entry_price * 100).toFixed(0)}¢
