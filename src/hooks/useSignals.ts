@@ -38,10 +38,14 @@ export function useSignals() {
       const syncResult = await supabase.functions.invoke('polymarket-sync-24h', { body: {} });
       
       const syncData = syncResult.data || {};
-      const totalMarkets = syncData.qualifying_events || syncData.upserted_to_cache || 0;
+      
+      // FIXED: Show total watching (Gamma + Firecrawl), not just Gamma qualifiers
+      const totalWatching = syncData.total_watching || 
+        ((syncData.qualifying_from_gamma || 0) + (syncData.firecrawl_upserted || 0)) ||
+        syncData.upserted_to_cache || 0;
       
       // Step 2: Run monitor to check edges against bookmaker data
-      toast({ title: `Checking ${totalMarkets} markets for edges...` });
+      toast({ title: `Checking ${totalWatching} markets for edges...` });
       const monitorResult = await supabase.functions.invoke('polymarket-monitor', { body: {} });
       
       await fetchSignals();
@@ -51,12 +55,12 @@ export function useSignals() {
       
       toast({
         title: 'Scan Complete',
-        description: `Found ${edgesFound} tradeable edges from ${totalMarkets} Polymarket markets.`,
+        description: `Found ${edgesFound} tradeable edges from ${totalWatching} Polymarket markets.`,
       });
       
       return {
         signals_surfaced: edgesFound,
-        movements_detected: totalMarkets,
+        movements_detected: totalWatching,
         outright_signals: edgesFound,
       } as SignalDetectionResult;
     } catch (err) {
