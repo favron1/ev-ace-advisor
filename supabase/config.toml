@@ -38,3 +38,6 @@ verify_jwt = false
 
 [functions.fetch-live-scores]
 verify_jwt = false
+
+[functions.analyze-betting-patterns]
+verify_jwt = false

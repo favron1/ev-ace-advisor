@@ -8,6 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useSignalStats, SignalLogEntry } from '@/hooks/useSignalStats';
 import { StatsCharts } from '@/components/stats/StatsCharts';
 import { EditBetDialog } from '@/components/stats/EditBetDialog';
+import { AdvisorPanel } from '@/components/advisor/AdvisorPanel';
 import { format } from 'date-fns';
 
 export default function Stats() {
@@ -230,6 +231,9 @@ export default function Stats() {
             </CardContent>
           </Card>
         </div>
+
+        {/* AI Advisor Panel */}
+        <AdvisorPanel />
 
         {/* Tabs */}
         <Tabs defaultValue="logs" className="space-y-3 md:space-y-4">
