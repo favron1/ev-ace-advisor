@@ -725,18 +725,52 @@ function findBookmakerMatch(
 }
 
 // Calculate fair probability from all bookmakers
-function calculateConsensusFairProb(game: any, marketKey: string, targetIndex: number): number | null {
+// CRITICAL FIX: For NHL, filter out Draw outcomes and renormalize to 2-way market
+function calculateConsensusFairProb(
+  game: any, 
+  marketKey: string, 
+  targetIndex: number,
+  sport: string = '' // Pass sport to handle 3-way to 2-way conversion
+): number | null {
   let totalWeight = 0;
   let weightedProb = 0;
+  
+  // NHL uses 3-way markets (Home/Draw/Away) but Polymarket is 2-way
+  const isIceHockey = sport.toUpperCase() === 'NHL';
   
   for (const bookmaker of game.bookmakers || []) {
     const market = bookmaker.markets?.find((m: any) => m.key === marketKey);
     if (!market?.outcomes || market.outcomes.length < 2) continue;
     
-    const odds = market.outcomes.map((o: any) => o.price);
+    let outcomes = [...market.outcomes]; // Clone to avoid mutation
+    let adjustedTargetIndex = targetIndex;
+    
+    // CRITICAL FIX #1: For NHL, filter out Draw/Tie and renormalize to 2-way
+    if (isIceHockey && outcomes.length >= 3) {
+      // Find Draw/Tie index before filtering
+      const drawIndex = outcomes.findIndex((o: any) => 
+        o.name.toLowerCase().includes('draw') || o.name.toLowerCase() === 'tie'
+      );
+      
+      // Filter out Draw/Tie outcomes
+      outcomes = outcomes.filter((o: any) => 
+        !o.name.toLowerCase().includes('draw') && o.name.toLowerCase() !== 'tie'
+      );
+      
+      // Adjust target index if Draw was before our target
+      if (drawIndex !== -1 && drawIndex < targetIndex) {
+        adjustedTargetIndex = Math.max(0, targetIndex - 1);
+      }
+      
+      // Ensure we still have 2 outcomes after filtering
+      if (outcomes.length < 2) continue;
+    }
+    
+    const odds = outcomes.map((o: any) => o.price);
     if (odds.some((o: number) => isNaN(o) || o <= 1)) continue;
     
-    const fairProb = calculateFairProb(odds, Math.min(targetIndex, odds.length - 1));
+    // calculateFairProb already normalizes to 100%, so this handles renormalization
+    const fairProb = calculateFairProb(odds, Math.min(adjustedTargetIndex, odds.length - 1));
     const weight = SHARP_BOOKS.includes(bookmaker.key) ? 1.5 : 1.0;
     
     weightedProb += fairProb * weight;
@@ -1075,7 +1109,8 @@ Deno.serve(async (req) => {
         let teamName: string | null = null;
         
         if (match) {
-          bookmakerFairProb = calculateConsensusFairProb(match.game, match.marketKey, match.targetIndex);
+          // Pass sport to handle NHL 3-way to 2-way conversion
+          bookmakerFairProb = calculateConsensusFairProb(match.game, match.marketKey, match.targetIndex, sport);
           teamName = match.teamName;
           
           // CRITICAL FIX #1: Team participant validation
@@ -1141,19 +1176,44 @@ Deno.serve(async (req) => {
           // ========== MOVEMENT DETECTION GATE ==========
           const movement = await detectSharpMovement(supabase, eventKey, teamName);
           
-          // ========== DIRECTIONAL EDGE CALCULATION ==========
-          // Determine bet side based on movement direction
-          let betSide: 'YES' | 'NO' = 'YES';
-          let rawEdge = bookmakerFairProb - livePolyPrice;
+          // ========== BIDIRECTIONAL EDGE CALCULATION (CRITICAL FIX #2) ==========
+          // Calculate edge for BOTH sides without requiring movement confirmation
+          const yesEdge = bookmakerFairProb - livePolyPrice;  // Edge if buying YES
+          const noEdge = (1 - bookmakerFairProb) - (1 - livePolyPrice);  // Edge if buying NO = livePolyPrice - bookmakerFairProb
           
-          if (movement.triggered && movement.direction === 'drifting') {
-            // Bookies drifted (prob DOWN) - bet NO on Polymarket
-            // Edge = (1 - bookmakerFairProb) - (1 - livePolyPrice) = livePolyPrice - bookmakerFairProb
+          // Pick the side with the positive edge
+          let betSide: 'YES' | 'NO';
+          let rawEdge: number;
+          
+          if (yesEdge > 0 && yesEdge >= noEdge) {
+            // Polymarket underpricing YES - BUY YES
+            betSide = 'YES';
+            rawEdge = yesEdge;
+          } else if (noEdge > 0) {
+            // Polymarket overpricing YES (underpricing NO) - BUY NO
             betSide = 'NO';
-            rawEdge = (1 - livePolyPrice) - (1 - bookmakerFairProb);
-            // rawEdge simplifies to: livePolyPrice - bookmakerFairProb
+            rawEdge = noEdge;
+          } else {
+            // No positive edge on either side - skip
+            console.log(`[POLY-MONITOR] No edge on either side for ${event.event_name}: YES=${(yesEdge * 100).toFixed(1)}%, NO=${(noEdge * 100).toFixed(1)}%`);
+            continue;
           }
-          // ========== END DIRECTIONAL CALCULATION ==========
+          
+          // Movement direction can OVERRIDE if strong directional signal
+          if (movement.triggered) {
+            if (movement.direction === 'shortening' && yesEdge > 0.01) {
+              // Bookies shortened (prob UP) + there's a YES edge - prefer BUY YES
+              betSide = 'YES';
+              rawEdge = yesEdge;
+            } else if (movement.direction === 'drifting' && noEdge > 0.01) {
+              // Bookies drifted (prob DOWN) + there's a NO edge - prefer BUY NO
+              betSide = 'NO';
+              rawEdge = noEdge;
+            }
+          }
+          
+          console.log(`[POLY-MONITOR] Edge calc for ${event.event_name}: YES_edge=${(yesEdge * 100).toFixed(1)}%, NO_edge=${(noEdge * 100).toFixed(1)}% -> ${betSide} ${(rawEdge * 100).toFixed(1)}%`);
+          // ========== END BIDIRECTIONAL EDGE CALCULATION ==========
           
           if (rawEdge >= 0.02) {
             // CRITICAL FIX #3: Staleness & high-prob edge gating
