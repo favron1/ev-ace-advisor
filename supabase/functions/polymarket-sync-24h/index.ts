@@ -614,6 +614,9 @@ Deno.serve(async (req) => {
     // ============= UPSERT FIRECRAWL GAMES FIRST =============
     let firecrawlUpserted = 0;
     
+    // Set a default event_date for scraped games (today + 12 hours since we don't know exact time)
+    const defaultEventDate = new Date(now.getTime() + 12 * 60 * 60 * 1000);
+    
     for (const { game, sport, sportCode } of firecrawlGames) {
       const conditionId = `firecrawl_${sportCode}_${game.team1Code}_${game.team2Code}`;
       
@@ -629,6 +632,7 @@ Deno.serve(async (req) => {
           team_away_normalized: game.team2Name.toLowerCase(),
           yes_price: game.team1Price,
           no_price: game.team2Price,
+          event_date: defaultEventDate.toISOString(), // Set default event date for monitor filter
           sport_category: sport,
           extracted_league: sport,
           market_type: 'h2h',

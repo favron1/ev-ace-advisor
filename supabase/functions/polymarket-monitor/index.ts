@@ -599,35 +599,43 @@ Deno.serve(async (req) => {
     // Load markets marked for monitoring - filter to sports with bookmaker coverage
     // This is the "Scan Once, Monitor Continuously" architecture
     // CRITICAL FIX: Include ALL market types (H2H, Totals, Spreads), not just those with extracted_league
-    const supportedSports = Object.keys(SPORT_ENDPOINTS); // ['NBA', 'NFL', 'NHL', 'MLB', 'UFC', 'Tennis', 'EPL', 'UCL', 'LaLiga', 'SerieA', 'Bundesliga', 'Boxing']
+    const supportedSports = Object.keys(SPORT_ENDPOINTS); // ['NHL', 'NBA', 'NCAA', 'NFL']
     
-    // First, load markets WITH extracted_league
-    const { data: leagueMarkets, error: leagueLoadError } = await supabase
+    // First, load API-sourced markets with volume filter
+    const { data: apiMarkets, error: apiLoadError } = await supabase
       .from('polymarket_h2h_cache')
       .select('*')
       .in('monitoring_status', ['watching', 'triggered'])
       .eq('status', 'active')
       .in('extracted_league', supportedSports)
-      .gte('volume', 5000)
+      .or('source.is.null,source.eq.api')
+      .gte('volume', 5000) // Volume filter only for API-sourced markets
       .order('event_date', { ascending: true })
       .limit(150);
 
-    // Then, load markets with NULL extracted_league (Totals/Spreads/Props that need re-detection)
-    const { data: nullLeagueMarkets, error: nullLeagueLoadError } = await supabase
+    // Second, load Firecrawl-sourced markets WITHOUT volume filter (scraped data has no volume)
+    const { data: firecrawlMarkets, error: fcLoadError } = await supabase
       .from('polymarket_h2h_cache')
       .select('*')
       .in('monitoring_status', ['watching', 'triggered'])
       .eq('status', 'active')
-      .is('extracted_league', null)
-      .in('market_type', ['total', 'spread', 'player_prop', 'h2h']) // Skip pure futures
-      .gte('volume', 5000)
+      .eq('source', 'firecrawl')
+      .in('extracted_league', supportedSports)
       .order('event_date', { ascending: true })
-      .limit(50);
+      .limit(100);
 
-    // Combine both sets
-    const watchedMarkets = [...(leagueMarkets || []), ...(nullLeagueMarkets || [])];
+    // Combine both sets (deduplicated by condition_id)
+    const seenIds = new Set<string>();
+    const watchedMarkets: typeof apiMarkets = [];
     
-    if (leagueLoadError) throw new Error(`Failed to load markets: ${leagueLoadError.message}`);
+    for (const market of [...(apiMarkets || []), ...(firecrawlMarkets || [])]) {
+      if (!seenIds.has(market.condition_id)) {
+        seenIds.add(market.condition_id);
+        watchedMarkets.push(market);
+      }
+    }
+    
+    if (apiLoadError) throw new Error(`Failed to load markets: ${apiLoadError.message}`);
 
     console.log(`[POLY-MONITOR] Loaded ${watchedMarkets?.length || 0} watched markets from cache`);
 
