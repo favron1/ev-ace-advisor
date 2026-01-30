@@ -32,21 +32,33 @@ export function useSignals() {
     try {
       setDetecting(true);
       
-      // First, refresh data sources
-      toast({ title: 'Refreshing bookmaker data...' });
+      // POLYMARKET-FIRST FLOW:
+      // Step 1: Sync Polymarket markets (24h window) - this is the source of truth
+      toast({ title: 'Syncing Polymarket markets...' });
+      const syncResult = await supabase.functions.invoke('polymarket-sync-24h', { body: {} });
       
-      // Only fetch bookmaker odds - Polymarket is fetched per-event in active-mode-poll
-      await supabase.functions.invoke('ingest-odds', { body: {} });
+      const syncData = syncResult.data || {};
+      const totalMarkets = syncData.qualifying_events || syncData.upserted_to_cache || 0;
       
-      // Then run detection
-      const result = await arbitrageApi.runSignalDetection();
+      // Step 2: Run monitor to check edges against bookmaker data
+      toast({ title: `Checking ${totalMarkets} markets for edges...` });
+      const monitorResult = await supabase.functions.invoke('polymarket-monitor', { body: {} });
+      
       await fetchSignals();
       
+      const monitorData = monitorResult.data || {};
+      const edgesFound = monitorData.edges_found || monitorData.signals_created || 0;
+      
       toast({
-        title: 'Signal Detection Complete',
-        description: `Found ${result.signals_surfaced} opportunities from ${result.outright_signals || result.movements_detected} bookmaker signals.`,
+        title: 'Scan Complete',
+        description: `Found ${edgesFound} tradeable edges from ${totalMarkets} Polymarket markets.`,
       });
-      return result;
+      
+      return {
+        signals_surfaced: edgesFound,
+        movements_detected: totalMarkets,
+        outright_signals: edgesFound,
+      } as SignalDetectionResult;
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Detection failed';
       toast({
