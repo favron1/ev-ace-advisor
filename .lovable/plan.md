@@ -1,179 +1,190 @@
 
 
-# Plan: AI-Powered Team Name Resolution Fallback
+# Edge Detection Pipeline Fix
 
-## The Problem
-
-When Polymarket says **"Flyers vs. Bruins"** but bookmakers say **"Philadelphia Flyers vs. Boston Bruins"**, the current string-matching logic fails 70% of the time (42/60 markets unmatched).
-
-## Your Solution
-
-Use AI to interpret shortened/abbreviated team names and return the full matchup. This is far more robust than maintaining endless hardcoded mappings.
-
-```text
-Current Flow (Fails Often):
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Polymarket: "Flyers vs. Bruins"                                         │
-│ Bookmaker:  "Philadelphia Flyers vs. Boston Bruins"                     │
-│                                                                         │
-│ String Match: "flyers" ∈ "philadelphia flyers" → Sometimes works        │
-│ BUT: "Kings" matches "Sacramento Kings" AND "Los Angeles Kings" → FAIL  │
-└─────────────────────────────────────────────────────────────────────────┘
-
-New Flow (AI Fallback):
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 1. Try existing string matching first (fast, free)                      │
-│ 2. If no match → Ask AI: "What matchup is Polymarket referring to       │
-│    when they say 'Flyers vs. Bruins' in the NHL?"                       │
-│ 3. AI returns: { home: "Philadelphia Flyers", away: "Boston Bruins" }   │
-│ 4. Match against bookmaker data using full team names                   │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+## Problem Summary
+The system isn't detecting edges automatically when you press "Scan" because of **three critical bugs** in the detection pipeline:
 
 ---
 
-## Technical Implementation
+## Bug 1: 3-Way to 2-Way Market Conversion (NHL Ice Hockey)
 
-### File: `supabase/functions/polymarket-monitor/index.ts`
+**Current Behavior:**
+The Odds API returns 3-way markets for NHL (Home/Draw/Away):
+- Columbus Blue Jackets: 45.4%
+- Chicago Blackhawks: 34.0%
+- Draw: 20.6%
 
-**Add new AI resolution helper function:**
+But Polymarket is 2-way (no draw option).
 
-```typescript
-async function resolveTeamNamesWithAI(
-  eventName: string,
-  sport: string
-): Promise<{ homeTeam: string; awayTeam: string } | null> {
-  const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
-  if (!LOVABLE_API_KEY) return null;
+**The Problem:**
+The system uses the 3-way fair probability directly (45.4% for Blue Jackets) when it should renormalize to 2-way:
+- Blue Jackets 2-way: 45.4% ÷ (45.4% + 34.0%) = **57.2%**
+- Blackhawks 2-way: 34.0% ÷ (45.4% + 34.0%) = **42.8%**
 
-  const prompt = `What exact matchup is being referred to here: "${eventName}" in ${sport}?
-Return the full official team names.`;
+**Impact:**
+This makes edges appear ~10-15% smaller than they actually are, causing the trigger threshold (5%) to never be met.
 
-  const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${LOVABLE_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "google/gemini-2.5-flash-lite", // Fast + cheap for simple lookups
-      messages: [
-        { role: "system", content: "You are a sports team name resolver. Return the full official team names for abbreviated matchups." },
-        { role: "user", content: prompt }
-      ],
-      tools: [{
-        type: "function",
-        function: {
-          name: "resolve_matchup",
-          description: "Return the full official team names for a matchup",
-          parameters: {
-            type: "object",
-            properties: {
-              home_team: { type: "string", description: "Full name e.g. 'Philadelphia Flyers'" },
-              away_team: { type: "string", description: "Full name e.g. 'Boston Bruins'" },
-              confidence: { type: "string", enum: ["high", "medium", "low"] }
-            },
-            required: ["home_team", "away_team", "confidence"]
-          }
-        }
-      }],
-      tool_choice: { type: "function", function: { name: "resolve_matchup" } }
-    }),
-  });
+---
 
-  if (!response.ok) return null;
-  
-  const data = await response.json();
-  const toolCall = data.choices?.[0]?.message?.tool_calls?.[0];
-  if (!toolCall) return null;
+## Bug 2: BUY NO Edge Detection Requires Movement Confirmation
 
-  const args = JSON.parse(toolCall.function.arguments);
-  if (args.confidence === 'low') return null; // Don't trust low-confidence matches
-
-  return { homeTeam: args.home_team, awayTeam: args.away_team };
-}
+**Current Behavior:**
+The edge calculation at line 1147 does:
+```
+rawEdge = bookmakerFairProb - livePolyPrice
 ```
 
-**Update matching logic (around line 822):**
+For the Blue Jackets game:
+- `rawEdge = 0.572 (renormalized) - 0.58 = -0.008` (negative)
+
+The system only flips to BUY NO if `movement.triggered && movement.direction === 'drifting'` (line 1149). Without confirmed sharp book movement in the last 30 minutes, it **never considers the NO side**.
+
+**The Actual Edge:**
+- Polymarket YES (Blue Jackets): 58¢
+- Polymarket NO (Blackhawks): 42¢
+- Fair NO probability: 42.8%
+- **Edge on NO = 42.8% - 42% = +0.8%** (below threshold)
+
+Wait - after renormalization, the edge is actually quite small. Let me recalculate with the ACTUAL numbers from your Firecrawl data:
+- Polymarket YES price: **58¢** (Blue Jackets win)
+- Bookmaker Fair (2-way renormalized): **57.2%** (Blue Jackets)
+- Edge: 57.2% - 58% = **-0.8%** (wrong side, but small)
+
+**But wait** - the bookmaker data in `bookmaker_signals` shows 45.4% WITH the draw included. After removing the draw and renormalizing, the Blue Jackets fair prob is ~57%, which is CLOSE to the 58¢ Polymarket price.
+
+The actual issue: **The bookmaker API is returning 3-way odds, but the calculation is NOT removing the draw for NHL**.
+
+---
+
+## Bug 3: CLOB Price Not Being Used in Edge Calculation
+
+**Evidence from database:**
+```
+best_bid: 0.58
+best_ask: 0.59
+yes_price: 0.5 (STALE!)
+```
+
+The system fetches fresh CLOB bid/ask prices but the `yes_price` field is stale at 0.50 instead of the actual 0.58-0.59.
+
+---
+
+## Root Cause Analysis
+
+The pipeline has these issues:
+
+1. **NHL 3-way handling missing**: The `calculateConsensusFairProb` function doesn't filter out "Draw" outcomes for NHL
+2. **BUY NO requires movement**: Static NO edges are never detected
+3. **Price staleness**: The `yes_price` field isn't being updated with CLOB data before edge calculation
+
+---
+
+## Proposed Fixes
+
+### Fix 1: Add 2-Way Renormalization for NHL
+
+In `polymarket-monitor/index.ts`, update `calculateConsensusFairProb` to filter out Draw outcomes for NHL:
 
 ```typescript
-// Find bookmaker match - try direct matching first
-let match = findBookmakerMatch(
-  event.event_name,
-  event.polymarket_question || '',
-  marketType,
-  bookmakerGames
-);
-
-// AI FALLBACK: If no match, ask AI to resolve team names
-if (!match && bookmakerGames.length > 0) {
-  const sport = event.extracted_league || 'sports';
-  const resolved = await resolveTeamNamesWithAI(event.event_name, sport);
+function calculateConsensusFairProb(
+  game: any, 
+  marketKey: string, 
+  targetIndex: number,
+  sport: string // NEW: pass sport to know if 2-way
+): number | null {
+  // For NHL, filter out Draw outcomes and renormalize
+  const isIceHockey = sport === 'NHL';
   
-  if (resolved) {
-    console.log(`[POLY-MONITOR] AI resolved "${event.event_name}" → ${resolved.homeTeam} vs ${resolved.awayTeam}`);
+  for (const bookmaker of game.bookmakers || []) {
+    const market = bookmaker.markets?.find((m: any) => m.key === marketKey);
+    if (!market?.outcomes || market.outcomes.length < 2) continue;
     
-    // Try matching again with AI-resolved names
-    match = findBookmakerMatch(
-      `${resolved.homeTeam} vs ${resolved.awayTeam}`,
-      event.polymarket_question || '',
-      marketType,
-      bookmakerGames
-    );
+    let outcomes = market.outcomes;
+    
+    // For NHL: Remove Draw and renormalize to 2-way
+    if (isIceHockey && outcomes.length >= 3) {
+      outcomes = outcomes.filter((o: any) => 
+        !o.name.toLowerCase().includes('draw') &&
+        o.name.toLowerCase() !== 'tie'
+      );
+    }
+    
+    // ... rest of calculation with filtered outcomes
   }
 }
 ```
 
----
+### Fix 2: Detect Both YES and NO Edges Without Movement
 
-## Caching Strategy
-
-To avoid calling AI for the same matchup repeatedly, we can cache resolved names:
+Update the edge detection logic to check BOTH sides:
 
 ```typescript
-// Add at module level
-const aiResolvedNames = new Map<string, { home: string; away: string } | null>();
+// Calculate edge for BOTH sides
+const yesEdge = bookmakerFairProb - livePolyPrice;  // Edge if buying YES
+const noEdge = (1 - bookmakerFairProb) - (1 - livePolyPrice);  // Edge if buying NO
 
-// Before AI call:
-const cacheKey = `${event.event_name}|${sport}`;
-if (aiResolvedNames.has(cacheKey)) {
-  const cached = aiResolvedNames.get(cacheKey);
-  // Use cached result...
+// Pick the positive edge side
+let betSide: 'YES' | 'NO';
+let rawEdge: number;
+
+if (yesEdge > noEdge && yesEdge > 0) {
+  betSide = 'YES';
+  rawEdge = yesEdge;
+} else if (noEdge > 0) {
+  betSide = 'NO';
+  rawEdge = noEdge;
 } else {
-  const resolved = await resolveTeamNamesWithAI(event.event_name, sport);
-  aiResolvedNames.set(cacheKey, resolved);
+  continue; // No edge on either side
 }
 ```
 
-This means:
-- First scan for "Flyers vs Bruins" → AI call → cache result
-- Subsequent scans → Use cached resolution (no AI call)
+### Fix 3: Use CLOB Price in Edge Calculation
+
+The code already fetches CLOB prices but uses `livePolyPrice` which may be stale. Ensure the CLOB ask price is used:
+
+```typescript
+// Get price from CLOB batch results (preferred)
+let livePolyPrice = cache?.yes_price || 0.5;
+
+if (tokenIdYes && clobPrices.has(tokenIdYes)) {
+  const prices = clobPrices.get(tokenIdYes)!;
+  // Use ASK price (what you pay to buy YES)
+  livePolyPrice = prices.ask > 0 ? prices.ask : prices.bid;
+}
+```
 
 ---
 
-## Expected Results
+## Implementation Steps
 
-| Scenario | Before | After |
-|----------|--------|-------|
-| "Flyers vs. Bruins" | No match (no "Philadelphia") | AI resolves → Match found |
-| "Kings vs. Golden Knights" | Ambiguous (SAC Kings? LA Kings?) | AI uses context (NHL) → LA Kings |
-| "MSU vs Duke" | No match | AI resolves → Michigan State Spartans |
-| Already matched events | Works | Works (AI not called) |
+1. **Update `calculateConsensusFairProb`** to accept sport parameter and filter Draw outcomes for NHL
+2. **Update edge calculation** to check both YES and NO sides without requiring movement confirmation
+3. **Verify CLOB price usage** is happening before edge calculation
+4. **Add logging** to trace edge calculations for debugging
 
 ---
 
-## Cost & Performance
+## Expected Outcome
 
-- **Model**: `google/gemini-2.5-flash-lite` (fastest, cheapest)
-- **Per call**: ~50-100 tokens in, ~30 tokens out
-- **Caching**: Each unique matchup resolved only once per scan cycle
-- **Fallback only**: AI not called when direct matching succeeds
+After these fixes, when you press "Scan":
+1. NHL games will use proper 2-way fair probabilities
+2. Both BUY YES and BUY NO edges will be detected automatically
+3. The Blackhawks vs Blue Jackets edge should surface (if one exists after renormalization)
 
 ---
 
-## Files to Modify
+## Technical Details
 
-| File | Change |
-|------|--------|
-| `supabase/functions/polymarket-monitor/index.ts` | Add `resolveTeamNamesWithAI()` helper and integrate into matching flow |
+### Files to Modify
+
+| File | Changes |
+|------|---------|
+| `supabase/functions/polymarket-monitor/index.ts` | Add NHL 3-way filtering, bidirectional edge detection |
+
+### Testing Steps
+1. Deploy the updated function
+2. Run a manual scan
+3. Check logs for edge calculation output
+4. Verify edges appear in the feed
 
