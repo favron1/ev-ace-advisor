@@ -10,13 +10,14 @@ export interface SignalLogEntry {
   entry_price: number;
   edge_at_signal: number;
   confidence_at_signal: number;
-  outcome: 'pending' | 'win' | 'loss' | 'void' | null;
+  outcome: 'pending' | 'in_play' | 'win' | 'loss' | 'void' | null;
   profit_loss: number | null;
   created_at: string;
   settled_at: string | null;
   stake_amount: number | null;
   polymarket_condition_id: string | null;
   recommended_outcome: string | null;
+  live_price?: number | null;
 }
 
 export interface DailyStats {
@@ -77,6 +78,19 @@ export function useSignalStats() {
         recommended_outcome: (log.signal_opportunities as { recommended_outcome?: string } | null)?.recommended_outcome || null,
       })) as SignalLogEntry[];
       
+      // Fetch live prices for in-play bets
+      const inPlayLogs = logsWithOutcome.filter(l => l.outcome === 'in_play' && l.polymarket_condition_id);
+      if (inPlayLogs.length > 0) {
+        const livePrices = await fetchLivePrices(inPlayLogs.map(l => l.polymarket_condition_id!));
+        
+        // Merge live prices into logs
+        logsWithOutcome.forEach(log => {
+          if (log.outcome === 'in_play' && log.polymarket_condition_id) {
+            log.live_price = livePrices[log.polymarket_condition_id] || null;
+          }
+        });
+      }
+      
       setLogs(logsWithOutcome);
       setError(null);
     } catch (err) {
@@ -85,6 +99,38 @@ export function useSignalStats() {
       setLoading(false);
     }
   }, []);
+
+  // Fetch live prices from Polymarket for in-play bets
+  const fetchLivePrices = async (conditionIds: string[]): Promise<Record<string, number>> => {
+    const prices: Record<string, number> = {};
+    
+    // Batch fetch prices (limit concurrent requests)
+    const batchSize = 5;
+    for (let i = 0; i < conditionIds.length; i += batchSize) {
+      const batch = conditionIds.slice(i, i + batchSize);
+      
+      await Promise.all(batch.map(async (conditionId) => {
+        try {
+          const response = await fetch(`https://gamma-api.polymarket.com/markets?condition_id=${conditionId}`);
+          if (response.ok) {
+            const markets = await response.json();
+            if (markets?.[0]?.tokens) {
+              const yesToken = markets[0].tokens.find((t: { outcome: string; price: number }) => 
+                t.outcome.toLowerCase() === 'yes'
+              );
+              if (yesToken) {
+                prices[conditionId] = yesToken.price;
+              }
+            }
+          }
+        } catch (err) {
+          console.error(`Failed to fetch price for ${conditionId}:`, err);
+        }
+      }));
+    }
+    
+    return prices;
+  };
 
   useEffect(() => {
     fetchLogs();

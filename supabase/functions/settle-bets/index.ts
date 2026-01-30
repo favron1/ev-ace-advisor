@@ -55,9 +55,14 @@ function calculatePL(
 // ============================================================================
 // CHECK SINGLE MARKET RESOLUTION
 // ============================================================================
-async function checkMarketResolution(
-  conditionId: string
-): Promise<{ resolved: boolean; yesWon: boolean | null; price: number | null }> {
+interface MarketStatus {
+  resolved: boolean;
+  inPlay: boolean;
+  yesWon: boolean | null;
+  price: number | null;
+}
+
+async function checkMarketResolution(conditionId: string): Promise<MarketStatus> {
   try {
     // Try Gamma API first
     const gammaUrl = `https://gamma-api.polymarket.com/markets?condition_id=${conditionId}`;
@@ -65,54 +70,61 @@ async function checkMarketResolution(
     
     if (!response.ok) {
       console.log(`[SETTLE-BETS] Gamma API error for ${conditionId}: ${response.status}`);
-      return { resolved: false, yesWon: null, price: null };
+      return { resolved: false, inPlay: false, yesWon: null, price: null };
     }
     
     const markets = await response.json() as GammaMarketResponse[];
     
     if (!markets || markets.length === 0) {
       console.log(`[SETTLE-BETS] No market found for ${conditionId}`);
-      return { resolved: false, yesWon: null, price: null };
+      return { resolved: false, inPlay: false, yesWon: null, price: null };
     }
     
     const market = markets[0];
     
-    // Check if market is closed
+    // Check if market is closed (resolved)
     if (market.closed || !market.active) {
       // Determine winner based on final prices
-      // YES wins if YES price > 0.9 at close
       const yesToken = market.tokens?.find(t => t.outcome.toLowerCase() === 'yes');
       const yesPrice = yesToken?.price || 0;
       
       // Price of 0.99+ means YES won, 0.01- means NO won
       if (yesPrice >= 0.9) {
-        return { resolved: true, yesWon: true, price: yesPrice };
+        return { resolved: true, inPlay: false, yesWon: true, price: yesPrice };
       } else if (yesPrice <= 0.1) {
-        return { resolved: true, yesWon: false, price: yesPrice };
+        return { resolved: true, inPlay: false, yesWon: false, price: yesPrice };
       }
       
       // Market closed but not clearly resolved (might be void)
-      return { resolved: true, yesWon: null, price: yesPrice };
+      return { resolved: true, inPlay: false, yesWon: null, price: yesPrice };
     }
     
-    // Also check if event date has passed significantly (24+ hours)
+    // Check if event has started but not ended (in-play)
     if (market.end_date_iso) {
       const endDate = new Date(market.end_date_iso);
       const now = new Date();
-      const hoursSinceEnd = (now.getTime() - endDate.getTime()) / (1000 * 60 * 60);
       
-      if (hoursSinceEnd > 24) {
-        console.log(`[SETTLE-BETS] Event ${conditionId} ended ${hoursSinceEnd.toFixed(1)}h ago but not marked closed`);
-        // Flag for manual review by returning resolved but null winner
-        return { resolved: true, yesWon: null, price: null };
+      // If event end date is in the past but market still active, likely in-play
+      if (now > endDate) {
+        const hoursSinceEnd = (now.getTime() - endDate.getTime()) / (1000 * 60 * 60);
+        
+        // If more than 12 hours past end date, something's wrong - flag for review
+        if (hoursSinceEnd > 12) {
+          console.log(`[SETTLE-BETS] Event ${conditionId} ended ${hoursSinceEnd.toFixed(1)}h ago but not closed`);
+          return { resolved: true, inPlay: false, yesWon: null, price: null };
+        }
+        
+        // Within 12 hours of scheduled end and still active = in-play
+        console.log(`[SETTLE-BETS] Market ${conditionId} is IN-PLAY (${hoursSinceEnd.toFixed(1)}h past scheduled end)`);
+        return { resolved: false, inPlay: true, yesWon: null, price: null };
       }
     }
     
-    return { resolved: false, yesWon: null, price: null };
+    return { resolved: false, inPlay: false, yesWon: null, price: null };
     
   } catch (error) {
     console.error(`[SETTLE-BETS] Error checking ${conditionId}:`, error);
-    return { resolved: false, yesWon: null, price: null };
+    return { resolved: false, inPlay: false, yesWon: null, price: null };
   }
 }
 
@@ -178,6 +190,7 @@ Deno.serve(async (req) => {
     // STEP 2: Check each bet's market resolution
     // ========================================================================
     let settledCount = 0;
+    let inPlayCount = 0;
     let checkedCount = 0;
     const results: Array<{ id: string; outcome: string; pl: number }> = [];
 
@@ -185,6 +198,20 @@ Deno.serve(async (req) => {
       checkedCount++;
       
       const resolution = await checkMarketResolution(bet.polymarket_condition_id);
+      
+      // Handle in-play markets
+      if (resolution.inPlay) {
+        const { error: updateError } = await supabase
+          .from('signal_logs')
+          .update({ outcome: 'in_play' })
+          .eq('id', bet.id);
+        
+        if (!updateError) {
+          inPlayCount++;
+          console.log(`[SETTLE-BETS] In-play: ${bet.event_name.substring(0, 40)}...`);
+        }
+        continue;
+      }
       
       if (!resolution.resolved) {
         continue;
@@ -228,13 +255,14 @@ Deno.serve(async (req) => {
     }
 
     const duration = Date.now() - startTime;
-    console.log(`[SETTLE-BETS] Complete in ${duration}ms: ${settledCount}/${checkedCount} settled`);
+    console.log(`[SETTLE-BETS] Complete in ${duration}ms: ${settledCount} settled, ${inPlayCount} in-play`);
 
     return new Response(
       JSON.stringify({
         success: true,
         checked: checkedCount,
         settled: settledCount,
+        in_play: inPlayCount,
         results,
         duration_ms: duration,
       }),
