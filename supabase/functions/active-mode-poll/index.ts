@@ -9,6 +9,12 @@
 // ============================================================================
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { 
+  scrapePolymarketGames, 
+  findMatchingGame, 
+  getSportCodeFromLeague,
+  type ParsedGame 
+} from '../_shared/firecrawl-scraper.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -72,6 +78,11 @@ interface WatchState {
   active_until: string | null;
   polymarket_matched: boolean;
   polymarket_price: number | null;
+  // Additional fields for Firecrawl fallback
+  source?: string | null;
+  extracted_league?: string | null;
+  team_home?: string | null;
+  team_away?: string | null;
 }
 
 // ============================================================================
@@ -423,6 +434,9 @@ Deno.serve(async (req) => {
       throw new Error('ODDS_API_KEY not configured');
     }
 
+    // Get Firecrawl API key for fallback price refresh
+    const FIRECRAWL_API_KEY = Deno.env.get('FIRECRAWL_API_KEY');
+
     // Get all events in ACTIVE state
     const { data: activeEvents, error: fetchError } = await supabase
       .from('event_watch_state')
@@ -447,6 +461,7 @@ Deno.serve(async (req) => {
       dropped: 0,
       continued: 0,
       polymarket_refreshes: 0,
+      firecrawl_refreshes: 0,
       bookmaker_refreshes: 0,
     };
 
@@ -467,11 +482,13 @@ Deno.serve(async (req) => {
       }
 
       // ======================================================================
-      // STEP 1: Refresh Polymarket price using condition_id (DIRECT LOOKUP)
+      // STEP 1: Refresh Polymarket price - try CLOB API first, then Firecrawl
       // ======================================================================
       let livePolyPrice = event.polymarket_yes_price || 0.5;
       let livePolyVolume = event.polymarket_volume || 0;
+      let priceRefreshed = false;
 
+      // Try CLOB/Gamma API first (works for API-sourced markets)
       if (event.polymarket_condition_id) {
         const polyData = await refreshPolymarketPrice(event.polymarket_condition_id);
         results.polymarket_refreshes++;
@@ -479,6 +496,7 @@ Deno.serve(async (req) => {
         if (polyData) {
           livePolyPrice = polyData.yesPrice;
           livePolyVolume = polyData.volume;
+          priceRefreshed = true;
           
           // Update cache with fresh price
           await supabase
@@ -493,8 +511,50 @@ Deno.serve(async (req) => {
         }
       }
 
-      // Skip low volume markets
-      if (livePolyVolume < MIN_VOLUME) {
+      // FIRECRAWL FALLBACK: If API refresh failed and this is a Firecrawl-sourced market
+      if (!priceRefreshed && FIRECRAWL_API_KEY && event.source === 'firecrawl') {
+        const sportCode = getSportCodeFromLeague(event.extracted_league || null);
+        
+        if (sportCode) {
+          console.log(`[ACTIVE-MODE-POLL] Using Firecrawl fallback for: ${event.event_name?.substring(0, 30)}`);
+          
+          const freshGames = await scrapePolymarketGames(sportCode, FIRECRAWL_API_KEY);
+          results.firecrawl_refreshes++;
+          
+          if (freshGames.length > 0) {
+            const matchedGame = findMatchingGame(freshGames, event.team_home || null, event.team_away || null);
+            
+            if (matchedGame) {
+              // Determine which team is YES side based on bookmaker_market_key
+              const targetTeam = event.bookmaker_market_key?.toLowerCase() || '';
+              const team1Norm = matchedGame.team1Name.toLowerCase();
+              
+              if (team1Norm.includes(targetTeam) || targetTeam.includes(team1Norm.split(' ').pop() || '')) {
+                livePolyPrice = matchedGame.team1Price;
+              } else {
+                livePolyPrice = matchedGame.team2Price;
+              }
+              
+              priceRefreshed = true;
+              console.log(`[ACTIVE-MODE-POLL] Firecrawl price refresh: ${event.event_name?.substring(0, 25)}... -> ${(livePolyPrice * 100).toFixed(0)}¢`);
+              
+              // Update cache with scraped price
+              if (event.polymarket_condition_id) {
+                await supabase
+                  .from('polymarket_h2h_cache')
+                  .update({
+                    yes_price: livePolyPrice,
+                    last_price_update: new Date().toISOString(),
+                  })
+                  .eq('condition_id', event.polymarket_condition_id);
+              }
+            }
+          }
+        }
+      }
+
+      // Skip low volume markets (but allow Firecrawl markets which have volume=0)
+      if (livePolyVolume < MIN_VOLUME && event.source !== 'firecrawl') {
         console.log(`[ACTIVE-MODE-POLL] Low volume, skipping: ${event.event_name?.substring(0, 30)}`);
         continue;
       }

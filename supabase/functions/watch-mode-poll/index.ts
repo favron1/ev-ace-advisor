@@ -330,10 +330,12 @@ Deno.serve(async (req) => {
 
     // ========================================================================
     // STEP 1: Load Polymarket H2H markets from cache (24hr max horizon)
+    // Split query: API markets with volume filter + Firecrawl markets without
     // ========================================================================
     const maxEventDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     
-    const { data: polyMarkets, error: fetchError } = await supabase
+    // Load API-sourced markets with volume filter
+    const { data: apiMarkets, error: apiError } = await supabase
       .from('polymarket_h2h_cache')
       .select('*')
       .eq('status', 'active')
@@ -341,12 +343,33 @@ Deno.serve(async (req) => {
       .gte('volume', minVolume)
       .not('event_date', 'is', null)
       .lte('event_date', maxEventDate)
+      .or('source.is.null,source.neq.firecrawl')
       .order('volume', { ascending: false })
       .limit(MAX_MARKETS_PER_SCAN);
 
-    if (fetchError) throw fetchError;
+    if (apiError) throw apiError;
 
-    if (!polyMarkets || polyMarkets.length === 0) {
+    // Load Firecrawl-sourced markets WITHOUT volume filter (scraped data lacks volume)
+    const { data: firecrawlMarkets, error: fcError } = await supabase
+      .from('polymarket_h2h_cache')
+      .select('*')
+      .eq('status', 'active')
+      .eq('market_type', 'h2h')
+      .eq('source', 'firecrawl')
+      .not('event_date', 'is', null)
+      .lte('event_date', maxEventDate)
+      .in('extracted_league', ['NBA', 'NCAA', 'NFL'])
+      .order('event_date', { ascending: true })
+      .limit(50);
+
+    if (fcError) {
+      console.warn('[WATCH-MODE-POLL] Firecrawl market fetch error:', fcError);
+    }
+
+    // Combine both market sets
+    const polyMarkets = [...(apiMarkets || []), ...(firecrawlMarkets || [])];
+
+    if (polyMarkets.length === 0) {
       console.log('[WATCH-MODE-POLL] No H2H markets within 24hr horizon');
       return new Response(
         JSON.stringify({ 
@@ -354,12 +377,14 @@ Deno.serve(async (req) => {
           message: 'No H2H markets within 24hr horizon',
           snapshots_stored: 0,
           edges_found: 0,
+          api_markets: 0,
+          firecrawl_markets: 0,
         }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
     
-    console.log(`[WATCH-MODE-POLL] Loaded ${polyMarkets.length} Polymarket H2H markets`);
+    console.log(`[WATCH-MODE-POLL] Loaded ${polyMarkets.length} H2H markets (API: ${apiMarkets?.length || 0}, Firecrawl: ${firecrawlMarkets?.length || 0})`);
 
     // ========================================================================
     // STEP 2: Query bookmaker_signals for recent H2H data
