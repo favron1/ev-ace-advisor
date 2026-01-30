@@ -21,6 +21,105 @@ const SPORT_ENDPOINTS = buildSportEndpoints();
 // Sharp books for weighting
 const SHARP_BOOKS = ['pinnacle', 'betfair', 'betfair_ex_eu'];
 
+// AI resolution cache - persists across poll cycles
+const aiResolvedNames = new Map<string, { homeTeam: string; awayTeam: string } | null>();
+
+// Resolve abbreviated team names using AI
+async function resolveTeamNamesWithAI(
+  eventName: string,
+  sport: string
+): Promise<{ homeTeam: string; awayTeam: string } | null> {
+  const cacheKey = `${eventName}|${sport}`;
+  
+  // Check cache first
+  if (aiResolvedNames.has(cacheKey)) {
+    const cached = aiResolvedNames.get(cacheKey);
+    if (cached) {
+      console.log(`[POLY-MONITOR] AI cache hit: "${eventName}" → ${cached.homeTeam} vs ${cached.awayTeam}`);
+    }
+    return cached || null;
+  }
+  
+  const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
+  if (!LOVABLE_API_KEY) {
+    console.log('[POLY-MONITOR] No LOVABLE_API_KEY - skipping AI resolution');
+    return null;
+  }
+
+  const prompt = `What exact sports matchup is being referred to here: "${eventName}" in ${sport}?
+Return the full official team names (e.g., "Philadelphia Flyers" not "Flyers").`;
+
+  try {
+    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${LOVABLE_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "google/gemini-2.5-flash-lite",
+        messages: [
+          { 
+            role: "system", 
+            content: "You are a sports team name resolver. Return the full official team names for abbreviated matchups in US professional sports (NHL, NBA, NFL, NCAA)." 
+          },
+          { role: "user", content: prompt }
+        ],
+        tools: [{
+          type: "function",
+          function: {
+            name: "resolve_matchup",
+            description: "Return the full official team names for a matchup",
+            parameters: {
+              type: "object",
+              properties: {
+                home_team: { type: "string", description: "Full official name e.g. 'Philadelphia Flyers'" },
+                away_team: { type: "string", description: "Full official name e.g. 'Boston Bruins'" },
+                confidence: { type: "string", enum: ["high", "medium", "low"] }
+              },
+              required: ["home_team", "away_team", "confidence"]
+            }
+          }
+        }],
+        tool_choice: { type: "function", function: { name: "resolve_matchup" } }
+      }),
+    });
+
+    if (!response.ok) {
+      console.log(`[POLY-MONITOR] AI resolution failed: ${response.status}`);
+      aiResolvedNames.set(cacheKey, null);
+      return null;
+    }
+    
+    const data = await response.json();
+    const toolCall = data.choices?.[0]?.message?.tool_calls?.[0];
+    
+    if (!toolCall) {
+      console.log('[POLY-MONITOR] AI returned no tool call');
+      aiResolvedNames.set(cacheKey, null);
+      return null;
+    }
+
+    const args = JSON.parse(toolCall.function.arguments);
+    
+    if (args.confidence === 'low') {
+      console.log(`[POLY-MONITOR] AI low confidence for "${eventName}" - skipping`);
+      aiResolvedNames.set(cacheKey, null);
+      return null;
+    }
+
+    const result = { homeTeam: args.home_team, awayTeam: args.away_team };
+    aiResolvedNames.set(cacheKey, result);
+    console.log(`[POLY-MONITOR] AI resolved "${eventName}" → ${result.homeTeam} vs ${result.awayTeam} (${args.confidence})`);
+    
+    return result;
+  } catch (error) {
+    console.error('[POLY-MONITOR] AI resolution error:', error);
+    aiResolvedNames.set(cacheKey, null);
+    return null;
+  }
+}
+
 // Normalize name for matching
 function normalizeName(name: string): string {
   return name
@@ -819,13 +918,33 @@ Deno.serve(async (req) => {
           }
         }
 
-        // Find bookmaker match
-        const match = findBookmakerMatch(
+        // Find bookmaker match - try direct matching first
+        let match = findBookmakerMatch(
           event.event_name,
           event.polymarket_question || '',
           marketType,
           bookmakerGames
         );
+
+        // AI FALLBACK: If no direct match and we have bookmaker data, ask AI to resolve team names
+        if (!match && bookmakerGames.length > 0) {
+          const sport = cache?.extracted_league || 'sports';
+          const resolved = await resolveTeamNamesWithAI(event.event_name, sport);
+          
+          if (resolved) {
+            // Try matching again with AI-resolved full team names
+            match = findBookmakerMatch(
+              `${resolved.homeTeam} vs ${resolved.awayTeam}`,
+              event.polymarket_question || '',
+              marketType,
+              bookmakerGames
+            );
+            
+            if (match) {
+              console.log(`[POLY-MONITOR] AI fallback SUCCESS: "${event.event_name}" matched via ${resolved.homeTeam} vs ${resolved.awayTeam}`);
+            }
+          }
+        }
 
         let bookmakerFairProb: number | null = null;
         let teamName: string | null = null;
