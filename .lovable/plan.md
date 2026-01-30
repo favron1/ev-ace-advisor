@@ -1,176 +1,125 @@
 
 
-# Edge Detection Pipeline Fix
+# Analysis: Edge Detection & SMS Issues
 
-## Problem Summary
-The system isn't detecting edges automatically when you press "Scan" because of **three critical bugs** in the detection pipeline:
+## Problem 1: Why Only Hockey Signals?
 
----
+**Root Cause Analysis:**
 
-## Bug 1: 3-Way to 2-Way Market Conversion (NHL Ice Hockey)
+Looking at the data and logs, I found:
 
-**Current Behavior:**
-The Odds API returns 3-way markets for NHL (Home/Draw/Away):
-- Columbus Blue Jackets: 45.4%
-- Chicago Blackhawks: 34.0%
-- Draw: 20.6%
+1. **Limited Polymarket Cache**: The system loaded **52 watched markets**, but only:
+   - 81 NHL markets (most in cache)
+   - 12 NBA markets
+   - 8 NCAA markets  
+   - 2 NFL markets
 
-But Polymarket is 2-way (no draw option).
+2. **Volume Filter Blocking NBA**: Many NBA markets have **volume = 0** in the cache:
+   ```
+   Toronto Raptors vs Orlando Magic: volume = 0
+   Sacramento Kings vs Boston Celtics: volume = 0
+   Memphis Grizzlies vs New Orleans Pelicans: volume = 0
+   ```
+   
+   The API-sourced markets require `volume >= 5000` to be processed (line 816), so these are being loaded but likely failing edge checks.
 
-**The Problem:**
-The system uses the 3-way fair probability directly (45.4% for Blue Jackets) when it should renormalize to 2-way:
-- Blue Jackets 2-way: 45.4% ÷ (45.4% + 34.0%) = **57.2%**
-- Blackhawks 2-way: 34.0% ÷ (45.4% + 34.0%) = **42.8%**
+3. **Matching Issues**: The logs show mismatches where the system incorrectly pairs events:
+   ```
+   INVALID MATCH: "Columbus Blue Jackets" not found in event "St. Louis Blues vs Nashville Predators"
+   INVALID MATCH: "New Orleans Pelicans" not found in event "Portland Trail Blazers vs New York Knicks"
+   ```
+   
+   The AI matching is returning wrong bookmaker games for Polymarket events.
 
-**Impact:**
-This makes edges appear ~10-15% smaller than they actually are, causing the trigger threshold (5%) to never be met.
-
----
-
-## Bug 2: BUY NO Edge Detection Requires Movement Confirmation
-
-**Current Behavior:**
-The edge calculation at line 1147 does:
-```
-rawEdge = bookmakerFairProb - livePolyPrice
-```
-
-For the Blue Jackets game:
-- `rawEdge = 0.572 (renormalized) - 0.58 = -0.008` (negative)
-
-The system only flips to BUY NO if `movement.triggered && movement.direction === 'drifting'` (line 1149). Without confirmed sharp book movement in the last 30 minutes, it **never considers the NO side**.
-
-**The Actual Edge:**
-- Polymarket YES (Blue Jackets): 58¢
-- Polymarket NO (Blackhawks): 42¢
-- Fair NO probability: 42.8%
-- **Edge on NO = 42.8% - 42% = +0.8%** (below threshold)
-
-Wait - after renormalization, the edge is actually quite small. Let me recalculate with the ACTUAL numbers from your Firecrawl data:
-- Polymarket YES price: **58¢** (Blue Jackets win)
-- Bookmaker Fair (2-way renormalized): **57.2%** (Blue Jackets)
-- Edge: 57.2% - 58% = **-0.8%** (wrong side, but small)
-
-**But wait** - the bookmaker data in `bookmaker_signals` shows 45.4% WITH the draw included. After removing the draw and renormalizing, the Blue Jackets fair prob is ~57%, which is CLOSE to the 58¢ Polymarket price.
-
-The actual issue: **The bookmaker API is returning 3-way odds, but the calculation is NOT removing the draw for NHL**.
+4. **Only 18/52 Matched**: Out of 52 polled markets, only 18 found matching bookmaker data, and only 1 had a significant edge (the Blackhawks game).
 
 ---
 
-## Bug 3: CLOB Price Not Being Used in Edge Calculation
+## Problem 2: Why No SMS For The Blackhawks Signal?
 
-**Evidence from database:**
-```
-best_bid: 0.58
-best_ask: 0.59
-yes_price: 0.5 (STALE!)
+**Root Cause: Signal Tier = "static" (not "elite" or "strong")**
+
+The current signal shows:
+- `signal_tier: "static"`
+- `movement_confirmed: false`
+
+SMS alerts are **ONLY** sent for `elite` or `strong` tier signals (lines 563-567):
+
+```typescript
+if (signalTier !== 'elite' && signalTier !== 'strong') {
+  console.log(`[POLY-MONITOR] Skipping SMS for ${signalTier} tier signal`);
+  return false;
+}
 ```
 
-The system fetches fresh CLOB bid/ask prices but the `yes_price` field is stale at 0.50 instead of the actual 0.58-0.59.
+The tier calculation logic (lines 429-437):
+
+```typescript
+function calculateSignalTier(movementTriggered: boolean, netEdge: number) {
+  if (!movementTriggered) return 'static';  // <-- This is why!
+  if (netEdge >= 0.05) return 'elite';
+  if (netEdge >= 0.03) return 'strong';
+  return 'static';
+}
+```
+
+**The Problem**: Even with a 15.2% edge, without **movement confirmation** (2+ sharp books moving in the same direction within 30 minutes), the signal is classified as `static` and SMS is never sent.
 
 ---
 
-## Root Cause Analysis
+## Summary of Issues
 
-The pipeline has these issues:
-
-1. **NHL 3-way handling missing**: The `calculateConsensusFairProb` function doesn't filter out "Draw" outcomes for NHL
-2. **BUY NO requires movement**: Static NO edges are never detected
-3. **Price staleness**: The `yes_price` field isn't being updated with CLOB data before edge calculation
+| Issue | Root Cause | Impact |
+|-------|-----------|--------|
+| Only hockey signals | Most NBA/NCAA/NFL markets have zero volume or fail matching | Only NHL markets pass all filters |
+| Matching failures | AI returns wrong bookmaker games for abbreviations | 34/52 markets fail to match |
+| No SMS alert | Signal tier = "static" because no movement confirmation | User never notified |
 
 ---
 
 ## Proposed Fixes
 
-### Fix 1: Add 2-Way Renormalization for NHL
+### Fix 1: Allow SMS for High-Edge Static Signals
 
-In `polymarket-monitor/index.ts`, update `calculateConsensusFairProb` to filter out Draw outcomes for NHL:
+**Rationale**: A 15.2% edge is significant regardless of movement. Send SMS for static signals with edge >= 10%.
+
+**Change**: Update SMS condition (around line 1383):
 
 ```typescript
-function calculateConsensusFairProb(
-  game: any, 
-  marketKey: string, 
-  targetIndex: number,
-  sport: string // NEW: pass sport to know if 2-way
-): number | null {
-  // For NHL, filter out Draw outcomes and renormalize
-  const isIceHockey = sport === 'NHL';
+// Before:
+if (!signalError && signal && !existingSignal && (signalTier === 'elite' || signalTier === 'strong')) {
+
+// After:
+const shouldSendSms = signalTier === 'elite' || signalTier === 'strong' || rawEdge >= 0.10;
+if (!signalError && signal && !existingSignal && shouldSendSms) {
+```
+
+### Fix 2: Improve Signal Tier for High-Edge Static Signals
+
+**Alternative Approach**: Consider high-edge static signals as "strong" for SMS purposes.
+
+**Change**: Update `calculateSignalTier` function:
+
+```typescript
+function calculateSignalTier(movementTriggered: boolean, netEdge: number): 'elite' | 'strong' | 'static' {
+  // High edge alone qualifies as strong (for SMS)
+  if (netEdge >= 0.10) return movementTriggered ? 'elite' : 'strong';
   
-  for (const bookmaker of game.bookmakers || []) {
-    const market = bookmaker.markets?.find((m: any) => m.key === marketKey);
-    if (!market?.outcomes || market.outcomes.length < 2) continue;
-    
-    let outcomes = market.outcomes;
-    
-    // For NHL: Remove Draw and renormalize to 2-way
-    if (isIceHockey && outcomes.length >= 3) {
-      outcomes = outcomes.filter((o: any) => 
-        !o.name.toLowerCase().includes('draw') &&
-        o.name.toLowerCase() !== 'tie'
-      );
-    }
-    
-    // ... rest of calculation with filtered outcomes
-  }
+  if (!movementTriggered) return 'static';
+  if (netEdge >= 0.05) return 'elite';
+  if (netEdge >= 0.03) return 'strong';
+  return 'static';
 }
 ```
 
-### Fix 2: Detect Both YES and NO Edges Without Movement
+This means:
+- 10%+ edge = at least "strong" (gets SMS)
+- 10%+ edge + movement = "elite"
+- Under 10% requires movement to get SMS
 
-Update the edge detection logic to check BOTH sides:
+### Fix 3: Improve Matching Accuracy
 
-```typescript
-// Calculate edge for BOTH sides
-const yesEdge = bookmakerFairProb - livePolyPrice;  // Edge if buying YES
-const noEdge = (1 - bookmakerFairProb) - (1 - livePolyPrice);  // Edge if buying NO
-
-// Pick the positive edge side
-let betSide: 'YES' | 'NO';
-let rawEdge: number;
-
-if (yesEdge > noEdge && yesEdge > 0) {
-  betSide = 'YES';
-  rawEdge = yesEdge;
-} else if (noEdge > 0) {
-  betSide = 'NO';
-  rawEdge = noEdge;
-} else {
-  continue; // No edge on either side
-}
-```
-
-### Fix 3: Use CLOB Price in Edge Calculation
-
-The code already fetches CLOB prices but uses `livePolyPrice` which may be stale. Ensure the CLOB ask price is used:
-
-```typescript
-// Get price from CLOB batch results (preferred)
-let livePolyPrice = cache?.yes_price || 0.5;
-
-if (tokenIdYes && clobPrices.has(tokenIdYes)) {
-  const prices = clobPrices.get(tokenIdYes)!;
-  // Use ASK price (what you pay to buy YES)
-  livePolyPrice = prices.ask > 0 ? prices.ask : prices.bid;
-}
-```
-
----
-
-## Implementation Steps
-
-1. **Update `calculateConsensusFairProb`** to accept sport parameter and filter Draw outcomes for NHL
-2. **Update edge calculation** to check both YES and NO sides without requiring movement confirmation
-3. **Verify CLOB price usage** is happening before edge calculation
-4. **Add logging** to trace edge calculations for debugging
-
----
-
-## Expected Outcome
-
-After these fixes, when you press "Scan":
-1. NHL games will use proper 2-way fair probabilities
-2. Both BUY YES and BUY NO edges will be detected automatically
-3. The Blackhawks vs Blue Jackets edge should surface (if one exists after renormalization)
+The AI matching is returning incorrect games. Add stricter validation in `findBookmakerMatch` to verify the matched game contains BOTH teams from the Polymarket event before proceeding.
 
 ---
 
@@ -180,11 +129,19 @@ After these fixes, when you press "Scan":
 
 | File | Changes |
 |------|---------|
-| `supabase/functions/polymarket-monitor/index.ts` | Add NHL 3-way filtering, bidirectional edge detection |
+| `supabase/functions/polymarket-monitor/index.ts` | Update signal tier logic, SMS triggering conditions |
 
-### Testing Steps
-1. Deploy the updated function
-2. Run a manual scan
-3. Check logs for edge calculation output
-4. Verify edges appear in the feed
+### Implementation Steps
+
+1. Update `calculateSignalTier` to promote high-edge (10%+) static signals to "strong"
+2. Alternatively, update SMS trigger condition to include high-edge static signals
+3. Add logging for why signals are classified as static
+4. Redeploy and test with a manual scan
+
+### Expected Outcome
+
+After these fixes:
+- The 15.2% Blackhawks edge would trigger an SMS alert
+- High-edge opportunities won't be missed due to lack of movement confirmation
+- User will receive notifications for significant edges regardless of movement status
 
