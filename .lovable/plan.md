@@ -1,127 +1,156 @@
 
 
-# Firecrawl-Based NBA H2H Price Scraping
+# Integrated Basketball Scraping + Sport Focus
 
-## Summary
+## Overview
 
-**Good news!** Your Firecrawl connector is already connected and working. I've confirmed that scraping `https://polymarket.com/sports/nba/games` returns all NBA H2H games with their moneyline prices in a parseable format.
-
-This gives us a workaround to get NBA (and NCAA) game prices directly from the Polymarket website when the API doesn't expose them.
+This plan integrates Firecrawl-based scraping directly into the scan flow (no separate NBA button) and focuses the system exclusively on **NHL, NBA, NCAA CBB, and NFL**.
 
 ---
 
-## What I Found
+## Current Scan Flow
 
-| URL | Data Retrieved |
-|-----|---------------|
-| `/sports/nba/games` | All NBA H2H games with prices (TOR 48¢, ORL 53¢, etc.) |
-| `/sports/cbb/games` | All NCAA CBB games (440 markets!) |
-| `/sports/nhl/games` | NHL games (72 markets) |
+When you press the "Full Scan" button, this happens:
 
-The scraped markdown contains parseable patterns like:
 ```text
-tor48¢  orl53¢          # Raptors vs Magic
-lal76¢  was25¢          # Lakers vs Wizards  
-cle63¢  phx38¢          # Cavaliers vs Suns
+1. useSignals.runDetection() called
+   ↓
+2. polymarket-sync-24h invoked
+   → Fetches sports events from Polymarket Gamma API (tag_slug=sports)
+   → Filters to 24-hour window
+   → Upserts to polymarket_h2h_cache
+   ↓
+3. polymarket-monitor invoked
+   → Reads cache, fetches CLOB prices
+   → Fetches bookmaker odds from The Odds API
+   → Compares prices, creates signals
 ```
 
+**The Problem**: Polymarket's Gamma API doesn't expose NBA/NCAA H2H games, so Step 2 captures 0 basketball markets.
+
 ---
 
-## Proposed Implementation
+## Proposed Changes
 
-### 1. Create Edge Function: `scrape-polymarket-prices`
+### 1. Modify `polymarket-sync-24h` to Include Firecrawl Scraping
 
-A new edge function that:
-- Uses Firecrawl to scrape the NBA/CBB games page
-- Parses the markdown to extract team names and prices
-- Returns structured JSON with game matchups and odds
+After fetching from the Gamma API, the function will **also** scrape Polymarket's basketball pages:
 
-### 2. Update the `polymarket_h2h_cache` Table
+```text
+polymarket-sync-24h:
+  ├── Fetch from Gamma API (tag_slug=sports)
+  ├── NEW: Scrape /sports/nba/games via Firecrawl
+  ├── NEW: Scrape /sports/cbb/games via Firecrawl  
+  ├── NEW: Scrape /sports/nfl/games via Firecrawl (if available)
+  ├── Filter to 24h window
+  └── Upsert ALL to polymarket_h2h_cache
+```
 
-Add or update entries from scraped data, marking them with `source: 'firecrawl'` to distinguish from API data.
+### 2. Update Sport Filtering to Focus on 4 Leagues
 
-### 3. UI Integration Options
+The scan will **only process** markets from:
+- **NHL** (already works via API)
+- **NBA** (via Firecrawl scrape)
+- **NCAA CBB** (via Firecrawl scrape)
+- **NFL** (via API + Firecrawl backup)
 
-**Option A: Scheduled sync (recommended)**
-- Run scrape every 15-30 minutes via pg_cron
-- Automatically populates NBA games into cache
-- No manual work needed
+All other sports (Tennis, UFC, Soccer, etc.) will be temporarily suspended.
 
-**Option B: On-demand button**
-- Add "Refresh NBA Prices" button to Terminal
-- User triggers scrape when needed
+### 3. Remove Standalone NBA Scrape Button
 
-**Option C: Hybrid**
-- Scheduled sync for background updates
-- Manual refresh button for real-time price check before betting
+The PolymarketCacheStats component will revert to showing just the "Sync API" button. Scraping happens automatically during Full Scan.
+
+### 4. Update `polymarket-monitor` Sport Endpoints
+
+Focus only on the 4 target sports when fetching bookmaker odds:
+
+| Sport | Odds API Endpoint | Markets |
+|-------|------------------|---------|
+| NHL | icehockey_nhl | h2h |
+| NBA | basketball_nba | h2h |
+| NCAA | basketball_ncaab | h2h |
+| NFL | americanfootball_nfl | h2h |
 
 ---
 
 ## Technical Details
 
-### Edge Function Structure
+### Modified `polymarket-sync-24h` Flow
 
-```text
-supabase/functions/scrape-polymarket-prices/index.ts
-
-1. Call Firecrawl API to scrape /sports/nba/games
-2. Parse markdown using regex patterns:
-   - Team codes: /([a-z]{3})(\d+¢)/g → "tor48¢" → team: TOR, price: 0.48
-   - Game blocks: Match pairs of teams
-3. Upsert to polymarket_h2h_cache with:
-   - team_home, team_away
-   - yes_price, no_price
-   - source: 'firecrawl'
-   - last_price_update: now()
-```
-
-### Parsing Logic
-
-From the scraped content, each game line contains:
-```text
-Lakers28-18  Wizards12-34  lal76¢  was25¢
-```
-
-Regex extraction:
 ```typescript
-const gamePattern = /([A-Z][a-z]+)\d+-\d+.*?([a-z]{3})(\d+)¢.*?([a-z]{3})(\d+)¢/g;
+// After Gamma API fetch...
+
+// Scrape NBA games
+const nbaGames = await scrapePolymarketGames('nba');
+for (const game of nbaGames) {
+  qualifying.push({
+    conditionId: `firecrawl_nba_${game.team1Code}_${game.team2Code}`,
+    title: `${game.team1Name} vs ${game.team2Name}`,
+    yesPrice: game.team1Price,
+    noPrice: game.team2Price,
+    sport: 'NBA',
+    source: 'firecrawl'
+  });
+}
+
+// Scrape NCAA CBB games
+const ncaaGames = await scrapePolymarketGames('cbb');
+// ... same pattern
+```
+
+### Firecrawl Parsing (Already Built)
+
+The scraper extracts game data like:
+```text
+tor48¢  orl53¢  →  { Toronto Raptors: 0.48, Orlando Magic: 0.53 }
+```
+
+### Sport Focus Filter
+
+Add early filter in both edge functions:
+
+```typescript
+const ALLOWED_SPORTS = ['NHL', 'NBA', 'NCAA', 'NFL', 'basketball_nba', 
+                        'basketball_ncaab', 'icehockey_nhl', 'americanfootball_nfl'];
+
+// Skip if not in allowed list
+if (!ALLOWED_SPORTS.some(s => detectedSport.includes(s))) {
+  continue;
+}
 ```
 
 ---
 
-## Coverage Impact
+## Files to Modify
 
-| Sport | Current | After Implementation |
-|-------|---------|---------------------|
-| NBA H2H | 0 | ~63 games |
-| NCAA CBB | 0 | ~440 games |
-| NHL | 72 | 72 (no change) |
-| Tennis | 63 | 63 (no change) |
+| File | Change |
+|------|--------|
+| `supabase/functions/polymarket-sync-24h/index.ts` | Add Firecrawl scraping for NBA/CBB/NFL after Gamma fetch |
+| `supabase/functions/polymarket-monitor/index.ts` | Filter SPORT_ENDPOINTS to only NHL/NBA/NCAA/NFL |
+| `src/components/terminal/PolymarketCacheStats.tsx` | Remove NBA scrape button, simplify to single sync |
+| `supabase/functions/scrape-polymarket-prices/index.ts` | Add NCAA team mappings, export helper functions |
+
+---
+
+## Expected Result
+
+After pressing "Full Scan":
+
+| Sport | Source | Expected Markets |
+|-------|--------|-----------------|
+| NHL | Gamma API | ~60-70 H2H games |
+| NBA | Firecrawl | ~10-15 H2H games |
+| NCAA CBB | Firecrawl | ~100-400 H2H games |
+| NFL | API + Firecrawl | ~10-16 H2H games |
+| **Total** | Combined | **~180-500 H2H markets** |
 
 ---
 
 ## Considerations
 
-**Pros:**
-- Gets all NBA/NCAA data that API doesn't provide
-- Firecrawl handles JavaScript rendering
-- Already connected in your project
+**Firecrawl Usage**: Each scan will use 2-3 Firecrawl credits (one per sport page). With a 30-minute scan interval, this means ~48-72 credits/day.
 
-**Cons:**
-- Firecrawl has usage limits (check your plan)
-- Web scraping is less reliable than API
-- Data format could change if Polymarket updates their UI
+**Parsing Reliability**: If Polymarket changes their page layout, the regex patterns may need updating. The scraper includes fallback logging to detect format changes.
 
-**Recommendation:** Start with Option C (hybrid) - scheduled sync every 30 minutes plus a manual refresh button for when you need live prices before placing a bet.
-
----
-
-## Implementation Steps
-
-1. Create `scrape-polymarket-prices` edge function
-2. Add parsing logic for NBA game data
-3. Test with `/sports/nba/games` URL
-4. Add to pg_cron for scheduled runs (every 30 min)
-5. Add "Refresh NBA" button to Terminal UI
-6. Extend to `/sports/cbb/games` for NCAA coverage
+**NCAA Team Mapping**: NCAA has hundreds of teams. The initial implementation will use the team codes directly from the scraped data, relying on bookmaker matching by partial name.
 
