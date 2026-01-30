@@ -1,126 +1,102 @@
 
+## Plan: Fix Polymarket-First Scan Flow
 
-## Plan: Fix Check Pending Button & Add Live Scores for In-Play Bets
+### Problem Identified
 
-### Problem Summary
+The "Full Scan" button calls `detect-signals` which works **backwards**:
+1. Fetches bookmaker signals first
+2. Tries to match them against Polymarket cache
+3. Signals without Polymarket match get `is_true_arbitrage: false` → hidden from feed
 
-1. **Check Pending Button Missing**: The button only appears when there are bets with `outcome = 'pending'` or `NULL`. Since all your recent bets were marked as `in_play` or `loss`, the button is hidden.
-
-2. **No Live Scores**: The system shows the current Polymarket price for in-play bets, but not actual game scores (e.g., "2-1, 75'").
-
----
-
-### Solution
-
-#### Part 1: Fix "Check Pending" Button Visibility
-
-**Change**: Modify the button to also appear when there are `in_play` bets, not just `pending` ones.
-
-- Rename button to "Check Bets" or "Refresh Results"  
-- Show when: `pending` OR `in_play` bets exist
-- Display count of both categories
-
-**File**: `src/pages/Stats.tsx`
+The correct **Polymarket-First** architecture already exists in `polymarket-monitor`, but the UI isn't wired to use it properly for the main scan.
 
 ---
 
-#### Part 2: Add Live Scores Backend
+### Root Cause
 
-**Create**: New edge function `fetch-live-scores` that queries The Odds API scores endpoint.
+When you click "Full Scan":
+- It calls `ingest-odds` (bookmaker data) → then `detect-signals`
+- `detect-signals` starts from bookmaker data and tries to find Polymarket matches
+- If Polymarket has no market for an event, the signal is created but hidden
 
-**API Endpoint**:
-```
-GET https://api.the-odds-api.com/v4/sports/{sport}/scores/?apiKey={key}&daysFrom=1
-```
-
-**Response includes**:
-- `completed`: true/false  
-- `scores`: Array of `{ name: "Team A", score: "2" }`
-- `commence_time`: When the event started
-- `last_update`: Last score update time
-
-**Logic**:
-1. Extract sport key from the bet's event name or store it in `signal_logs`
-2. Query scores API for relevant sports (NHL, NBA, tennis, soccer)
-3. Fuzzy-match event names to find the correct game
-4. Return score, game time/period, and completion status
-
-**File**: `supabase/functions/fetch-live-scores/index.ts`
+The "Watch Poll" button correctly uses `polymarket-monitor` which starts from Polymarket markets, but:
+- It only processes markets with `monitoring_status = 'watching'`
+- New markets aren't automatically set to watching
 
 ---
 
-#### Part 3: Display Live Scores in UI
+### Solution: Rewire Full Scan to be Polymarket-First
 
-**Update**: The Stats page to show live scores alongside the LIVE badge.
+**Step 1: Update Full Scan to sync Polymarket first, then monitor**
 
-**Display format by sport**:
-- **Hockey/Soccer**: "2-1 (P2)" or "1-0 (65')"  
-- **Basketball**: "98-87 (Q3)"
-- **Tennis**: "2-1 sets"
+Modify the scan flow to:
+1. Call `polymarket-sync-24h` to refresh the market cache
+2. Call `polymarket-monitor` to check edges against bookmaker data
+3. Remove the bookmaker-first `detect-signals` path for H2H
 
-**Changes**:
-1. Add `live_score` and `game_status` fields to `SignalLogEntry` interface
-2. Fetch live scores when loading in-play bets
-3. Update the Status column to show score data
+**Step 2: Auto-set new markets to "watching"**
 
-**Files**: 
-- `src/hooks/useSignalStats.ts`
-- `src/pages/Stats.tsx`
+In `polymarket-sync-24h`, automatically set `monitoring_status = 'watching'` for newly discovered markets within 24h (already partially implemented).
+
+**Step 3: Update UI messaging**
+
+Change the toast messages to reflect the Polymarket-first flow:
+- "Syncing Polymarket markets..."
+- "Checking X markets for edges..."
 
 ---
 
-### Technical Details
+### Technical Changes
 
-#### Database Changes (Optional Enhancement)
-Add `sport_key` column to `signal_logs` to enable direct score lookups without fuzzy matching:
+**File: `src/hooks/useSignals.ts`**
 
-```sql
-ALTER TABLE signal_logs ADD COLUMN sport_key text;
-```
-
-#### Edge Function Structure
+Update `runDetection`:
 ```typescript
-// fetch-live-scores/index.ts
-interface ScoreRequest {
-  event_names: string[];  // Events to look up
-  sport_hint?: string;    // Optional sport filter
-}
-
-interface LiveScore {
-  event_name: string;
-  home_team: string;
-  away_team: string;
-  home_score: number;
-  away_score: number;
-  completed: boolean;
-  game_status: string;   // "P2", "Q3", "65'", "Final"
-  last_update: string;
-}
+const runDetection = useCallback(async () => {
+  // Step 1: Sync Polymarket markets (24h window)
+  toast({ title: 'Syncing Polymarket markets...' });
+  const syncResult = await supabase.functions.invoke('polymarket-sync-24h', {});
+  
+  // Step 2: Run monitor to check edges
+  toast({ title: 'Checking for edges...' });
+  const monitorResult = await supabase.functions.invoke('polymarket-monitor', {});
+  
+  await fetchSignals();
+  
+  toast({
+    title: 'Scan Complete',
+    description: `Found ${monitorResult.data?.edges_found || 0} opportunities from ${syncResult.data?.total_markets || 0} markets.`,
+  });
+}, []);
 ```
 
-#### Sport Key Mapping
-| Event Pattern | API Sport Key |
-|--------------|---------------|
-| "vs." + NHL teams | `icehockey_nhl` |
-| "vs." + NBA teams | `basketball_nba` |
-| Tennis names | `tennis_*` |
-| Soccer leagues | `soccer_epl`, etc. |
+**File: `supabase/functions/polymarket-sync-24h/index.ts`**
+
+Ensure newly synced markets are set to watching:
+```typescript
+// In the upsert section, add:
+monitoring_status: 'watching', // Auto-watch all markets in 24h window
+```
+
+**File: `supabase/functions/polymarket-monitor/index.ts`**
+
+The monitor already works correctly (Polymarket-first), just needs to be called after sync.
 
 ---
 
-### Implementation Order
+### What This Fixes
 
-1. **Fix button visibility** - Quick fix, immediate impact
-2. **Create fetch-live-scores function** - Backend infrastructure  
-3. **Integrate scores into useSignalStats** - Data layer
-4. **Update Stats UI** - Display scores with LIVE badge
+| Before | After |
+|--------|-------|
+| Finds 2 bookmaker edges, no Polymarket match → hidden | Starts from Polymarket, only shows tradeable edges |
+| Toast says "2 opportunities" but feed is empty | Toast accurately reflects tradeable edges found |
+| Manual sync required to see Polymarket markets | Full Scan auto-syncs Polymarket first |
 
 ---
 
-### API Quota Consideration
+### Implementation Steps
 
-The Odds API scores endpoint costs **1 request per sport**. To minimize usage:
-- Only query sports with active in-play bets
-- Cache results for 60 seconds
-- Batch multiple events per sport query
-
+1. **Modify `useSignals.ts`** - Update `runDetection` to call sync → monitor
+2. **Update `polymarket-sync-24h`** - Auto-set `monitoring_status = 'watching'` for new markets
+3. **Update toast messages** - Reflect the Polymarket-first flow
+4. **Optional**: Rename button from "Full Scan" to "Scan Markets" for clarity
