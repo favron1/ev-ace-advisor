@@ -7,7 +7,7 @@ import { StatsBar } from '@/components/terminal/StatsBar';
 import { FiltersBar } from '@/components/terminal/FiltersBar';
 import { ScanControlPanel } from '@/components/terminal/ScanControlPanel';
 import { AutomationPanel } from '@/components/terminal/AutomationPanel';
-import { PolymarketCacheStats } from '@/components/terminal/PolymarketCacheStats';
+import { MarketWatchDashboard } from '@/components/terminal/MarketWatchDashboard';
 import { useSignals } from '@/hooks/useSignals';
 import { useScanConfig } from '@/hooks/useScanConfig';
 import { useWatchState } from '@/hooks/useWatchState';
@@ -260,8 +260,8 @@ export default function Terminal() {
               cooldownCountdown={cooldownCountdown}
             />
             
-            {/* Polymarket Cache Stats - Source of Truth */}
-            <PolymarketCacheStats />
+            {/* Market Watch Dashboard - Full Visibility */}
+            <MarketWatchDashboard />
           </div>
         </div>
       </main>
