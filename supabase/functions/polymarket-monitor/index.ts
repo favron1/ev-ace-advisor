@@ -426,10 +426,16 @@ async function detectSharpMovement(
 }
 
 // Determine signal tier based on movement + edge
+// High-edge (10%+) signals get promoted to at least "strong" tier for SMS eligibility
 function calculateSignalTier(
   movementTriggered: boolean,
   netEdge: number
 ): 'elite' | 'strong' | 'static' {
+  // High edge alone (10%+) qualifies as at least strong - ensures SMS gets sent
+  if (netEdge >= 0.10) {
+    return movementTriggered ? 'elite' : 'strong';
+  }
+  
   if (!movementTriggered) return 'static';
   if (netEdge >= 0.05) return 'elite';
   if (netEdge >= 0.03) return 'strong';
@@ -560,9 +566,9 @@ async function sendSmsAlert(
   betSide: 'YES' | 'NO',
   movementDirection: 'shortening' | 'drifting' | null
 ): Promise<boolean> {
-  // Only send SMS for ELITE and STRONG signals
+  // Only send SMS for ELITE and STRONG signals (note: high-edge statics are now promoted to strong)
   if (signalTier !== 'elite' && signalTier !== 'strong') {
-    console.log(`[POLY-MONITOR] Skipping SMS for ${signalTier} tier signal`);
+    console.log(`[POLY-MONITOR] Skipping SMS: tier=${signalTier}, edge=${(rawEdge * 100).toFixed(1)}% (need elite/strong or 10%+ raw edge)`);
     return false;
   }
   
@@ -1379,8 +1385,10 @@ Deno.serve(async (req) => {
               console.log(`[POLY-MONITOR] Created new ${signalTier} ${betSide} signal for ${event.event_name}`);
             }
 
-            // Only send SMS for NEW ELITE/STRONG signals (not updates)
-            if (!signalError && signal && !existingSignal && (signalTier === 'elite' || signalTier === 'strong')) {
+            // Send SMS for NEW ELITE/STRONG signals OR high-edge (10%+) signals
+            const shouldSendSms = signalTier === 'elite' || signalTier === 'strong' || rawEdge >= 0.10;
+            if (!signalError && signal && !existingSignal && shouldSendSms) {
+              console.log(`[POLY-MONITOR] SMS eligible: tier=${signalTier}, rawEdge=${(rawEdge * 100).toFixed(1)}%`);
               const alertSent = await sendSmsAlert(
                 supabase, event, livePolyPrice, bookmakerFairProb,
                 rawEdge, netEdge, liveVolume, stakeAmount, marketType, teamName,
