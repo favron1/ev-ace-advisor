@@ -11,20 +11,13 @@ const CLOB_API_BASE = 'https://clob.polymarket.com';
 // Odds API for bookmaker data
 const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
 
-// Sport to API endpoint mapping with market types
+// Sport to API endpoint mapping - FOCUSED ON 4 LEAGUES ONLY
+// Other sports (Tennis, UFC, Soccer, etc.) temporarily suspended
 const SPORT_ENDPOINTS: Record<string, { sport: string; markets: string }> = {
-  'NBA': { sport: 'basketball_nba', markets: 'h2h,spreads,totals' },
-  'NFL': { sport: 'americanfootball_nfl', markets: 'h2h,spreads,totals' },
-  'NHL': { sport: 'icehockey_nhl', markets: 'h2h,spreads,totals' },
-  'MLB': { sport: 'baseball_mlb', markets: 'h2h,spreads,totals' },
-  'UFC': { sport: 'mma_mixed_martial_arts', markets: 'h2h' },
-  'Tennis': { sport: 'tennis_atp_aus_open_singles', markets: 'h2h' },
-  'EPL': { sport: 'soccer_epl', markets: 'h2h,spreads,totals' },
-  'UCL': { sport: 'soccer_uefa_champs_league', markets: 'h2h' },
-  'LaLiga': { sport: 'soccer_spain_la_liga', markets: 'h2h' },
-  'SerieA': { sport: 'soccer_italy_serie_a', markets: 'h2h' },
-  'Bundesliga': { sport: 'soccer_germany_bundesliga', markets: 'h2h' },
-  'Boxing': { sport: 'boxing_boxing', markets: 'h2h' },
+  'NHL': { sport: 'icehockey_nhl', markets: 'h2h' },
+  'NBA': { sport: 'basketball_nba', markets: 'h2h' },
+  'NCAA': { sport: 'basketball_ncaab', markets: 'h2h' },
+  'NFL': { sport: 'americanfootball_nfl', markets: 'h2h' },
 };
 
 // Sharp books for weighting
