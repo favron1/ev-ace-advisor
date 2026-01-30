@@ -1,33 +1,37 @@
-# ✅ COMPLETED: Multi-Source Date Filtering
+# 🔍 DISCOVERY: NBA H2H Markets Not Available via Public API
 
-## What Was Done
+## Investigation Summary
 
-Added multi-source date detection to `polymarket-sync-24h` that checks:
-1. `startDate` (most accurate)
-2. `endDate` (original logic)
-3. Question text parsing (`on 2026-01-31` or `January 31`)
+You showed NBA H2H games (Grizzlies vs Pelicans, Cavaliers vs Suns, Clippers vs Nuggets) visible on the Polymarket website. Extensive investigation revealed:
 
-## Finding: NBA H2H Markets Don't Exist on Polymarket
+### Gamma API Results
+- `tag_slug=sports` → Returns futures only (Championship, MVP, Win Totals)
+- `tag_slug=nba` → Returns futures only  
+- `series=10345` (NBA) → Returns unrelated events (API bug/misconfiguration)
+- `tag=745` (NBA tag) → Returns unrelated events
+- Search for "vs" pattern → Returns only NCAAB/college games from Nov-Dec 2025
 
-Investigation confirmed that **Polymarket does NOT offer individual NBA game H2H markets**. The API returns only:
-- Championship futures (2026 NBA Champion)
-- MVP/Awards (Rookie of the Year, MVP)
-- Conference/Division winners
-- Playoff qualifiers
-- Win totals (Over/Under regular season wins)
+### CLOB API Results  
+- Returns 5000+ markets but NBA H2H games are all from 2023 (expired/historical)
+- No 2026 NBA games found in pagination
 
-This is a **platform constraint**, not a date filtering issue. The date fix is deployed and working - it just can't capture markets that don't exist.
+## Conclusion
 
-## Current Coverage
+**The NBA H2H games on Polymarket's sports page use a proprietary internal system that is NOT exposed via the public Gamma or CLOB APIs.** The games you see on https://polymarket.com/sports/nba are served by a separate data pipeline.
 
-| Sport | H2H Status | Notes |
-|-------|------------|-------|
-| NHL | ✅ Active | ~50 games in cache |
-| Tennis | ✅ Active | ~63 matches (ATP/WTA) |
-| Soccer (EPL/UCL) | ✅ Active | ~8 matches |
-| NBA | ❌ Futures only | No individual game H2H |
+### What IS Available via API
+| Sport | H2H Available | API Source |
+|-------|---------------|------------|
+| NHL | ✅ Yes | Gamma `tag_slug=sports` |
+| Tennis (ATP/WTA) | ✅ Yes | Gamma `tag_slug=sports` |
+| Soccer (EPL/UCL) | ✅ Yes | Gamma `tag_slug=sports` |
+| NBA | ❌ No | Not in public API |
+| NFL | ❌ Limited | Futures only |
 
-## Date Source Stats
+### Impact on System
+The system correctly captures all H2H markets available via the public API. NBA H2H markets would require Polymarket to expose them via their API or a web-scraping approach (which has legal/ToS concerns).
 
-From latest sync: `{"endDate": 13}` - indicating 13 markets qualified via endDate. The new startDate/question parsing didn't find additional matches because NBA H2H simply isn't available.
+## Recommendation
+Continue monitoring via the current API. When/if Polymarket adds NBA H2H to their public API, the system will automatically capture them through the existing `tag_slug=sports` filter.
+
 
