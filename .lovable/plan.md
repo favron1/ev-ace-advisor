@@ -1,147 +1,181 @@
 
 
-# Analysis: Edge Detection & SMS Issues
+# Why Only NHL Signals Are Being Found
 
-## Problem 1: Why Only Hockey Signals?
+## Investigation Summary
 
-**Root Cause Analysis:**
+I analyzed the database, edge function logs, and code to understand why signals are predominantly appearing for NHL while other leagues show minimal activity.
 
-Looking at the data and logs, I found:
+## Root Cause Analysis
 
-1. **Limited Polymarket Cache**: The system loaded **52 watched markets**, but only:
-   - 81 NHL markets (most in cache)
-   - 12 NBA markets
-   - 8 NCAA markets  
-   - 2 NFL markets
+### 1. Most NBA Games on Polymarket Have No Actual Volume
 
-2. **Volume Filter Blocking NBA**: Many NBA markets have **volume = 0** in the cache:
-   ```
-   Toronto Raptors vs Orlando Magic: volume = 0
-   Sacramento Kings vs Boston Celtics: volume = 0
-   Memphis Grizzlies vs New Orleans Pelicans: volume = 0
-   ```
-   
-   The API-sourced markets require `volume >= 5000` to be processed (line 816), so these are being loaded but likely failing edge checks.
+The data reveals a critical difference:
 
-3. **Matching Issues**: The logs show mismatches where the system incorrectly pairs events:
-   ```
-   INVALID MATCH: "Columbus Blue Jackets" not found in event "St. Louis Blues vs Nashville Predators"
-   INVALID MATCH: "New Orleans Pelicans" not found in event "Portland Trail Blazers vs New York Knicks"
-   ```
-   
-   The AI matching is returning wrong bookmaker games for Polymarket events.
+| Sport | Source | Markets | With Volume | Notes |
+|-------|--------|---------|-------------|-------|
+| NHL | API | 51 | 49 (96%) | Strong volume from Gamma API |
+| NHL | Firecrawl | 32 | 0 | Firecrawl can't get volume |
+| NBA | Firecrawl | 10 | 1 | Only Pistons vs Warriors has $32k volume |
+| NCAA | Firecrawl | 14 | 0 | All zero volume |
 
-4. **Only 18/52 Matched**: Out of 52 polled markets, only 18 found matching bookmaker data, and only 1 had a significant edge (the Blackhawks game).
+**Root Issue**: NBA individual game markets on Polymarket have **zero trading volume** except one game. The platform shows prices but virtually no one is trading them - this is a limitation of Polymarket's NBA coverage, not our system.
+
+### 2. Firecrawl-Scraped Markets Lack Volume/Liquidity Data
+
+Firecrawl scrapes prices from Polymarket's sports pages but **cannot obtain volume or liquidity data**. The scraper parses HTML markdown like "DET47¢ GSW54¢" to get prices, but volume requires API access.
+
+```text
+NBA Markets from Firecrawl:
+- Detroit Pistons vs Warriors: $32k volume (inherited from somewhere)
+- Sacramento Kings vs Celtics: $0 volume  
+- Lakers vs Wizards: $0 volume
+- All other NBA: $0 volume
+
+NHL Markets from Gamma API:
+- Blue Jackets vs Blackhawks: $43k volume
+- Kings vs Flyers: $37k volume  
+- Avalanche vs Red Wings: $3.5k volume
+(Most have real volume)
+```
+
+### 3. NBA Games ARE Being Monitored - Just No Edges Found
+
+The logs confirm NBA games are being processed:
+
+```text
+[POLY-MONITOR] Loaded 9 NBA games
+[POLY-MONITOR] Edge calc for Detroit Pistons vs Golden State Warriors: 
+  YES_edge=0.2%, NO_edge=-0.2% -> YES 0.2%
+```
+
+The Pistons game found a match but only had a **0.2% edge** - far below the 5% threshold needed for a signal. The system is working correctly, there's just no significant mispricing on NBA markets.
+
+### 4. AI Matching Errors for ~50% of Markets
+
+The logs show critical matching failures:
+
+```text
+INVALID MATCH: "New Orleans Pelicans" not found in event "Portland Trail Blazers vs New York Knicks" - DROPPING
+INVALID MATCH: "Columbus Blue Jackets" not found in event "St. Louis Blues vs Nashville Predators" - DROPPING
+INVALID MATCH: "Kent State Golden Flashes" not found in event "Kentucky Wildcats vs Arkansas Razorbacks" - DROPPING
+```
+
+The AI is returning **wrong games** when matching Polymarket events to bookmaker data. Out of 52 monitored markets, only 18 successfully matched (35% success rate).
+
+### 5. NCAA Markets Are Being Scraped But Get Wrong Matches
+
+NCAA markets from Firecrawl show abbreviations like "VTECH", "MST", "HIOST" which the AI can't resolve:
+
+```text
+INVALID MATCH: "Virginia Tech Hokies" not in "Duke Blue Devils vs VTECH" - DROPPING
+INVALID MATCH: "Michigan St Spartans" not in "Michigan Wolverines vs MST" - DROPPING
+```
 
 ---
 
-## Problem 2: Why No SMS For The Blackhawks Signal?
+## Why NHL Works Better
 
-**Root Cause: Signal Tier = "static" (not "elite" or "strong")**
+1. **Gamma API Coverage**: NHL has 51 active markets with real volume from the Gamma API (vs Firecrawl)
+2. **Team Name Format**: NHL uses consistent "Nickname vs Nickname" format (Flyers vs Bruins) that matches our local nickname expansion
+3. **Real Trading Activity**: NHL games have actual volume ($500-$44k per market)
+4. **Better Odds Spread**: NHL often shows larger edges between Polymarket and bookmakers
 
-The current signal shows:
-- `signal_tier: "static"`
-- `movement_confirmed: false`
+---
 
-SMS alerts are **ONLY** sent for `elite` or `strong` tier signals (lines 563-567):
+## Technical Fixes to Improve Multi-Sport Coverage
+
+### Fix 1: Enhance Firecrawl Markets with CLOB API Volume Lookup
+
+**Problem**: Firecrawl markets have no volume because scraping can't get it.
+
+**Solution**: After scraping, query the CLOB API to get actual volume for each scraped market.
 
 ```typescript
-if (signalTier !== 'elite' && signalTier !== 'strong') {
-  console.log(`[POLY-MONITOR] Skipping SMS for ${signalTier} tier signal`);
-  return false;
+// In polymarket-sync-24h, after Firecrawl upsert:
+for (const { game, sportCode } of firecrawlGames) {
+  // Look up real market on CLOB by team names
+  const clobUrl = `https://clob.polymarket.com/markets?tag=sports`;
+  // Match by team names and update volume/liquidity
 }
 ```
 
-The tier calculation logic (lines 429-437):
+### Fix 2: Improve AI Matching Prompt to Return EXACT Match
+
+**Problem**: AI returns semantically related but wrong games.
+
+**Solution**: Update the AI prompt to require exact team name presence in result:
 
 ```typescript
-function calculateSignalTier(movementTriggered: boolean, netEdge: number) {
-  if (!movementTriggered) return 'static';  // <-- This is why!
-  if (netEdge >= 0.05) return 'elite';
-  if (netEdge >= 0.03) return 'strong';
-  return 'static';
+const prompt = `Find the EXACT ${sport} game matching "${eventName}".
+CRITICAL: Your response MUST contain both teams from the query.
+If no exact match exists, respond with "NO_MATCH".
+Format: {"home": "Full Team Name", "away": "Full Team Name"}`;
+```
+
+### Fix 3: Add Direct Odds API Lookup as Fallback
+
+**Problem**: AI matching is slow (8s timeout) and often wrong.
+
+**Solution**: Add direct fuzzy matching against Odds API data before AI:
+
+```typescript
+// Pre-fetch all NBA games from Odds API
+const oddsApiGames = await fetchOddsApi('basketball_nba', 'h2h');
+
+// For each Polymarket market, find best fuzzy match
+const match = findBestMatch(polymarketTeams, oddsApiGames, {
+  minSimilarity: 0.8,
+  requireBothTeams: true  
+});
+```
+
+### Fix 4: Expand NCAA Team Map
+
+**Problem**: NCAA abbreviations like "VTECH", "MST" aren't in the team map.
+
+**Solution**: Expand the NCAA team map in `sports-config.ts`:
+
+```typescript
+cbb: {
+  teamMap: {
+    // Add common abbreviations
+    'vtech': 'Virginia Tech Hokies',
+    'mst': 'Michigan State Spartans',  
+    'hiost': 'Ohio State Buckeyes', // HIOST typo pattern
+    // ... more mappings
+  }
 }
 ```
 
-**The Problem**: Even with a 15.2% edge, without **movement confirmation** (2+ sharp books moving in the same direction within 30 minutes), the signal is classified as `static` and SMS is never sent.
+---
+
+## Implementation Priority
+
+| Priority | Fix | Impact | Effort |
+|----------|-----|--------|--------|
+| 1 | Improve AI matching prompt (require exact match) | High - reduces false matches | Low |
+| 2 | Expand NCAA team map | Medium - catches more NCAAB | Low |
+| 3 | Add CLOB volume lookup for Firecrawl markets | High - enables proper filtering | Medium |
+| 4 | Add direct Odds API fuzzy matching | High - faster, more reliable | Medium |
 
 ---
 
-## Summary of Issues
+## Important Context: Polymarket NBA Coverage Is Limited
 
-| Issue | Root Cause | Impact |
-|-------|-----------|--------|
-| Only hockey signals | Most NBA/NCAA/NFL markets have zero volume or fail matching | Only NHL markets pass all filters |
-| Matching failures | AI returns wrong bookmaker games for abbreviations | 34/52 markets fail to match |
-| No SMS alert | Signal tier = "static" because no movement confirmation | User never notified |
+The investigation confirms a known constraint from the project documentation:
 
----
+> "A significant constraint is that Polymarket frequently lacks individual NBA game head-to-head (H2H) matchups, often only offering championship futures or player props."
 
-## Proposed Fixes
-
-### Fix 1: Allow SMS for High-Edge Static Signals
-
-**Rationale**: A 15.2% edge is significant regardless of movement. Send SMS for static signals with edge >= 10%.
-
-**Change**: Update SMS condition (around line 1383):
-
-```typescript
-// Before:
-if (!signalError && signal && !existingSignal && (signalTier === 'elite' || signalTier === 'strong')) {
-
-// After:
-const shouldSendSms = signalTier === 'elite' || signalTier === 'strong' || rawEdge >= 0.10;
-if (!signalError && signal && !existingSignal && shouldSendSms) {
-```
-
-### Fix 2: Improve Signal Tier for High-Edge Static Signals
-
-**Alternative Approach**: Consider high-edge static signals as "strong" for SMS purposes.
-
-**Change**: Update `calculateSignalTier` function:
-
-```typescript
-function calculateSignalTier(movementTriggered: boolean, netEdge: number): 'elite' | 'strong' | 'static' {
-  // High edge alone qualifies as strong (for SMS)
-  if (netEdge >= 0.10) return movementTriggered ? 'elite' : 'strong';
-  
-  if (!movementTriggered) return 'static';
-  if (netEdge >= 0.05) return 'elite';
-  if (netEdge >= 0.03) return 'strong';
-  return 'static';
-}
-```
-
-This means:
-- 10%+ edge = at least "strong" (gets SMS)
-- 10%+ edge + movement = "elite"
-- Under 10% requires movement to get SMS
-
-### Fix 3: Improve Matching Accuracy
-
-The AI matching is returning incorrect games. Add stricter validation in `findBookmakerMatch` to verify the matched game contains BOTH teams from the Polymarket event before proceeding.
+The cache shows 101 "basketball_nba" markets but nearly all are **championship futures** (e.g., "2026 NBA Champion - Will Memphis Grizzlies"), not individual game H2H markets. Only 10 actual NBA game markets exist, and 9 of those have zero volume.
 
 ---
 
-## Technical Details
-
-### Files to Modify
+## Files to Modify
 
 | File | Changes |
 |------|---------|
-| `supabase/functions/polymarket-monitor/index.ts` | Update signal tier logic, SMS triggering conditions |
-
-### Implementation Steps
-
-1. Update `calculateSignalTier` to promote high-edge (10%+) static signals to "strong"
-2. Alternatively, update SMS trigger condition to include high-edge static signals
-3. Add logging for why signals are classified as static
-4. Redeploy and test with a manual scan
-
-### Expected Outcome
-
-After these fixes:
-- The 15.2% Blackhawks edge would trigger an SMS alert
-- High-edge opportunities won't be missed due to lack of movement confirmation
-- User will receive notifications for significant edges regardless of movement status
+| `supabase/functions/polymarket-monitor/index.ts` | Improve AI prompt, add validation |
+| `supabase/functions/_shared/sports-config.ts` | Expand NCAA team map |
+| `supabase/functions/polymarket-sync-24h/index.ts` | Add CLOB volume lookup for Firecrawl |
 
