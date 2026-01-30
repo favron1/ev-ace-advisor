@@ -35,3 +35,6 @@ verify_jwt = false
 
 [functions.settle-bets]
 verify_jwt = false
+
+[functions.fetch-live-scores]
+verify_jwt = false
