@@ -105,6 +105,15 @@ function detectMarketType(question: string): string {
   // Default to h2h for "vs", "beat", "win" patterns
   return 'h2h';
 }
+// NON_TRADEABLE_KEYWORDS - explicit blocklist for markets without bookmaker API coverage
+const NON_TRADEABLE_KEYWORDS = [
+  /championship/i, /champion/i, /mvp/i, /dpoy/i, /opoy/i,
+  /award/i, /trophy/i, /coach of the year/i,
+  /olympic/i, /gold medal/i, /world series winner/i,
+  /super bowl winner/i, /winner.*202[6-9]/i,
+  /coach.*year/i, /rookie.*year/i, /division.*winner/i,
+  /conference.*winner/i, /finals.*winner/i
+];
 
 // Extract numeric threshold from question (e.g., "over 220.5" -> 220.5)
 function extractThreshold(question: string): number | null {
@@ -373,10 +382,22 @@ Deno.serve(async (req) => {
     let upserted = 0;
     let monitored = 0;
 
+    let skippedNonTradeable = 0;
+    
     for (const { event, market, endDate, detectedSport, marketType } of qualifying) {
       const conditionId = market.conditionId || market.id || event.id;
       const question = market.question || event.question || '';
       const title = event.title || '';
+      
+      // Skip non-tradeable markets (Olympics, MVP, Championship futures, etc.)
+      const combinedText = `${title} ${question}`;
+      const isNonTradeable = NON_TRADEABLE_KEYWORDS.some(p => p.test(combinedText));
+      
+      if (isNonTradeable) {
+        console.log(`[SKIP] Non-tradeable: ${question.substring(0, 60)}`);
+        skippedNonTradeable++;
+        continue;
+      }
       
       const extractedEntity = extractEntity(question, title);
 
@@ -543,7 +564,7 @@ Deno.serve(async (req) => {
       .eq('status', 'active');
 
     const duration = Date.now() - startTime;
-    console.log(`[POLY-SYNC-24H] Complete: ${upserted} cached, ${monitored} monitored, ${expiredCount} expired in ${duration}ms`);
+    console.log(`[POLY-SYNC-24H] Complete: ${upserted} cached, ${monitored} monitored, ${expiredCount} expired, ${skippedNonTradeable} non-tradeable skipped in ${duration}ms`);
 
     return new Response(
       JSON.stringify({
@@ -553,6 +574,7 @@ Deno.serve(async (req) => {
         upserted_to_cache: upserted,
         now_monitored: monitored,
         expired: expiredCount,
+        skipped_non_tradeable: skippedNonTradeable,
         duration_ms: duration,
         filter_stats: {
           no_end_date: statsNoEndDate,
