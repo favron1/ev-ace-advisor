@@ -422,97 +422,147 @@ export function SignalCard({
             
             <h3 className="font-medium text-sm truncate mb-1">{signal.event_name}</h3>
             
-            {/* Clear bet recommendation with directional labeling */}
-            <div className="flex items-center gap-2 mb-2">
-              {isMissingBetSide ? (
-                <Badge 
-                  className="bg-orange-500/20 text-orange-500 hover:bg-orange-500/30 font-semibold"
-                >
-                  <AlertCircle className="h-3 w-3 mr-1" />
-                  BET SIDE UNKNOWN
-                </Badge>
-              ) : betTarget ? (
+            {/* Clear bet recommendation - SIMPLIFIED for Polymarket mechanics */}
+            {/* On Polymarket H2H: "Team A vs Team B" → YES = Team A wins, NO = Team B wins */}
+            {/* So we need to translate BUY NO into "Bet on OTHER team to win" */}
+            {(() => {
+              // Parse teams from event name: "Blue Jackets vs. Blackhawks" 
+              const vsMatch = signal.event_name.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
+              const homeTeam = vsMatch?.[1]?.trim(); // Blue Jackets (YES side)
+              const awayTeam = vsMatch?.[2]?.trim(); // Blackhawks (NO side)
+              
+              // Determine which team to bet on based on side
+              // BUY YES = bet on home team, BUY NO = bet on away team
+              const teamToBetOn = signal.side === 'YES' ? homeTeam : awayTeam;
+              const isAwayTeamBet = signal.side === 'NO';
+              
+              // For fair probability display: if NO side, we need to flip the fair prob
+              // because bookmakerProbFair is for the YES side (home team)
+              const displayFairProb = isAwayTeamBet 
+                ? (1 - bookmakerProbFair) * 100 
+                : bookmakerProbFair * 100;
+              
+              return (
                 <>
-                  {/* Directional badge: BUY YES (green) or BUY NO (blue) */}
-                  <Badge 
-                    className={cn(
-                      "font-semibold",
-                      signal.side === 'YES' 
-                        ? "bg-green-500/20 text-green-400 hover:bg-green-500/30" 
-                        : "bg-blue-500/20 text-blue-400 hover:bg-blue-500/30"
+                  <div className="flex items-center gap-2 mb-2">
+                    {isMissingBetSide ? (
+                      <Badge 
+                        className="bg-orange-500/20 text-orange-500 hover:bg-orange-500/30 font-semibold"
+                      >
+                        <AlertCircle className="h-3 w-3 mr-1" />
+                        BET SIDE UNKNOWN
+                      </Badge>
+                    ) : teamToBetOn ? (
+                      <>
+                        {/* Clear action: BET [Team] TO WIN - always green since you're buying shares */}
+                        <Badge 
+                          className="bg-green-500/20 text-green-400 hover:bg-green-500/30 font-semibold"
+                        >
+                          <Target className="h-3 w-3 mr-1" />
+                          BET: {teamToBetOn} TO WIN
+                        </Badge>
+                        {/* Small technical indicator for which Polymarket token */}
+                        <Badge 
+                          variant="outline"
+                          className="text-xs text-muted-foreground"
+                        >
+                          {signal.side === 'YES' ? 'YES shares' : 'NO shares'}
+                        </Badge>
+                      </>
+                    ) : betTarget ? (
+                      <Badge 
+                        className="bg-green-500/20 text-green-400 hover:bg-green-500/30 font-semibold"
+                      >
+                        <Target className="h-3 w-3 mr-1" />
+                        BET: {betTarget}
+                      </Badge>
+                    ) : (
+                      <Badge 
+                        className="bg-muted text-muted-foreground font-semibold"
+                      >
+                        <Activity className="h-3 w-3 mr-1" />
+                        Signal Only
+                      </Badge>
                     )}
-                  >
-                    <Target className="h-3 w-3 mr-1" />
-                    {signal.side === 'YES' ? 'BUY YES' : 'BUY NO'}: {betTarget}
-                  </Badge>
+                  </div>
+                  
+                  {isMissingBetSide ? (
+                    <p className="text-xs text-orange-400">
+                      ⚠️ Could not determine bet side. Check Polymarket question directly.
+                    </p>
+                  ) : teamToBetOn ? (
+                    <p className="text-xs text-muted-foreground">
+                      Sharp books value <span className="font-medium text-foreground">{teamToBetOn}</span> at {displayFairProb.toFixed(1)}% to win
+                      {signalFactors?.confirming_books && (
+                        <span className="ml-1">• {signalFactors.confirming_books} books</span>
+                      )}
+                    </p>
+                  ) : betTarget ? (
+                    <p className="text-xs text-muted-foreground">
+                      Back <span className="font-medium text-foreground">{betTarget}</span> • {(bookmakerProbFair * 100).toFixed(1)}% fair prob
+                      {signalFactors?.confirming_books && (
+                        <span className="ml-1">• {signalFactors.confirming_books} books</span>
+                      )}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      Sharp movement detected • {(bookmakerProbFair * 100).toFixed(1)}% fair prob
+                    </p>
+                  )}
                 </>
-              ) : (
-                <Badge 
-                  className="bg-muted text-muted-foreground font-semibold"
-                >
-                  <Activity className="h-3 w-3 mr-1" />
-                  Signal Only
-                </Badge>
-              )}
-            </div>
-            
-            {isMissingBetSide ? (
-              <p className="text-xs text-orange-400">
-                ⚠️ Could not determine bet side. Check Polymarket question directly.
-              </p>
-            ) : betTarget ? (
-              <p className="text-xs text-muted-foreground">
-                {signal.side === 'YES' ? (
-                  <>Back <span className="font-medium text-foreground">{betTarget}</span> to win</>
-                ) : (
-                  <>Fade <span className="font-medium text-foreground">{betTarget}</span> (buy NO)</>
-                )}
-                <span className="ml-1">• {(bookmakerProbFair * 100).toFixed(1)}% fair prob</span>
-                {signalFactors?.confirming_books && (
-                  <span className="ml-1">• {signalFactors.confirming_books} books</span>
-                )}
-              </p>
-            ) : (
-              <p className="text-xs text-muted-foreground">
-                Sharp movement detected • {(bookmakerProbFair * 100).toFixed(1)}% fair prob
-              </p>
-            )}
+              );
+            })()}
             
             {/* True arbitrage - show execution decision with cost breakdown */}
-            {isTrueArbitrage && signal.execution && (
-              <div className="mt-3">
-                {/* Odds comparison row - decimal odds format */}
-                <div className="grid grid-cols-3 gap-2 mb-3 p-3 bg-muted/30 rounded-lg border border-border">
-                  <div className="text-center">
-                    <div className="text-2xl font-bold text-primary">
-                      {toDecimalOdds(polyYesPrice)}
+            {isTrueArbitrage && signal.execution && (() => {
+              // For NO-side bets, we need to show the NO price and flipped fair prob
+              const isNoBet = signal.side === 'NO';
+              const displayPolyPrice = isNoBet ? (1 - polyYesPrice) : polyYesPrice;
+              const displayFairProb = isNoBet ? (1 - bookmakerProbFair) : bookmakerProbFair;
+              
+              // Parse teams for clearer labels
+              const vsMatch = signal.event_name.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
+              const teamName = isNoBet ? vsMatch?.[2]?.trim() : vsMatch?.[1]?.trim();
+              
+              // Calculate edge correctly for the bet side
+              const edgePerDollar = displayPolyPrice && displayFairProb 
+                ? ((1/displayPolyPrice) - (1/displayFairProb)).toFixed(2)
+                : 'N/A';
+              
+              return (
+                <div className="mt-3">
+                  {/* Odds comparison row - decimal odds format */}
+                  <div className="grid grid-cols-3 gap-2 mb-3 p-3 bg-muted/30 rounded-lg border border-border">
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-primary">
+                        {toDecimalOdds(displayPolyPrice)}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        ({(displayPolyPrice * 100).toFixed(0)}¢ share)
+                      </div>
+                      <div className="text-xs font-medium text-muted-foreground mt-1">POLYMARKET</div>
                     </div>
-                    <div className="text-xs text-muted-foreground">
-                      ({(polyYesPrice * 100).toFixed(0)}¢ share)
+                    <div className="text-center flex flex-col justify-center">
+                      <div className="text-lg text-muted-foreground font-medium">vs</div>
                     </div>
-                    <div className="text-xs font-medium text-muted-foreground mt-1">POLYMARKET</div>
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-foreground">
+                        {toDecimalOdds(displayFairProb)}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        ({(displayFairProb * 100).toFixed(0)}% fair)
+                      </div>
+                      <div className="text-xs font-medium text-muted-foreground mt-1">SHARP BOOKS</div>
+                    </div>
                   </div>
-                  <div className="text-center flex flex-col justify-center">
-                    <div className="text-lg text-muted-foreground font-medium">vs</div>
+                  
+                  {/* Edge callout - now shows positive edge for the bet */}
+                  <div className="text-center mb-3 p-2 bg-green-500/10 rounded border border-green-500/30">
+                    <span className="text-sm text-muted-foreground">Edge per $1 bet: </span>
+                    <span className="text-lg font-bold text-green-500">
+                      +${edgePerDollar}
+                    </span>
                   </div>
-                  <div className="text-center">
-                    <div className="text-2xl font-bold text-foreground">
-                      {toDecimalOdds(bookmakerProbFair)}
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      ({(bookmakerProbFair * 100).toFixed(0)}% fair)
-                    </div>
-                    <div className="text-xs font-medium text-muted-foreground mt-1">SHARP BOOKS</div>
-                  </div>
-                </div>
-                
-                {/* Edge callout */}
-                <div className="text-center mb-3 p-2 bg-green-500/10 rounded border border-green-500/30">
-                  <span className="text-sm text-muted-foreground">Edge per $1 bet: </span>
-                  <span className="text-lg font-bold text-green-500">
-                    +${polyYesPrice && bookmakerProbFair ? ((1/polyYesPrice) - (1/bookmakerProbFair)).toFixed(2) : 'N/A'}
-                  </span>
-                </div>
                 
                 {/* Quality indicators row */}
                 <div className="flex justify-between text-xs mb-3 px-1">
@@ -564,7 +614,8 @@ export function SignalCard({
                   </div>
                 )}
               </div>
-            )}
+              );
+            })()}
             
             {/* Signal-only notice (no Polymarket match) */}
             {!isTrueArbitrage && (
