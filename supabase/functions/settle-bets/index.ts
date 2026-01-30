@@ -247,17 +247,23 @@ Deno.serve(async (req) => {
         // If recommended_outcome matches the YES team (first team in question), and yesWon = true → win
         // If recommended_outcome matches the NO team (second team in question), and yesWon = false → win
         
-        const question = resolution.question || bet.event_name;
+        // Use the bet's event_name since it's reliably in "Home vs Away" format
+        const eventName = bet.event_name;
         const recOutcome = bet.recommended_outcome?.toLowerCase() || '';
         
-        // Parse teams from question "Team A vs. Team B" or "Team A vs Team B"
-        const vsMatch = question.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
+        // Parse teams from event_name "Team A vs. Team B" or "Team A vs Team B"
+        const vsMatch = eventName.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
         const homeTeam = vsMatch?.[1]?.toLowerCase().trim() || '';
         const awayTeam = vsMatch?.[2]?.toLowerCase().trim() || '';
         
-        // Check if recommended outcome matches home team (YES side) or away team (NO side)
-        const betOnHomeTeam = homeTeam && recOutcome.includes(homeTeam.split(' ').pop() || '');
-        const betOnAwayTeam = awayTeam && recOutcome.includes(awayTeam.split(' ').pop() || '');
+        // More robust team matching - check if recommended outcome contains team name
+        // Handle cases like "Tampa Bay Lightning" vs "Lightning" or "Jets"
+        const homeTeamWords = homeTeam.split(' ');
+        const awayTeamWords = awayTeam.split(' ');
+        
+        // Check if recOutcome includes any of the team words (especially the last word which is usually the nickname)
+        const betOnHomeTeam = homeTeamWords.some(word => word.length > 2 && recOutcome.includes(word));
+        const betOnAwayTeam = awayTeamWords.some(word => word.length > 2 && recOutcome.includes(word));
         
         console.log(`[SETTLE-BETS] ${bet.event_name}: recOutcome="${recOutcome}", home="${homeTeam}", away="${awayTeam}", yesWon=${resolution.yesWon}, betOnHome=${betOnHomeTeam}, betOnAway=${betOnAwayTeam}`);
         
