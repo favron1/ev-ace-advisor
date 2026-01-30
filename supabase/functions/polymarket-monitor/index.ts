@@ -1018,8 +1018,8 @@ Deno.serve(async (req) => {
               continue;
             }
 
-            let signal = null;
-            let signalError = null;
+            let signal: any = null;
+            let signalError: any = null;
 
             const signalData = {
               polymarket_price: livePolyPrice,
