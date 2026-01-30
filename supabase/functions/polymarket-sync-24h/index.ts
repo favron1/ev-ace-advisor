@@ -1,4 +1,15 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { 
+  SPORTS_CONFIG, 
+  SPORT_CODES, 
+  ALLOWED_SPORTS,
+  detectSportFromText,
+  type SportCode,
+} from '../_shared/sports-config.ts';
+import { 
+  scrapeAllSports, 
+  type ParsedGame,
+} from '../_shared/firecrawl-scraper.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -8,208 +19,46 @@ const corsHeaders = {
 // Gamma API for Polymarket events
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
 
-// FOCUSED SPORTS: Only process these 4 leagues
-const ALLOWED_SPORTS = ['NHL', 'NBA', 'NCAA', 'NFL'];
-
-// NBA team code to full name mapping for Firecrawl parsing
-const NBA_TEAM_MAP: Record<string, string> = {
-  'atl': 'Atlanta Hawks', 'bos': 'Boston Celtics', 'bkn': 'Brooklyn Nets',
-  'cha': 'Charlotte Hornets', 'chi': 'Chicago Bulls', 'cle': 'Cleveland Cavaliers',
-  'dal': 'Dallas Mavericks', 'den': 'Denver Nuggets', 'det': 'Detroit Pistons',
-  'gsw': 'Golden State Warriors', 'hou': 'Houston Rockets', 'ind': 'Indiana Pacers',
-  'lac': 'LA Clippers', 'lal': 'Los Angeles Lakers', 'mem': 'Memphis Grizzlies',
-  'mia': 'Miami Heat', 'mil': 'Milwaukee Bucks', 'min': 'Minnesota Timberwolves',
-  'nop': 'New Orleans Pelicans', 'nyk': 'New York Knicks', 'okc': 'Oklahoma City Thunder',
-  'orl': 'Orlando Magic', 'phi': 'Philadelphia 76ers', 'phx': 'Phoenix Suns',
-  'por': 'Portland Trail Blazers', 'sac': 'Sacramento Kings', 'sas': 'San Antonio Spurs',
-  'tor': 'Toronto Raptors', 'uta': 'Utah Jazz', 'was': 'Washington Wizards',
-};
-
-// NFL team code to full name mapping
-const NFL_TEAM_MAP: Record<string, string> = {
-  'ari': 'Arizona Cardinals', 'atl': 'Atlanta Falcons', 'bal': 'Baltimore Ravens',
-  'buf': 'Buffalo Bills', 'car': 'Carolina Panthers', 'chi': 'Chicago Bears',
-  'cin': 'Cincinnati Bengals', 'cle': 'Cleveland Browns', 'dal': 'Dallas Cowboys',
-  'den': 'Denver Broncos', 'det': 'Detroit Lions', 'gb': 'Green Bay Packers',
-  'hou': 'Houston Texans', 'ind': 'Indianapolis Colts', 'jax': 'Jacksonville Jaguars',
-  'kc': 'Kansas City Chiefs', 'lac': 'LA Chargers', 'lar': 'LA Rams',
-  'lv': 'Las Vegas Raiders', 'mia': 'Miami Dolphins', 'min': 'Minnesota Vikings',
-  'ne': 'New England Patriots', 'no': 'New Orleans Saints', 'nyg': 'New York Giants',
-  'nyj': 'New York Jets', 'phi': 'Philadelphia Eagles', 'pit': 'Pittsburgh Steelers',
-  'sf': 'San Francisco 49ers', 'sea': 'Seattle Seahawks', 'tb': 'Tampa Bay Buccaneers',
-  'ten': 'Tennessee Titans', 'was': 'Washington Commanders',
-};
-
-// NHL team code to full name mapping (Polymarket uses 3-letter abbreviations)
-const NHL_TEAM_MAP: Record<string, string> = {
-  'ana': 'Anaheim Ducks', 'ari': 'Arizona Coyotes', 'bos': 'Boston Bruins',
-  'buf': 'Buffalo Sabres', 'cgy': 'Calgary Flames', 'car': 'Carolina Hurricanes',
-  'chi': 'Chicago Blackhawks', 'col': 'Colorado Avalanche', 'cbj': 'Columbus Blue Jackets',
-  'dal': 'Dallas Stars', 'det': 'Detroit Red Wings', 'edm': 'Edmonton Oilers',
-  'fla': 'Florida Panthers', 'la': 'Los Angeles Kings', 'lak': 'Los Angeles Kings',
-  'min': 'Minnesota Wild', 'mtl': 'Montreal Canadiens', 'nsh': 'Nashville Predators',
-  'njd': 'New Jersey Devils', 'nyi': 'New York Islanders', 'nyr': 'New York Rangers',
-  'ott': 'Ottawa Senators', 'phi': 'Philadelphia Flyers', 'pit': 'Pittsburgh Penguins',
-  'sjs': 'San Jose Sharks', 'sea': 'Seattle Kraken', 'stl': 'St. Louis Blues',
-  'tb': 'Tampa Bay Lightning', 'tbl': 'Tampa Bay Lightning', 'tor': 'Toronto Maple Leafs',
-  'van': 'Vancouver Canucks', 'vgk': 'Vegas Golden Knights', 'wsh': 'Washington Capitals',
-  'wpg': 'Winnipeg Jets', 'uta': 'Utah Hockey Club',
-};
-
-interface ParsedGame {
-  team1Code: string;
-  team1Name: string;
-  team1Price: number;
-  team2Code: string;
-  team2Name: string;
-  team2Price: number;
-}
-
-// Parse games from Firecrawl markdown response
-function parseGamesFromMarkdown(markdown: string, teamMap: Record<string, string>): ParsedGame[] {
-  const games: ParsedGame[] = [];
-  const pricePattern = /([a-z]{2,3})(\d+)¢/gi;
-  const matches = [...markdown.matchAll(pricePattern)];
-  
-  for (let i = 0; i < matches.length - 1; i += 2) {
-    const team1Match = matches[i];
-    const team2Match = matches[i + 1];
-    
-    if (team1Match && team2Match) {
-      const team1Code = team1Match[1].toLowerCase();
-      const team2Code = team2Match[1].toLowerCase();
-      const team1Price = parseInt(team1Match[2], 10) / 100;
-      const team2Price = parseInt(team2Match[2], 10) / 100;
-      
-      const team1Name = teamMap[team1Code] || team1Code.toUpperCase();
-      const team2Name = teamMap[team2Code] || team2Code.toUpperCase();
-      
-      // Only add if we recognize at least one team
-      if (teamMap[team1Code] || teamMap[team2Code]) {
-        games.push({ team1Code, team1Name, team1Price, team2Code, team2Name, team2Price });
-      }
-    }
-  }
-  
-  return games;
-}
-
-// Scrape Polymarket sport page via Firecrawl
-async function scrapePolymarketGames(
-  sport: 'nba' | 'cbb' | 'nfl' | 'nhl',
-  firecrawlApiKey: string
-): Promise<ParsedGame[]> {
-  const sportUrls: Record<string, string> = {
-    nba: 'https://polymarket.com/sports/nba/games',
-    cbb: 'https://polymarket.com/sports/cbb/games',
-    nfl: 'https://polymarket.com/sports/nfl/games',
-    nhl: 'https://polymarket.com/sports/nhl/games',
-  };
-  const sportUrl = sportUrls[sport];
-  
-  const teamMaps: Record<string, Record<string, string>> = {
-    nba: NBA_TEAM_MAP,
-    cbb: NBA_TEAM_MAP, // CBB uses same format as NBA
-    nfl: NFL_TEAM_MAP,
-    nhl: NHL_TEAM_MAP,
-  };
-  const teamMap = teamMaps[sport];
-  
-  try {
-    console.log(`[FIRECRAWL] Scraping ${sport.toUpperCase()} from ${sportUrl}`);
-    
-    const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${firecrawlApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        url: sportUrl,
-        formats: ['markdown'],
-        onlyMainContent: true,
-        waitFor: 3000,
-      }),
-    });
-    
-    if (!response.ok) {
-      console.error(`[FIRECRAWL] ${sport} scrape failed: ${response.status}`);
-      return [];
-    }
-    
-    const data = await response.json();
-    const markdown = data.data?.markdown || data.markdown || '';
-    
-    if (!markdown) {
-      console.log(`[FIRECRAWL] No markdown content for ${sport}`);
-      return [];
-    }
-    
-    const games = parseGamesFromMarkdown(markdown, teamMap);
-    console.log(`[FIRECRAWL] Parsed ${games.length} ${sport.toUpperCase()} games`);
-    return games;
-  } catch (error) {
-    console.error(`[FIRECRAWL] ${sport} error:`, error);
-    return [];
-  }
-}
+// Sport detection now uses shared config - this wrapper maintains backward compat
 
 // Detect sport from title/question using keywords
-// Returns sport key or null if not sports-related
+// Uses shared config for pattern matching
 function detectSport(title: string, question: string): string | null {
-  const combined = `${title} ${question}`.toLowerCase();
+  const combined = `${title} ${question}`;
   
-  const sportPatterns: Array<{ patterns: RegExp[]; sport: string }> = [
-    // NHL - check FIRST to catch "Blackhawks" before NBA's "hawks" pattern
-    { patterns: [/\bnhl\b/, /blackhawks|maple leafs|canadiens|habs|bruins|rangers|islanders|devils|flyers|penguins|capitals|caps|hurricanes|canes|panthers|lightning|bolts|red wings|senators|sens|sabres|blue jackets|blues|wild|avalanche|avs|stars|predators|preds|jets|flames|oilers|canucks|kraken|golden knights|knights|coyotes|sharks|ducks|kings/i], sport: 'NHL' },
-    
-    // NBA - team names and league (use "atlanta hawks" to avoid matching "blackhawks")
-    { patterns: [/\bnba\b/, /lakers|celtics|warriors|heat|bulls|knicks|nets|bucks|76ers|sixers|suns|nuggets|clippers|mavericks|rockets|grizzlies|timberwolves|pelicans|spurs|thunder|jazz|blazers|trail blazers|hornets|atlanta hawks|wizards|magic|pistons|cavaliers|raptors|pacers/i], sport: 'NBA' },
-    
-    // NFL - team names and league (use "new york jets" context to avoid NHL jets confusion)
-    { patterns: [/\bnfl\b/, /chiefs|eagles|49ers|niners|cowboys|bills|ravens|bengals|dolphins|lions|packers|patriots|broncos|chargers|raiders|steelers|browns|texans|colts|jaguars|titans|commanders|giants|saints|panthers|falcons|buccaneers|bucs|seahawks|rams|cardinals|bears|vikings/i], sport: 'NFL' },
-    
-    // UFC/MMA - fighters and terms
-    { patterns: [/\bufc\b/, /\bmma\b/, /adesanya|jones|pereira|volkanovski|makhachev|islam|strickland|chimaev|covington|diaz|mcgregor|usman|chandler|poirier|holloway|o'?malley|yan|sterling|pantoja|moreno|figueiredo|dvalishvili|merab|shevchenko|grasso|zhang weili|namajunas|nunes/i], sport: 'UFC' },
-    
-    // Tennis - players and tournaments
-    { patterns: [/\batp\b/, /\bwta\b/, /djokovic|sinner|alcaraz|medvedev|zverev|rublev|tsitsipas|ruud|fritz|de minaur|sabalenka|swiatek|gauff|rybakina|pegula|keys|zheng|ostapenko|kvitova|badosa|krejcikova|vondrousova|haddad|paolini/i, /australian open|french open|roland garros|wimbledon|us open|grand slam|indian wells|miami open|madrid open|italian open|cincinnati/i], sport: 'Tennis' },
-    
-    // EPL - team names
-    { patterns: [/premier league|\bepl\b|arsenal|chelsea|liverpool|man city|manchester city|man united|manchester united|tottenham|spurs|newcastle|brighton|aston villa|west ham|bournemouth|fulham|crystal palace|brentford|wolves|wolverhampton|nottingham forest|everton|luton|burnley|sheffield|ipswich|leicester/i], sport: 'EPL' },
-    
-    // MLB - team names and league
-    { patterns: [/\bmlb\b|yankees|red sox|dodgers|mets|phillies|braves|cubs|cardinals|padres|giants|mariners|astros|rangers|twins|guardians|orioles|rays|blue jays|brewers|diamondbacks|d-?backs|rockies|marlins|nationals|nats|pirates|reds|royals|tigers|white sox|angels|athletics|a's/i], sport: 'MLB' },
-    
+  // Use shared detection first
+  const detected = detectSportFromText(combined);
+  if (detected) return detected;
+  
+  // Fallback for additional sports not in main config (Tennis, UFC, etc.)
+  const fallbackPatterns: Array<{ patterns: RegExp[]; sport: string }> = [
+    // UFC/MMA
+    { patterns: [/\bufc\b/, /\bmma\b/, /adesanya|jones|pereira|volkanovski|makhachev/i], sport: 'UFC' },
+    // Tennis
+    { patterns: [/\batp\b/, /\bwta\b/, /djokovic|sinner|alcaraz|medvedev|zverev/i, /australian open|french open|wimbledon|us open/i], sport: 'Tennis' },
+    // EPL
+    { patterns: [/premier league|\bepl\b|arsenal|chelsea|liverpool|man city|manchester city|man united/i], sport: 'EPL' },
+    // MLB
+    { patterns: [/\bmlb\b|yankees|red sox|dodgers|mets|phillies|braves/i], sport: 'MLB' },
     // Champions League
-    { patterns: [/champions league|\bucl\b|real madrid|barcelona|barca|bayern|juventus|juve|inter milan|ac milan|psg|paris saint|dortmund|benfica|porto|ajax|celtic/i], sport: 'UCL' },
-    
+    { patterns: [/champions league|\bucl\b|real madrid|barcelona|bayern|juventus/i], sport: 'UCL' },
     // La Liga
-    { patterns: [/la liga|laliga|atletico madrid|sevilla|villarreal|real sociedad|athletic bilbao|real betis|valencia cf|girona/i], sport: 'LaLiga' },
-    
+    { patterns: [/la liga|laliga|atletico madrid|sevilla|villarreal/i], sport: 'LaLiga' },
     // Serie A
-    { patterns: [/serie a|napoli|roma|lazio|fiorentina|atalanta|bologna|torino|monza|genoa|udinese|sassuolo|lecce|empoli|cagliari|verona|frosinone|salernitana/i], sport: 'SerieA' },
-    
+    { patterns: [/serie a|napoli|roma|lazio|inter milan|ac milan/i], sport: 'SerieA' },
     // Bundesliga
-    { patterns: [/bundesliga|leverkusen|leipzig|frankfurt|wolfsburg|freiburg|hoffenheim|mainz|augsburg|werder bremen|union berlin|koln|cologne|gladbach|bochum|heidenheim|darmstadt/i], sport: 'Bundesliga' },
-    
+    { patterns: [/bundesliga|leverkusen|leipzig|dortmund|frankfurt/i], sport: 'Bundesliga' },
     // Boxing
-    { patterns: [/\bbox(?:ing)?\b|fury|usyk|joshua|canelo|crawford|spence|davis|haney|stevenson|lomachenko|bivol|beterbiev|tank davis|shakur/i], sport: 'Boxing' },
-    
-    // College sports
-    { patterns: [/\bncaa\b|march madness|college football|college basketball|cfb playoff|final four/i], sport: 'NCAA' },
-    
+    { patterns: [/\bbox(?:ing)?\b|fury|usyk|joshua|canelo|crawford/i], sport: 'Boxing' },
     // Golf
-    { patterns: [/\bpga\b|\bgolf\b|masters|us open golf|british open|open championship|ryder cup|scheffler|mcilroy|rahm|koepka|spieth|thomas|hovland|morikawa|cantlay|woods/i], sport: 'Golf' },
-    
-    // F1/Racing
-    { patterns: [/formula 1|\bf1\b|verstappen|hamilton|leclerc|norris|sainz|perez|alonso|russell|grand prix|monaco gp|silverstone/i], sport: 'F1' },
-    
-    // Generic sports terms that indicate it's a sports event
-    { patterns: [/\bvs\.?\b.*(?:win|beat|defeat)/, /will\s+(?:the\s+)?[A-Z][a-z]+\s+(?:beat|win|defeat)/, /who\s+will\s+win.*(?:game|match|fight|bout)/i], sport: 'Sports' },
+    { patterns: [/\bpga\b|\bgolf\b|masters|us open golf|british open/i], sport: 'Golf' },
+    // F1
+    { patterns: [/formula 1|\bf1\b|verstappen|hamilton|leclerc|norris/i], sport: 'F1' },
+    // Generic sports
+    { patterns: [/\bvs\.?\b.*(?:win|beat|defeat)/, /who\s+will\s+win.*(?:game|match|fight|bout)/i], sport: 'Sports' },
   ];
   
-  for (const { patterns, sport } of sportPatterns) {
+  for (const { patterns, sport } of fallbackPatterns) {
     if (patterns.some(p => p.test(combined))) {
       return sport;
     }
@@ -420,33 +269,25 @@ Deno.serve(async (req) => {
 
     console.log(`[POLY-SYNC-24H] Fetched ${allEvents.length} sports-tagged events from Gamma API`);
 
-    // ============= FIRECRAWL SCRAPING FOR NBA/CBB/NFL =============
-    // The Gamma API doesn't expose NBA/NCAA H2H games, so we scrape them directly
+    // ============= FIRECRAWL SCRAPING FOR ALL CONFIGURED SPORTS =============
+    // Uses unified sports config - automatically scrapes all configured sports
     const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY');
-    let scrapedNba: ParsedGame[] = [];
-    let scrapedCbb: ParsedGame[] = [];
-    let scrapedNfl: ParsedGame[] = [];
-    let scrapedNhl: ParsedGame[] = [];
+    let firecrawlGames: Array<{ game: ParsedGame; sport: string; sportCode: SportCode }> = [];
     
     if (firecrawlApiKey) {
-      console.log(`[POLY-SYNC-24H] Firecrawl key found - scraping NBA/CBB/NFL/NHL pages...`);
+      console.log(`[POLY-SYNC-24H] Firecrawl key found - scraping ${SPORT_CODES.length} configured sports...`);
       
-      // Scrape all four in parallel
-      const [nbaGames, cbbGames, nflGames, nhlGames] = await Promise.all([
-        scrapePolymarketGames('nba', firecrawlApiKey),
-        scrapePolymarketGames('cbb', firecrawlApiKey),
-        scrapePolymarketGames('nfl', firecrawlApiKey),
-        scrapePolymarketGames('nhl', firecrawlApiKey),
-      ]);
+      // Scrape ALL configured sports dynamically in parallel
+      firecrawlGames = await scrapeAllSports(firecrawlApiKey);
       
-      scrapedNba = nbaGames;
-      scrapedCbb = cbbGames;
-      scrapedNfl = nflGames;
-      scrapedNhl = nhlGames;
-      
-      console.log(`[POLY-SYNC-24H] Firecrawl totals: NBA=${scrapedNba.length}, CBB=${scrapedCbb.length}, NFL=${scrapedNfl.length}, NHL=${scrapedNhl.length}`);
+      // Log counts by sport
+      const countsBySport: Record<string, number> = {};
+      for (const code of SPORT_CODES) {
+        countsBySport[SPORTS_CONFIG[code].name] = firecrawlGames.filter(g => g.sportCode === code).length;
+      }
+      console.log(`[POLY-SYNC-24H] Firecrawl totals by sport: ${JSON.stringify(countsBySport)}`);
     } else {
-      console.log(`[POLY-SYNC-24H] No FIRECRAWL_API_KEY - skipping basketball/football scrape`);
+      console.log(`[POLY-SYNC-24H] No FIRECRAWL_API_KEY - skipping sports page scraping`);
     }
 
     // Log first 10 event titles for debugging
@@ -607,15 +448,7 @@ Deno.serve(async (req) => {
       }
     }
 
-    // ============= ADD FIRECRAWL SCRAPED GAMES TO QUALIFYING =============
-    // These games don't come from Gamma API, so we add them as synthetic entries
-    const firecrawlGames: Array<{ game: ParsedGame; sport: string; sportCode: string }> = [
-      ...scrapedNba.map(g => ({ game: g, sport: 'NBA', sportCode: 'nba' })),
-      ...scrapedCbb.map(g => ({ game: g, sport: 'NCAA', sportCode: 'cbb' })),
-      ...scrapedNfl.map(g => ({ game: g, sport: 'NFL', sportCode: 'nfl' })),
-      ...scrapedNhl.map(g => ({ game: g, sport: 'NHL', sportCode: 'nhl' })),
-    ];
-    
+    // firecrawlGames is already populated from scrapeAllSports above
     console.log(`[POLY-SYNC-24H] Adding ${firecrawlGames.length} Firecrawl-scraped games to qualifying`);
 
     console.log(`[POLY-SYNC-24H] Filtering stats:`);

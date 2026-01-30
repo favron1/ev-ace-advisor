@@ -10,10 +10,14 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { 
+  buildOutrightEndpoints,
+} from '../_shared/sports-config.ts';
+import { 
   scrapePolymarketGames, 
   findMatchingGame, 
   getSportCodeFromLeague,
-  type ParsedGame 
+  type ParsedGame,
+  type SportCode,
 } from '../_shared/firecrawl-scraper.ts';
 
 const corsHeaders = {
@@ -50,13 +54,8 @@ const TEAM_ALIASES: Record<string, string[]> = {
   'vegas golden knights': ['golden knights', 'vegas', 'vgk'],
 };
 
-// Sport to outright endpoint mapping
-const SPORT_ENDPOINTS: Record<string, string> = {
-  'basketball_nba': 'basketball_nba_championship_winner',
-  'americanfootball_nfl': 'americanfootball_nfl_super_bowl_winner',
-  'icehockey_nhl': 'icehockey_nhl_championship_winner',
-  'soccer_epl': 'soccer_epl_championship_winner',
-};
+// Build outright endpoints dynamically from unified config
+const SPORT_ENDPOINTS = buildOutrightEndpoints();
 
 interface WatchState {
   id: string;

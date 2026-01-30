@@ -1,4 +1,8 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { 
+  buildSportEndpoints,
+  detectSportFromText,
+} from '../_shared/sports-config.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -11,14 +15,8 @@ const CLOB_API_BASE = 'https://clob.polymarket.com';
 // Odds API for bookmaker data
 const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
 
-// Sport to API endpoint mapping - FOCUSED ON 4 LEAGUES ONLY
-// Other sports (Tennis, UFC, Soccer, etc.) temporarily suspended
-const SPORT_ENDPOINTS: Record<string, { sport: string; markets: string }> = {
-  'NHL': { sport: 'icehockey_nhl', markets: 'h2h' },
-  'NBA': { sport: 'basketball_nba', markets: 'h2h' },
-  'NCAA': { sport: 'basketball_ncaab', markets: 'h2h' },
-  'NFL': { sport: 'americanfootball_nfl', markets: 'h2h' },
-};
+// Build sport endpoints dynamically from unified config
+const SPORT_ENDPOINTS = buildSportEndpoints();
 
 // Sharp books for weighting
 const SHARP_BOOKS = ['pinnacle', 'betfair', 'betfair_ex_eu'];
@@ -32,49 +30,28 @@ function normalizeName(name: string): string {
     .trim();
 }
 
-// Detect sport from text (for fallback when extracted_league is null)
-function detectSportFromText(title: string, question: string): string | null {
-  const combined = `${title} ${question}`.toLowerCase();
+// Detect sport from text - uses shared config
+function detectSportFromTextLocal(title: string, question: string): string | null {
+  const combined = `${title} ${question}`;
   
-  const sportPatterns: Array<{ patterns: RegExp[]; sport: string }> = [
-    // NHL - check FIRST to catch "Blackhawks" before NBA's "hawks" pattern
-    { patterns: [/\bnhl\b/, /blackhawks|maple leafs|canadiens|habs|bruins|rangers|islanders|devils|flyers|penguins|capitals|caps|hurricanes|canes|panthers|lightning|bolts|red wings|senators|sens|sabres|blue jackets|blues|wild|avalanche|avs|stars|predators|preds|jets|flames|oilers|canucks|kraken|golden knights|knights|coyotes|sharks|ducks|kings/i], sport: 'NHL' },
-    
-    // NBA - team names and league
-    { patterns: [/\bnba\b/, /lakers|celtics|warriors|heat|bulls|knicks|nets|bucks|76ers|sixers|suns|nuggets|clippers|mavericks|rockets|grizzlies|timberwolves|pelicans|spurs|thunder|jazz|blazers|trail blazers|hornets|atlanta hawks|wizards|magic|pistons|cavaliers|raptors|pacers/i], sport: 'NBA' },
-    
-    // NFL - team names and league
-    { patterns: [/\bnfl\b/, /chiefs|eagles|49ers|niners|cowboys|bills|ravens|bengals|dolphins|lions|packers|patriots|broncos|chargers|raiders|steelers|browns|texans|colts|jaguars|titans|commanders|giants|saints|panthers|falcons|buccaneers|bucs|seahawks|rams|cardinals|bears|vikings/i], sport: 'NFL' },
-    
-    // UFC/MMA
+  // Use shared detection first
+  const detected = detectSportFromText(combined);
+  if (detected) return detected;
+  
+  // Fallback for additional sports not in main config
+  const fallbackPatterns: Array<{ patterns: RegExp[]; sport: string }> = [
     { patterns: [/\bufc\b/, /\bmma\b/], sport: 'UFC' },
-    
-    // Tennis
     { patterns: [/\batp\b/, /\bwta\b/, /djokovic|sinner|alcaraz|medvedev|zverev|sabalenka|swiatek|gauff/i], sport: 'Tennis' },
-    
-    // EPL
     { patterns: [/premier league|\bepl\b|arsenal|chelsea|liverpool|man city|manchester city|man united|manchester united|tottenham|spurs/i], sport: 'EPL' },
-    
-    // MLB
     { patterns: [/\bmlb\b|yankees|red sox|dodgers|mets|phillies|braves|cubs|cardinals/i], sport: 'MLB' },
-    
-    // Champions League
     { patterns: [/champions league|\bucl\b|real madrid|barcelona|bayern|juventus/i], sport: 'UCL' },
-    
-    // La Liga
     { patterns: [/la liga|laliga|atletico madrid|sevilla|villarreal/i], sport: 'LaLiga' },
-    
-    // Serie A
     { patterns: [/serie a|napoli|roma|lazio|inter milan|ac milan/i], sport: 'SerieA' },
-    
-    // Bundesliga
     { patterns: [/bundesliga|leverkusen|leipzig|dortmund|frankfurt/i], sport: 'Bundesliga' },
-    
-    // Boxing
     { patterns: [/\bbox(?:ing)?\b|fury|usyk|joshua|canelo|crawford/i], sport: 'Boxing' },
   ];
   
-  for (const { patterns, sport } of sportPatterns) {
+  for (const { patterns, sport } of fallbackPatterns) {
     if (patterns.some(p => p.test(combined))) {
       return sport;
     }
@@ -696,7 +673,7 @@ Deno.serve(async (req) => {
       if (!sport || sport === 'Sports' || sport === 'Unknown') {
         const eventTitle = cache?.event_title || event.event_name || '';
         const question = cache?.question || event.polymarket_question || '';
-        sport = detectSportFromText(eventTitle, question) || 'Unknown';
+        sport = detectSportFromTextLocal(eventTitle, question) || 'Unknown';
       }
       
       if (!sportGroups.has(sport)) {
