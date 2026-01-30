@@ -26,46 +26,30 @@ const corsHeaders = {
 // Polymarket Gamma API base URL
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
 
-// Sports category keywords to filter events
+// Sports category keywords to filter events - CORE 4 SPORTS ONLY
 const SPORTS_KEYWORDS = [
-  // Basketball
-  'nba', 'basketball', 'lakers', 'celtics', 'warriors', 'bucks', 'heat', 'nuggets',
+  // Basketball (NBA + NCAA)
+  'nba', 'ncaa', 'ncaab', 'march madness', 'basketball', 'lakers', 'celtics', 'warriors', 'bucks', 'heat', 'nuggets',
   'suns', '76ers', 'knicks', 'clippers', 'thunder', 'timberwolves', 'mavericks',
   'cavaliers', 'grizzlies', 'rockets', 'magic', 'pacers', 'hawks', 'bulls', 'raptors',
   'hornets', 'pistons', 'spurs', 'blazers', 'jazz', 'wizards', 'nets', 'pelicans', 'kings',
   
-  // American Football
+  // American Football (NFL)
   'nfl', 'football', 'chiefs', 'eagles', 'cowboys', 'patriots', 'packers', '49ers',
   'ravens', 'bills', 'dolphins', 'jets', 'bengals', 'steelers', 'browns', 'colts',
   'titans', 'jaguars', 'texans', 'broncos', 'raiders', 'chargers', 'commanders',
   'giants', 'lions', 'vikings', 'bears', 'saints', 'falcons', 'buccaneers', 'panthers',
   'rams', 'seahawks', 'cardinals', 'super bowl',
   
-  // Hockey
+  // Hockey (NHL)
   'nhl', 'hockey', 'bruins', 'maple leafs', 'canadiens', 'lightning', 'avalanche',
   'oilers', 'panthers', 'rangers', 'devils', 'islanders', 'penguins', 'capitals',
   'hurricanes', 'flyers', 'blue jackets', 'red wings', 'predators', 'blues',
   'wild', 'blackhawks', 'jets', 'stars', 'flames', 'canucks', 'kraken', 'golden knights',
   'coyotes', 'ducks', 'sharks', 'kings', 'stanley cup',
   
-  // MMA/UFC
-  'ufc', 'mma', 'bellator', 'makhachev', 'jones', 'adesanya', 'pereira', 'volkanovski',
-  'edwards', 'chimaev', 'poirier', 'gaethje', 'holloway', 'oliveira',
-  
-  // Tennis
-  'tennis', 'australian open', 'french open', 'wimbledon', 'us open', 'atp', 'wta',
-  'djokovic', 'sinner', 'alcaraz', 'medvedev', 'zverev', 'rune', 'tsitsipas',
-  'sabalenka', 'swiatek', 'gauff', 'pegula', 'rybakina',
-  
-  // Soccer/Football
-  'premier league', 'epl', 'la liga', 'bundesliga', 'serie a', 'ligue 1',
-  'champions league', 'ucl', 'manchester united', 'man city', 'liverpool',
-  'chelsea', 'arsenal', 'tottenham', 'real madrid', 'barcelona', 'bayern',
-  'world cup', 'euro 20',
-  
-  // Generic sports terms
-  'game', 'match', 'points', 'score', 'goals', 'assists', 'rebounds', 'touchdowns',
-  'yards', 'passing', 'rushing', 'receiving', 'strikeouts', 'home runs',
+  // Generic sports terms for H2H matching
+  'game', 'match', 'points', 'score', 'rebounds', 'touchdowns', 'yards',
 ];
 
 // Team alias mapping for normalization
@@ -135,16 +119,6 @@ const TEAM_ALIASES: Record<string, string[]> = {
   'utah hockey club': ['utah', 'utah hc'],
   'ottawa senators': ['senators', 'sens', 'ottawa'],
   'columbus blue jackets': ['blue jackets', 'cbj', 'columbus'],
-  
-  // Tennis players
-  'jannik sinner': ['sinner', 'jannik'],
-  'carlos alcaraz': ['alcaraz', 'carlos'],
-  'novak djokovic': ['djokovic', 'novak', 'nole'],
-  'aryna sabalenka': ['sabalenka', 'aryna'],
-  'iga swiatek': ['swiatek', 'iga'],
-  'coco gauff': ['gauff', 'coco'],
-  'jessica pegula': ['pegula', 'jessica'],
-  'elena rybakina': ['rybakina', 'elena'],
 };
 
 interface PolymarketEvent {
@@ -263,25 +237,24 @@ function extractTeams(title: string, question: string): ExtractedTeams {
   };
 }
 
-// Detect sport category from event title/question
+// Detect sport category from event title/question - CORE 4 SPORTS ONLY
 function detectSportCategory(title: string, question: string): string | null {
   const text = `${title} ${question}`.toLowerCase();
   
   if (text.includes('nba') || text.includes('basketball')) return 'basketball_nba';
+  if (text.includes('ncaa') || text.includes('ncaab') || text.includes('march madness')) return 'basketball_ncaab';
   if (text.includes('nfl') || text.includes('super bowl')) return 'americanfootball_nfl';
   if (text.includes('nhl') || text.includes('stanley cup') || text.includes('hockey')) return 'icehockey_nhl';
-  if (text.includes('ufc') || text.includes('mma')) return 'mma_mixed_martial_arts';
-  if (text.includes('tennis') || text.includes('atp') || text.includes('wta') ||
-      text.includes('wimbledon') || text.includes('australian open') ||
-      text.includes('french open') || text.includes('us open')) return 'tennis';
-  if (text.includes('premier league') || text.includes('epl') || text.includes('champions league') ||
-      text.includes('la liga') || text.includes('bundesliga') || text.includes('serie a')) return 'soccer';
   
-  // Check for known team names
+  // Check for known team names from aliases
   for (const [canonical] of Object.entries(TEAM_ALIASES)) {
     if (text.includes(canonical)) {
       if (canonical.includes('celtics') || canonical.includes('lakers') || canonical.includes('warriors')) {
         return 'basketball_nba';
+      }
+      // NHL teams
+      if (canonical.includes('bruins') || canonical.includes('lightning') || canonical.includes('avalanche')) {
+        return 'icehockey_nhl';
       }
     }
   }
