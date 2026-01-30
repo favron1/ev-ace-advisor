@@ -1,71 +1,77 @@
-# Unified Sport Configuration System - COMPLETE ✅
 
-## Summary
-Created a single source of truth (`sports-config.ts`) for all sport configurations. Adding a new sport now requires editing ONE file.
+# Cleanup: Remove Unused Polymarket Components
 
-## Architecture
+## What We're Removing
 
-```
-supabase/functions/_shared/
-├── sports-config.ts    # Central configuration (team maps, URLs, patterns)
-└── firecrawl-scraper.ts  # Uses config for dynamic scraping
-```
+### 1. PolymarketAvailability Component
+**Location:** `src/components/terminal/PolymarketAvailability.tsx`
 
-## How to Add a New Sport
+**Why remove:**
+- Makes direct Gamma API calls instead of using your cache
+- Only fetches NBA markets (not NHL, NFL, CBB)
+- Currently broken ("Failed to fetch" error in your screenshot)
+- Completely redundant - your `polymarket_h2h_cache` already has this data
 
-Edit `supabase/functions/_shared/sports-config.ts`:
+### 2. MarketsSidebar + polymarket_markets Table
+**Location:** `src/components/terminal/MarketsSidebar.tsx`
 
-```typescript
-// In SPORTS_CONFIG, add:
-mlb: {
-  name: 'MLB',
-  polymarketUrl: 'https://polymarket.com/sports/mlb/games',
-  oddsApiSport: 'baseball_mlb',
-  oddsApiMarkets: 'h2h',
-  oddsApiOutright: 'baseball_mlb_world_series_winner',
-  teamMap: {
-    'nyy': 'New York Yankees',
-    'lad': 'Los Angeles Dodgers',
-    // ...
-  },
-  detectionPatterns: [/\bmlb\b/i, /yankees|dodgers|red sox/i],
-}
-```
+**Why remove:**
+- Shows political markets (Chelsea Clinton, Andrew Yang, LeBron James presidential bids)
+- Shows long-dated championship futures (Grizzlies winning 2026 NBA Finals)
+- These markets have NO bookmaker coverage - you can't detect edges
+- They're not within the 24-hour window your system monitors
+- The `polymarket_markets` table is completely separate from your working `polymarket_h2h_cache`
 
-That's it! All functions automatically pick up the new sport:
-- `polymarket-sync-24h` scrapes it
-- `polymarket-monitor` monitors it
-- `active-mode-poll` tracks it
+### 3. usePolymarket Hook
+**Location:** `src/hooks/usePolymarket.ts`
 
-## Files Updated
+**Why remove:**
+- Only used by MarketsSidebar to fetch from the wrong table
+- Not connected to your edge detection system
 
-| File | Change |
+---
+
+## Files to Delete
+
+| File | Reason |
 |------|--------|
-| `_shared/sports-config.ts` | NEW - Central configuration |
-| `_shared/firecrawl-scraper.ts` | Now imports from config |
-| `polymarket-sync-24h/index.ts` | Uses `scrapeAllSports()` dynamically |
-| `polymarket-monitor/index.ts` | Uses `buildSportEndpoints()` |
-| `active-mode-poll/index.ts` | Uses `buildOutrightEndpoints()` |
+| `src/components/terminal/PolymarketAvailability.tsx` | Broken, redundant, NBA-only |
+| `src/components/terminal/MarketsSidebar.tsx` | Shows useless political/futures markets |
+| `src/hooks/usePolymarket.ts` | Only supports the sidebar |
+| `src/lib/api/polymarket-cache.ts` | Duplicate of usePolymarketCache |
 
-## Current Sports Configured
+## Files to Update
 
-- **NHL** - Hockey
-- **NBA** - Basketball  
-- **NFL** - Football
-- **NCAA/CBB** - College Basketball
+### Terminal.tsx
+Remove imports and usage of:
+- `PolymarketAvailability`
+- `MarketsSidebar`
+- `usePolymarket`
 
-## Key Exports from sports-config.ts
+---
 
-```typescript
-// Constants
-SPORT_CODES        // ['nhl', 'nba', 'nfl', 'cbb']
-SPORT_NAMES        // ['NHL', 'NBA', 'NFL', 'NCAA']
-ALLOWED_SPORTS     // Same as SPORT_NAMES
+## What Stays
 
-// Functions
-buildSportEndpoints()     // For polymarket-monitor
-buildOutrightEndpoints()  // For active-mode-poll
-detectSportFromText(text) // Pattern-based detection
-getTeamMap(sportCode)     // Get team abbreviation map
-getSportCodeFromLeague(name) // 'NBA' -> 'nba'
-```
+**PolymarketCacheStats** - This is your main component that:
+- Shows the `polymarket_h2h_cache` data (real H2H games)
+- Has the "Sync Cache" button
+- Shows sport breakdown (NHL, NBA, NFL, CBB)
+- Shows freshness status
+
+---
+
+## Database Cleanup (Optional)
+
+The `polymarket_markets` table contains political futures that are never used for edge detection. We can either:
+- Leave it (harmless, just takes up space)
+- Delete it later if you want to clean up
+
+---
+
+## Result
+
+After this cleanup:
+- Terminal shows only the **PolymarketCacheStats** card (your real H2H cache)
+- No more confusing political markets
+- No more "Failed to fetch" errors
+- Simpler, focused UI for your arbitrage workflow
