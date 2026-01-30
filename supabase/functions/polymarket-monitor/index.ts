@@ -947,13 +947,8 @@ Deno.serve(async (req) => {
               triggerReason = 'movement';
             }
             
-            // Calculate signal tier based on trigger type
-            let signalTier: 'elite' | 'strong' | 'static' = 'static';
-            if (triggerReason === 'both') {
-              signalTier = 'elite';
-            } else if (triggerReason === 'edge' || triggerReason === 'movement') {
-              signalTier = rawEdge >= 0.05 ? 'elite' : 'strong';
-            }
+            // Calculate signal tier - ELITE/STRONG require movement confirmation
+            const signalTier = calculateSignalTier(movementTriggered, netEdge);
             
             if (movementTriggered) {
               movementConfirmedCount++;
