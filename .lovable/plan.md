@@ -1,85 +1,126 @@
 
+# Fix: All Market Types Detection (Not Just H2H)
 
-# Fix: Remove Bookmaker-First Detection (Orphaned Signals)
+## Problem Summary
 
-## Root Cause Identified
-The system has **two conflicting detection functions**:
+The sync function correctly detects and stores ALL market types (H2H, Totals, Spreads, Player Props):
 
-| Function | Approach | Status |
-|----------|----------|--------|
-| `detect-signals` | Bookmaker-first → Creates orphaned signals | **WRONG - Still running** |
-| `polymarket-monitor` | Polymarket-first → Only tradeable signals | **CORRECT - The intended flow** |
+| Market Type | Count in DB | Issue |
+|-------------|-------------|-------|
+| H2H | 219 | Working |
+| Futures | 1,356 | Correctly skipped (long-dated) |
+| Totals | 35 | `extracted_league = null` → SKIPPED |
+| Spreads | 1 | `extracted_league = null` → SKIPPED |
+| Player Props | 12 | `extracted_league = null` → SKIPPED |
+| Props | 75 | `extracted_league = null` → SKIPPED |
 
-The 12 orphaned signals exist because `detect-signals` fetched bookmaker data for NBA/Tennis (which have no Polymarket H2H markets) and created signals with `is_true_arbitrage = false`.
+**Root Cause**: The `polymarket-monitor` filters markets by `extracted_league IN ('NBA', 'NHL', ...)`. Since Totals/Spreads/Props often have their league detection fail (returning `null`), they're silently excluded from monitoring.
 
 ---
 
 ## Technical Fix
 
-### Step 1: Clean Up Orphaned Signals
-Delete all signals that weren't matched to Polymarket (they're not tradeable):
+### Step 1: Improve League Extraction in polymarket-sync-24h
 
-```sql
-DELETE FROM signal_opportunities 
-WHERE is_true_arbitrage = false 
-  AND status = 'active';
-```
-
-### Step 2: Prevent Future Orphans
-Modify `detect-signals` to exit early and defer to `polymarket-monitor`. Add this guard at the top of the function:
+Currently, league detection runs on the market question, but for Totals/Spreads/Props, the question format is different (e.g., "Will Hawks vs. Celtics go OVER 220.5?"). The parent event title often has better context.
 
 ```typescript
-// DEPRECATED: This function uses bookmaker-first logic.
-// Use polymarket-monitor instead which follows Polymarket-first architecture.
-console.log('[DETECT-SIGNALS] DEPRECATED - Use polymarket-monitor instead');
-return new Response(
-  JSON.stringify({ 
-    deprecated: true, 
-    message: 'Use polymarket-monitor for Polymarket-first detection' 
-  }),
-  { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-);
+// CURRENT (line 287-288):
+const detectedSport = detectSport(title, question) || 
+                      detectSport(title, firstMarketQuestion) || 'Sports';
+
+// FIX: Also try detecting from the specific market.question
+const detectedSport = detectSport(title, question) || 
+                      detectSport(title, market.question) ||
+                      detectSport(title, firstMarketQuestion) || 'Sports';
 ```
 
-### Step 3: Remove Any Scheduled Runs of `detect-signals`
-Check for and remove any pg_cron jobs that call `detect-signals`:
+### Step 2: Inherit League from Parent Event
+
+For multi-market events (e.g., one NBA game has H2H + Totals + Spreads), all child markets should inherit the detected league from the parent event title:
+
+```typescript
+// Calculate sport ONCE at the event level
+const eventSport = detectSport(event.title || '', event.question || '');
+
+// For EACH market in the event, use the event-level sport
+for (const market of markets) {
+  const marketType = detectMarketType(market.question);
+  
+  // Sport comes from EVENT, not individual market
+  qualifying.push({
+    event,
+    market,
+    endDate,
+    detectedSport: eventSport || 'Sports',  // Inherited from parent
+    marketType,
+  });
+}
+```
+
+### Step 3: Update Monitor to Handle All Market Types
+
+The monitor already supports spreads/totals in the `SPORT_ENDPOINTS` mapping (line 15-28):
+
+```typescript
+const SPORT_ENDPOINTS: Record<string, { sport: string; markets: string }> = {
+  'NBA': { sport: 'basketball_nba', markets: 'h2h,spreads,totals' },  // ✅ Already there
+  'NFL': { sport: 'americanfootball_nfl', markets: 'h2h,spreads,totals' },
+  // ...
+};
+```
+
+The matching logic `findBookmakerMatch()` already handles market types (lines 458-500) - it just needs the correct `extracted_league` to work.
+
+### Step 4: Backfill Existing Markets
+
+Run a one-time update to fix markets with null extracted_league by re-detecting from event_title:
 
 ```sql
-SELECT * FROM cron.job WHERE command LIKE '%detect-signals%';
--- If found: SELECT cron.unschedule('job_name');
+-- Example: Fix NHL totals that have team names in question
+UPDATE polymarket_h2h_cache 
+SET extracted_league = 'NHL'
+WHERE extracted_league IS NULL 
+  AND market_type IN ('total', 'spread')
+  AND (question ILIKE '%bruins%' OR question ILIKE '%rangers%' OR ...);
 ```
 
 ---
 
-## How the Correct Flow Works
+## Files to Modify
 
-```text
-polymarket-sync-24h (every 30min)
-         │
-         ▼
-   polymarket_h2h_cache
-   (Only Polymarket markets
-    with teams/prices)
-         │
-         ▼
-polymarket-monitor (every 5min)
-   │
-   ├── 1. Load markets from cache (Polymarket-first)
-   ├── 2. Group by sport (NHL, EPL, etc.)
-   ├── 3. Fetch bookmaker odds ONLY for those sports
-   ├── 4. Match Polymarket → Bookmaker
-   └── 5. Create signal ONLY if match found
-         │
-         ▼
-   signal_opportunities
-   (All signals have is_true_arbitrage = true)
-```
+1. **supabase/functions/polymarket-sync-24h/index.ts**
+   - Move sport detection to event level (before market loop)
+   - Pass inherited sport to all child markets
+   - Ensure extracted_league is never null for markets with identifiable teams
+
+2. **supabase/functions/polymarket-monitor/index.ts**
+   - Remove or loosen the `extracted_league IN (...)` filter
+   - Add fallback: try to detect sport from event_title if extracted_league is null
 
 ---
 
 ## Expected Outcome
-- No more orphaned signals (NBA/Tennis without Polymarket H2H)
-- Signal feed shows only tradeable opportunities
-- `detect-signals` is deprecated and returns early
-- `polymarket-monitor` remains the sole detection path
+
+- All 35 Totals, 1 Spread, and 87 Props/Player Props become eligible for monitoring
+- Edge detection works across H2H, Totals, Spreads, and Player Props
+- Signal feed shows opportunities beyond just H2H markets
+- Same Polymarket-first architecture - just with broader market coverage
+
+---
+
+## Technical Notes
+
+### Market Type to Bookmaker API Mapping
+| Polymarket Type | Bookmaker API Key |
+|-----------------|-------------------|
+| h2h | `h2h` (moneyline) |
+| total | `totals` (over/under) |
+| spread | `spreads` (handicap) |
+| player_prop | Not supported by Odds API v4 free tier |
+
+### Edge Calculation Differences
+- **Totals**: Compare Polymarket YES price vs. bookmaker OVER/UNDER probability
+- **Spreads**: Compare Polymarket YES price vs. bookmaker spread-adjusted probability
+- **H2H**: Standard fair probability comparison
 
