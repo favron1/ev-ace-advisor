@@ -1,11 +1,8 @@
-import { useState, useCallback } from 'react';
-import { RefreshCw, Database, TrendingUp, Clock, Flame } from 'lucide-react';
+import { RefreshCw, Database, TrendingUp, Clock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { usePolymarketCache } from '@/hooks/usePolymarketCache';
-import { useToast } from '@/hooks/use-toast';
-import { supabase } from '@/integrations/supabase/client';
 import { cn } from '@/lib/utils';
 
 interface PolymarketCacheStatsProps {
@@ -14,9 +11,7 @@ interface PolymarketCacheStatsProps {
 }
 
 export function PolymarketCacheStats({ onScanTrigger, isScanning }: PolymarketCacheStatsProps) {
-  const { cache, loading, syncing, triggerSync, getCacheStats, fetchCache } = usePolymarketCache();
-  const { toast } = useToast();
-  const [scrapingNba, setScrapingNba] = useState(false);
+  const { loading, syncing, triggerSync, getCacheStats } = usePolymarketCache();
   
   const stats = getCacheStats();
   
@@ -42,46 +37,6 @@ export function PolymarketCacheStats({ onScanTrigger, isScanning }: PolymarketCa
   const isStale = stats.lastSync 
     ? (Date.now() - new Date(stats.lastSync).getTime()) > 6 * 60 * 60 * 1000 
     : true;
-
-  // Scrape NBA/NCAA prices via Firecrawl
-  const handleScrapeNba = useCallback(async () => {
-    setScrapingNba(true);
-    toast({ title: 'Scraping NBA prices...', description: 'Using Firecrawl to get live Polymarket prices.' });
-    
-    try {
-      const { data, error } = await supabase.functions.invoke('scrape-polymarket-prices', {
-        body: { sport: 'nba' }
-      });
-      
-      if (error) throw error;
-      
-      if (data.success) {
-        await fetchCache(); // Refresh cache after scrape
-        toast({
-          title: 'NBA Prices Updated',
-          description: `Found ${data.games_found} games, updated ${data.games_upserted} in cache.`,
-        });
-      } else {
-        toast({
-          title: 'Scrape Issue',
-          description: data.message || data.error || 'No games found',
-          variant: 'destructive',
-        });
-      }
-    } catch (err) {
-      console.error('NBA scrape error:', err);
-      toast({
-        title: 'Scrape Failed',
-        description: err instanceof Error ? err.message : 'Unknown error',
-        variant: 'destructive',
-      });
-    } finally {
-      setScrapingNba(false);
-    }
-  }, [fetchCache, toast]);
-
-  // Count NBA games in cache
-  const nbaCount = stats.bySport['NBA'] || stats.bySport['nba'] || 0;
 
   return (
     <Card className="border-border">
@@ -157,18 +112,7 @@ export function PolymarketCacheStats({ onScanTrigger, isScanning }: PolymarketCa
             disabled={syncing || loading}
           >
             <RefreshCw className={cn("h-3 w-3", syncing && "animate-spin")} />
-            {syncing ? 'Syncing...' : 'Sync API'}
-          </Button>
-          
-          <Button
-            size="sm"
-            variant="outline"
-            className="flex-1 gap-1 text-orange-400 border-orange-400/30 hover:bg-orange-400/10"
-            onClick={handleScrapeNba}
-            disabled={scrapingNba}
-          >
-            <Flame className={cn("h-3 w-3", scrapingNba && "animate-pulse")} />
-            {scrapingNba ? 'Scraping...' : `NBA (${nbaCount})`}
+            {syncing ? 'Syncing...' : 'Sync Cache'}
           </Button>
         </div>
         

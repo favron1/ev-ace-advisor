@@ -8,6 +8,128 @@ const corsHeaders = {
 // Gamma API for Polymarket events
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
 
+// FOCUSED SPORTS: Only process these 4 leagues
+const ALLOWED_SPORTS = ['NHL', 'NBA', 'NCAA', 'NFL'];
+
+// NBA team code to full name mapping for Firecrawl parsing
+const NBA_TEAM_MAP: Record<string, string> = {
+  'atl': 'Atlanta Hawks', 'bos': 'Boston Celtics', 'bkn': 'Brooklyn Nets',
+  'cha': 'Charlotte Hornets', 'chi': 'Chicago Bulls', 'cle': 'Cleveland Cavaliers',
+  'dal': 'Dallas Mavericks', 'den': 'Denver Nuggets', 'det': 'Detroit Pistons',
+  'gsw': 'Golden State Warriors', 'hou': 'Houston Rockets', 'ind': 'Indiana Pacers',
+  'lac': 'LA Clippers', 'lal': 'Los Angeles Lakers', 'mem': 'Memphis Grizzlies',
+  'mia': 'Miami Heat', 'mil': 'Milwaukee Bucks', 'min': 'Minnesota Timberwolves',
+  'nop': 'New Orleans Pelicans', 'nyk': 'New York Knicks', 'okc': 'Oklahoma City Thunder',
+  'orl': 'Orlando Magic', 'phi': 'Philadelphia 76ers', 'phx': 'Phoenix Suns',
+  'por': 'Portland Trail Blazers', 'sac': 'Sacramento Kings', 'sas': 'San Antonio Spurs',
+  'tor': 'Toronto Raptors', 'uta': 'Utah Jazz', 'was': 'Washington Wizards',
+};
+
+// NFL team code to full name mapping
+const NFL_TEAM_MAP: Record<string, string> = {
+  'ari': 'Arizona Cardinals', 'atl': 'Atlanta Falcons', 'bal': 'Baltimore Ravens',
+  'buf': 'Buffalo Bills', 'car': 'Carolina Panthers', 'chi': 'Chicago Bears',
+  'cin': 'Cincinnati Bengals', 'cle': 'Cleveland Browns', 'dal': 'Dallas Cowboys',
+  'den': 'Denver Broncos', 'det': 'Detroit Lions', 'gb': 'Green Bay Packers',
+  'hou': 'Houston Texans', 'ind': 'Indianapolis Colts', 'jax': 'Jacksonville Jaguars',
+  'kc': 'Kansas City Chiefs', 'lac': 'LA Chargers', 'lar': 'LA Rams',
+  'lv': 'Las Vegas Raiders', 'mia': 'Miami Dolphins', 'min': 'Minnesota Vikings',
+  'ne': 'New England Patriots', 'no': 'New Orleans Saints', 'nyg': 'New York Giants',
+  'nyj': 'New York Jets', 'phi': 'Philadelphia Eagles', 'pit': 'Pittsburgh Steelers',
+  'sf': 'San Francisco 49ers', 'sea': 'Seattle Seahawks', 'tb': 'Tampa Bay Buccaneers',
+  'ten': 'Tennessee Titans', 'was': 'Washington Commanders',
+};
+
+interface ParsedGame {
+  team1Code: string;
+  team1Name: string;
+  team1Price: number;
+  team2Code: string;
+  team2Name: string;
+  team2Price: number;
+}
+
+// Parse games from Firecrawl markdown response
+function parseGamesFromMarkdown(markdown: string, teamMap: Record<string, string>): ParsedGame[] {
+  const games: ParsedGame[] = [];
+  const pricePattern = /([a-z]{2,3})(\d+)¢/gi;
+  const matches = [...markdown.matchAll(pricePattern)];
+  
+  for (let i = 0; i < matches.length - 1; i += 2) {
+    const team1Match = matches[i];
+    const team2Match = matches[i + 1];
+    
+    if (team1Match && team2Match) {
+      const team1Code = team1Match[1].toLowerCase();
+      const team2Code = team2Match[1].toLowerCase();
+      const team1Price = parseInt(team1Match[2], 10) / 100;
+      const team2Price = parseInt(team2Match[2], 10) / 100;
+      
+      const team1Name = teamMap[team1Code] || team1Code.toUpperCase();
+      const team2Name = teamMap[team2Code] || team2Code.toUpperCase();
+      
+      // Only add if we recognize at least one team
+      if (teamMap[team1Code] || teamMap[team2Code]) {
+        games.push({ team1Code, team1Name, team1Price, team2Code, team2Name, team2Price });
+      }
+    }
+  }
+  
+  return games;
+}
+
+// Scrape Polymarket sport page via Firecrawl
+async function scrapePolymarketGames(
+  sport: 'nba' | 'cbb' | 'nfl',
+  firecrawlApiKey: string
+): Promise<ParsedGame[]> {
+  const sportUrl = sport === 'cbb' 
+    ? 'https://polymarket.com/sports/cbb/games'
+    : sport === 'nfl'
+      ? 'https://polymarket.com/sports/nfl/games'
+      : 'https://polymarket.com/sports/nba/games';
+  
+  const teamMap = sport === 'nfl' ? NFL_TEAM_MAP : NBA_TEAM_MAP;
+  
+  try {
+    console.log(`[FIRECRAWL] Scraping ${sport.toUpperCase()} from ${sportUrl}`);
+    
+    const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${firecrawlApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        url: sportUrl,
+        formats: ['markdown'],
+        onlyMainContent: true,
+        waitFor: 3000,
+      }),
+    });
+    
+    if (!response.ok) {
+      console.error(`[FIRECRAWL] ${sport} scrape failed: ${response.status}`);
+      return [];
+    }
+    
+    const data = await response.json();
+    const markdown = data.data?.markdown || data.markdown || '';
+    
+    if (!markdown) {
+      console.log(`[FIRECRAWL] No markdown content for ${sport}`);
+      return [];
+    }
+    
+    const games = parseGamesFromMarkdown(markdown, teamMap);
+    console.log(`[FIRECRAWL] Parsed ${games.length} ${sport.toUpperCase()} games`);
+    return games;
+  } catch (error) {
+    console.error(`[FIRECRAWL] ${sport} error:`, error);
+    return [];
+  }
+}
+
 // Detect sport from title/question using keywords
 // Returns sport key or null if not sports-related
 function detectSport(title: string, question: string): string | null {
@@ -272,10 +394,36 @@ Deno.serve(async (req) => {
       }
     }
 
-    console.log(`[POLY-SYNC-24H] Fetched ${allEvents.length} sports-tagged events`);
+    console.log(`[POLY-SYNC-24H] Fetched ${allEvents.length} sports-tagged events from Gamma API`);
+
+    // ============= FIRECRAWL SCRAPING FOR NBA/CBB/NFL =============
+    // The Gamma API doesn't expose NBA/NCAA H2H games, so we scrape them directly
+    const firecrawlApiKey = Deno.env.get('FIRECRAWL_API_KEY');
+    let scrapedNba: ParsedGame[] = [];
+    let scrapedCbb: ParsedGame[] = [];
+    let scrapedNfl: ParsedGame[] = [];
+    
+    if (firecrawlApiKey) {
+      console.log(`[POLY-SYNC-24H] Firecrawl key found - scraping NBA/CBB/NFL pages...`);
+      
+      // Scrape all three in parallel
+      const [nbaGames, cbbGames, nflGames] = await Promise.all([
+        scrapePolymarketGames('nba', firecrawlApiKey),
+        scrapePolymarketGames('cbb', firecrawlApiKey),
+        scrapePolymarketGames('nfl', firecrawlApiKey),
+      ]);
+      
+      scrapedNba = nbaGames;
+      scrapedCbb = cbbGames;
+      scrapedNfl = nflGames;
+      
+      console.log(`[POLY-SYNC-24H] Firecrawl totals: NBA=${scrapedNba.length}, CBB=${scrapedCbb.length}, NFL=${scrapedNfl.length}`);
+    } else {
+      console.log(`[POLY-SYNC-24H] No FIRECRAWL_API_KEY - skipping basketball/football scrape`);
+    }
 
     // Log first 10 event titles for debugging
-    console.log(`[POLY-SYNC-24H] Sample sports event titles:`);
+    console.log(`[POLY-SYNC-24H] Sample Gamma API event titles:`);
     allEvents.slice(0, 10).forEach((e, i) => {
       console.log(`  ${i + 1}. title="${e.title || 'N/A'}" endDate="${e.endDate || 'N/A'}"`);
     });
@@ -415,19 +563,32 @@ Deno.serve(async (req) => {
         statsByMarketType[marketType] = (statsByMarketType[marketType] || 0) + 1;
         
         // CRITICAL FIX: Use event-level sport for ALL markets, with fallback to market-level detection
-        // This ensures Totals/Spreads/Props inherit the league from the parent event (e.g., "Hawks vs Celtics")
-        // instead of returning null because "Over 220.5?" doesn't match any sport keywords
         const marketSport = eventLevelSport || detectSport(title, market.question || '') || 'Sports';
+        
+        // SPORT FOCUS: Only process NHL, NBA, NCAA, NFL markets
+        if (!ALLOWED_SPORTS.some(s => marketSport.toUpperCase().includes(s))) {
+          continue; // Skip non-focused sports (Tennis, UFC, Soccer, etc.)
+        }
         
         qualifying.push({
           event,
           market,
           endDate: eventDate,
-          detectedSport: marketSport, // Now inherits from event level
+          detectedSport: marketSport,
           marketType,
         });
       }
     }
+
+    // ============= ADD FIRECRAWL SCRAPED GAMES TO QUALIFYING =============
+    // These games don't come from Gamma API, so we add them as synthetic entries
+    const firecrawlGames: Array<{ game: ParsedGame; sport: string; sportCode: string }> = [
+      ...scrapedNba.map(g => ({ game: g, sport: 'NBA', sportCode: 'nba' })),
+      ...scrapedCbb.map(g => ({ game: g, sport: 'NCAA', sportCode: 'cbb' })),
+      ...scrapedNfl.map(g => ({ game: g, sport: 'NFL', sportCode: 'nfl' })),
+    ];
+    
+    console.log(`[POLY-SYNC-24H] Adding ${firecrawlGames.length} Firecrawl-scraped games to qualifying`);
 
     console.log(`[POLY-SYNC-24H] Filtering stats:`);
     console.log(`  - No end date: ${statsNoEndDate}`);
@@ -435,7 +596,8 @@ Deno.serve(async (req) => {
     console.log(`  - No markets: ${statsNoMarkets}`);
     console.log(`  - Markets by type: ${JSON.stringify(statsByMarketType)}`);
     console.log(`  - Date sources used: ${JSON.stringify(statsByDateSource)}`);
-    console.log(`  - QUALIFYING MARKETS: ${qualifying.length}`);
+    console.log(`  - QUALIFYING FROM GAMMA: ${qualifying.length}`);
+    console.log(`  - QUALIFYING FROM FIRECRAWL: ${firecrawlGames.length}`);
 
     // Log sample qualifying events by type
     if (qualifying.length > 0) {
@@ -449,7 +611,44 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Upsert qualifying events
+    // ============= UPSERT FIRECRAWL GAMES FIRST =============
+    let firecrawlUpserted = 0;
+    
+    for (const { game, sport, sportCode } of firecrawlGames) {
+      const conditionId = `firecrawl_${sportCode}_${game.team1Code}_${game.team2Code}`;
+      
+      const { error: fcError } = await supabase
+        .from('polymarket_h2h_cache')
+        .upsert({
+          condition_id: conditionId,
+          event_title: `${game.team1Name} vs ${game.team2Name}`,
+          question: `Will ${game.team1Name} beat ${game.team2Name}?`,
+          team_home: game.team1Name,
+          team_away: game.team2Name,
+          team_home_normalized: game.team1Name.toLowerCase(),
+          team_away_normalized: game.team2Name.toLowerCase(),
+          yes_price: game.team1Price,
+          no_price: game.team2Price,
+          sport_category: sport,
+          extracted_league: sport,
+          market_type: 'h2h',
+          status: 'active',
+          monitoring_status: 'watching',
+          source: 'firecrawl',
+          last_price_update: now.toISOString(),
+          last_bulk_sync: now.toISOString(),
+        }, {
+          onConflict: 'condition_id',
+        });
+      
+      if (!fcError) {
+        firecrawlUpserted++;
+      }
+    }
+    
+    console.log(`[POLY-SYNC-24H] Firecrawl games upserted: ${firecrawlUpserted}`);
+
+    // Upsert qualifying events from Gamma API
     let upserted = 0;
     let monitored = 0;
 
