@@ -1,77 +1,122 @@
 
-# Cleanup: Remove Unused Polymarket Components
+# Plan: Remove Tennis & Focus on Core 4 Sports
 
-## What We're Removing
+## Summary
+Clean up all tennis references and other unwanted sports from the system to focus exclusively on:
+- **NHL** (Hockey)
+- **NBA** (Basketball)  
+- **NCAA CBB** (College Basketball)
+- **NFL** (Football)
 
-### 1. PolymarketAvailability Component
-**Location:** `src/components/terminal/PolymarketAvailability.tsx`
+## Current State (The Problem)
 
-**Why remove:**
-- Makes direct Gamma API calls instead of using your cache
-- Only fetches NBA markets (not NHL, NFL, CBB)
-- Currently broken ("Failed to fetch" error in your screenshot)
-- Completely redundant - your `polymarket_h2h_cache` already has this data
+Tennis references exist in **6 files** across the codebase:
+1. `src/types/scan-config.ts` - 30+ tennis tournament keys in AVAILABLE_SPORTS
+2. `supabase/functions/ingest-odds/index.ts` - 40+ tennis keys in h2hSports array
+3. `supabase/functions/polymarket-sync-24h/index.ts` - Tennis fallback pattern in detectSport()
+4. `supabase/functions/polymarket-monitor/index.ts` - Tennis fallback pattern
+5. `supabase/functions/sync-polymarket-h2h/index.ts` - Tennis keywords in SPORTS_KEYWORDS
+6. `supabase/functions/fetch-live-scores/index.ts` - Tennis sport key mapping
 
-### 2. MarketsSidebar + polymarket_markets Table
-**Location:** `src/components/terminal/MarketsSidebar.tsx`
-
-**Why remove:**
-- Shows political markets (Chelsea Clinton, Andrew Yang, LeBron James presidential bids)
-- Shows long-dated championship futures (Grizzlies winning 2026 NBA Finals)
-- These markets have NO bookmaker coverage - you can't detect edges
-- They're not within the 24-hour window your system monitors
-- The `polymarket_markets` table is completely separate from your working `polymarket_h2h_cache`
-
-### 3. usePolymarket Hook
-**Location:** `src/hooks/usePolymarket.ts`
-
-**Why remove:**
-- Only used by MarketsSidebar to fetch from the wrong table
-- Not connected to your edge detection system
+The shared `_shared/sports-config.ts` is **already correct** - it only has NHL, NBA, NFL, CBB. The problem is the individual functions have their own hardcoded sport lists that include tennis.
 
 ---
 
-## Files to Delete
+## Changes
 
-| File | Reason |
+### File 1: `src/types/scan-config.ts`
+**Remove** all tennis, UFC, MMA, and soccer entries from `AVAILABLE_SPORTS`.
+
+Keep only:
+```typescript
+export const AVAILABLE_SPORTS = [
+  { key: 'basketball_nba', label: 'NBA Basketball', icon: '🏀' },
+  { key: 'basketball_ncaab', label: 'NCAA Basketball', icon: '🏀' },
+  { key: 'americanfootball_nfl', label: 'NFL Football', icon: '🏈' },
+  { key: 'icehockey_nhl', label: 'NHL Hockey', icon: '🏒' },
+] as const;
+```
+
+---
+
+### File 2: `supabase/functions/ingest-odds/index.ts`
+**Remove** all tennis keys, soccer, euroleague, MMA from the `h2hSports` array.
+
+Keep only:
+```typescript
+const h2hSports = [
+  'basketball_nba',
+  'basketball_ncaab',
+  'americanfootball_nfl',
+  'icehockey_nhl',
+];
+```
+
+---
+
+### File 3: `supabase/functions/polymarket-sync-24h/index.ts`
+**Remove** Tennis, EPL, MLB, UCL, LaLiga, SerieA, Bundesliga, Boxing, Golf, F1 patterns from `fallbackPatterns`.
+
+Keep only UFC/MMA if detected via shared config, or remove entirely since core 4 are already in shared config.
+
+---
+
+### File 4: `supabase/functions/polymarket-monitor/index.ts`
+**Remove** Tennis, EPL, MLB, UCL, LaLiga, SerieA, Bundesliga, Boxing patterns from `fallbackPatterns`.
+
+---
+
+### File 5: `supabase/functions/sync-polymarket-h2h/index.ts`
+**Remove** tennis keywords from `SPORTS_KEYWORDS`:
+- Remove: `tennis`, `australian open`, `french open`, `wimbledon`, `us open`, `atp`, `wta`, `djokovic`, `sinner`, `alcaraz`, `medvedev`, `zverev`, etc.
+
+Also remove soccer keywords: `premier league`, `epl`, `la liga`, `champions league`, `real madrid`, `barcelona`, etc.
+
+---
+
+### File 6: `supabase/functions/fetch-live-scores/index.ts`  
+**Remove** tennis sport key fallback logic.
+
+---
+
+## Technical Details
+
+### Files Modified
+
+| File | Action |
 |------|--------|
-| `src/components/terminal/PolymarketAvailability.tsx` | Broken, redundant, NBA-only |
-| `src/components/terminal/MarketsSidebar.tsx` | Shows useless political/futures markets |
-| `src/hooks/usePolymarket.ts` | Only supports the sidebar |
-| `src/lib/api/polymarket-cache.ts` | Duplicate of usePolymarketCache |
+| `src/types/scan-config.ts` | Trim AVAILABLE_SPORTS to 4 sports |
+| `supabase/functions/ingest-odds/index.ts` | Trim h2hSports array to 4 sports |
+| `supabase/functions/polymarket-sync-24h/index.ts` | Remove tennis/soccer fallback patterns |
+| `supabase/functions/polymarket-monitor/index.ts` | Remove tennis/soccer fallback patterns |
+| `supabase/functions/sync-polymarket-h2h/index.ts` | Clean SPORTS_KEYWORDS to core 4 only |
+| `supabase/functions/fetch-live-scores/index.ts` | Remove tennis fallback |
 
-## Files to Update
+### Resulting Sport Coverage
 
-### Terminal.tsx
-Remove imports and usage of:
-- `PolymarketAvailability`
-- `MarketsSidebar`
-- `usePolymarket`
+After cleanup, the system will **only** detect and monitor:
 
----
+| Sport | Odds API Key | Polymarket URL |
+|-------|--------------|----------------|
+| NHL | `icehockey_nhl` | polymarket.com/sports/nhl/games |
+| NBA | `basketball_nba` | polymarket.com/sports/nba/games |
+| NCAA CBB | `basketball_ncaab` | polymarket.com/sports/cbb/games |
+| NFL | `americanfootball_nfl` | polymarket.com/sports/nfl/games |
 
-## What Stays
+### Edge Functions to Redeploy
 
-**PolymarketCacheStats** - This is your main component that:
-- Shows the `polymarket_h2h_cache` data (real H2H games)
-- Has the "Sync Cache" button
-- Shows sport breakdown (NHL, NBA, NFL, CBB)
-- Shows freshness status
-
----
-
-## Database Cleanup (Optional)
-
-The `polymarket_markets` table contains political futures that are never used for edge detection. We can either:
-- Leave it (harmless, just takes up space)
-- Delete it later if you want to clean up
+After code changes, these functions will auto-deploy:
+1. `ingest-odds`
+2. `polymarket-sync-24h`
+3. `polymarket-monitor`
+4. `sync-polymarket-h2h`
+5. `fetch-live-scores`
 
 ---
 
-## Result
+## Expected Outcome
 
-After this cleanup:
-- Terminal shows only the **PolymarketCacheStats** card (your real H2H cache)
-- No more confusing political markets
-- No more "Failed to fetch" errors
-- Simpler, focused UI for your arbitrage workflow
+- Signal feed only shows NHL, NBA, NCAA, NFL events
+- Cache only stores markets for core 4 sports
+- No wasted API calls on tennis tournaments
+- Cleaner logs and faster scans
