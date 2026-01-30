@@ -94,7 +94,7 @@ export const SPORTS_CONFIG: Record<string, SportConfig> = {
     ],
   },
 
-  // NCAA CBB
+  // NCAA CBB - EXPANDED with Firecrawl abbreviations
   cbb: {
     name: 'NCAA',
     polymarketUrl: 'https://polymarket.com/sports/cbb/games',
@@ -102,6 +102,7 @@ export const SPORTS_CONFIG: Record<string, SportConfig> = {
     oddsApiMarkets: 'h2h',
     oddsApiOutright: 'basketball_ncaab_championship_winner',
     teamMap: {
+      // Original mappings
       'duke': 'Duke Blue Devils', 'unc': 'North Carolina Tar Heels',
       'uk': 'Kentucky Wildcats', 'ku': 'Kansas Jayhawks',
       'ucla': 'UCLA Bruins', 'usc': 'USC Trojans',
@@ -115,6 +116,44 @@ export const SPORTS_CONFIG: Record<string, SportConfig> = {
       'ark': 'Arkansas Razorbacks', 'fla': 'Florida Gators',
       'lsu': 'LSU Tigers', 'tex': 'Texas Longhorns',
       'bay': 'Baylor Bears', 'tcu': 'TCU Horned Frogs',
+      // NEW: Common Firecrawl abbreviations (from logs)
+      'vtech': 'Virginia Tech Hokies', 'vt': 'Virginia Tech Hokies',
+      'mst': 'Michigan State Spartans', 'michst': 'Michigan State Spartans',
+      'hiost': 'Ohio State Buckeyes', 'ohst': 'Ohio State Buckeyes',
+      'kst': 'Kansas State Wildcats', 'kstate': 'Kansas State Wildcats',
+      'okst': 'Oklahoma State Cowboys', 'okstate': 'Oklahoma State Cowboys',
+      'wvu': 'West Virginia Mountaineers',
+      'sc': 'South Carolina Gamecocks',
+      'gt': 'Georgia Tech Yellow Jackets',
+      'clem': 'Clemson Tigers',
+      'cuse': 'Syracuse Orange', 'syr': 'Syracuse Orange',
+      'nd': 'Notre Dame Fighting Irish',
+      'pitt': 'Pittsburgh Panthers',
+      'nc': 'North Carolina Tar Heels', 'carolina': 'North Carolina Tar Heels',
+      'wake': 'Wake Forest Demon Deacons',
+      'lou': 'Louisville Cardinals', 'louisville': 'Louisville Cardinals',
+      'md': 'Maryland Terrapins', 'umd': 'Maryland Terrapins',
+      'ind': 'Indiana Hoosiers',
+      'neb': 'Nebraska Cornhuskers',
+      'minn': 'Minnesota Golden Gophers',
+      'nw': 'Northwestern Wildcats',
+      'psu': 'Penn State Nittany Lions',
+      'rut': 'Rutgers Scarlet Knights',
+      'ore': 'Oregon Ducks', 'uoregon': 'Oregon Ducks',
+      'uw': 'Washington Huskies', 'wash': 'Washington Huskies',
+      'wsu': 'Washington State Cougars',
+      'colo': 'Colorado Buffaloes',
+      'utah': 'Utah Utes',
+      'ariz': 'Arizona Wildcats', 'zona': 'Arizona Wildcats',
+      'asu': 'Arizona State Sun Devils',
+      'stan': 'Stanford Cardinal',
+      'cal': 'California Golden Bears',
+      // Big 12 additions
+      'cin': 'Cincinnati Bearcats',
+      'ucf': 'UCF Knights',
+      'byu': 'BYU Cougars',
+      'isu': 'Iowa State Cyclones',
+      'ttu': 'Texas Tech Red Raiders',
     },
     detectionPatterns: [
       /\bncaa\b/i,
