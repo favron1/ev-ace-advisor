@@ -198,6 +198,18 @@ export function useSignalStats() {
     fetchLogs();
   }, [fetchLogs]);
 
+  // Auto-refresh live scores every 30 seconds when there are in-play bets
+  useEffect(() => {
+    const hasInPlayBets = logs.some(l => l.outcome === 'in_play');
+    if (!hasInPlayBets) return;
+
+    const interval = setInterval(() => {
+      fetchLogs();
+    }, 30000); // Refresh every 30 seconds
+
+    return () => clearInterval(interval);
+  }, [logs, fetchLogs]);
+
   // Overall stats
   const overallStats: OverallStats = useMemo(() => {
     const settled = logs.filter(l => l.outcome && l.outcome !== 'pending');
