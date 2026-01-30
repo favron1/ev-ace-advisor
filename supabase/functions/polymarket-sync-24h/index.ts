@@ -280,13 +280,77 @@ Deno.serve(async (req) => {
       console.log(`  ${i + 1}. title="${e.title || 'N/A'}" endDate="${e.endDate || 'N/A'}"`);
     });
 
-    // Filter: ends within 24 HOURS (sports filter already applied via tag_slug)
+    // Helper: Check if event is within 24-hour window using multiple date sources
+    // This fixes NBA/Tennis where endDate is set to season end, not game day
+    function isWithin24HourWindow(event: any, now: Date, in24Hours: Date): { inWindow: boolean; dateSource: string; resolvedDate: Date | null } {
+      // 1. Try startDate first (most accurate for actual game time)
+      if (event.startDate) {
+        const startDate = new Date(event.startDate);
+        if (!isNaN(startDate.getTime()) && startDate >= now && startDate <= in24Hours) {
+          return { inWindow: true, dateSource: 'startDate', resolvedDate: startDate };
+        }
+      }
+      
+      // 2. Try endDate (works for NHL where endDate = game day)
+      if (event.endDate) {
+        const endDate = new Date(event.endDate);
+        if (!isNaN(endDate.getTime()) && endDate >= now && endDate <= in24Hours) {
+          return { inWindow: true, dateSource: 'endDate', resolvedDate: endDate };
+        }
+      }
+      
+      // 3. Parse date from market question text (e.g., "on 2026-01-31?" or "January 31")
+      const questionText = event.markets?.[0]?.question || event.question || '';
+      
+      // Try ISO format first: "on 2026-01-31"
+      const isoMatch = questionText.match(/on\s+(\d{4}-\d{2}-\d{2})/i);
+      if (isoMatch) {
+        const parsedDate = new Date(isoMatch[1] + 'T23:59:59Z');
+        if (!isNaN(parsedDate.getTime()) && parsedDate >= now && parsedDate <= in24Hours) {
+          return { inWindow: true, dateSource: 'question-iso', resolvedDate: parsedDate };
+        }
+      }
+      
+      // Try natural format: "January 31" or "Jan 31"
+      const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 
+                          'july', 'august', 'september', 'october', 'november', 'december'];
+      const monthAbbrevs = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 
+                           'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+      
+      const naturalMatch = questionText.match(/(?:on\s+)?(?:(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.?\s+(\d{1,2}))/i);
+      if (naturalMatch) {
+        const monthStr = naturalMatch[1].toLowerCase();
+        const day = parseInt(naturalMatch[2], 10);
+        let monthIndex = monthNames.indexOf(monthStr);
+        if (monthIndex === -1) monthIndex = monthAbbrevs.indexOf(monthStr);
+        
+        if (monthIndex !== -1 && day >= 1 && day <= 31) {
+          // Use current year, or next year if month has passed
+          const currentYear = now.getFullYear();
+          let parsedDate = new Date(Date.UTC(currentYear, monthIndex, day, 23, 59, 59));
+          
+          // If date is in the past, try next year
+          if (parsedDate < now) {
+            parsedDate = new Date(Date.UTC(currentYear + 1, monthIndex, day, 23, 59, 59));
+          }
+          
+          if (parsedDate >= now && parsedDate <= in24Hours) {
+            return { inWindow: true, dateSource: 'question-natural', resolvedDate: parsedDate };
+          }
+        }
+      }
+      
+      return { inWindow: false, dateSource: 'none', resolvedDate: null };
+    }
+
+    // Filter: Check if within 24 HOURS using multi-source date detection
     // Now process ALL market types, not just H2H
     const qualifying: any[] = [];
     let statsNoEndDate = 0;
     let statsOutsideWindow = 0;
     let statsNoMarkets = 0;
     let statsByMarketType: Record<string, number> = { h2h: 0, total: 0, spread: 0, player_prop: 0, futures: 0 };
+    let statsByDateSource: Record<string, number> = {};
 
     for (const event of allEvents) {
       const title = event.title || '';
@@ -297,18 +361,24 @@ Deno.serve(async (req) => {
       // from the parent event title, not from their individual market question (e.g., "Over 220.5?" won't match)
       const eventLevelSport = detectSport(title, question) || detectSport(title, firstMarketQuestion);
 
-      // Must have an end date
-      if (!event.endDate) {
-        statsNoEndDate++;
+      // Check 24h window using multiple date sources (startDate, endDate, question text)
+      const { inWindow, dateSource, resolvedDate } = isWithin24HourWindow(event, now, in24Hours);
+      
+      if (!inWindow) {
+        // Determine why it failed for logging
+        if (!event.endDate && !event.startDate) {
+          statsNoEndDate++;
+        } else {
+          statsOutsideWindow++;
+        }
         continue;
       }
-
-      // End date must be within 24 HOURS (focused window for actionable events)
-      const endDate = new Date(event.endDate);
-      if (endDate > in24Hours || endDate < now) {
-        statsOutsideWindow++;
-        continue;
-      }
+      
+      // Track which date source is being used
+      statsByDateSource[dateSource] = (statsByDateSource[dateSource] || 0) + 1;
+      
+      // Use resolved date for event_date field
+      const eventDate = resolvedDate || new Date(event.endDate || event.startDate);
 
       // Must have at least one market
       const markets = event.markets || [];
@@ -352,7 +422,7 @@ Deno.serve(async (req) => {
         qualifying.push({
           event,
           market,
-          endDate,
+          endDate: eventDate,
           detectedSport: marketSport, // Now inherits from event level
           marketType,
         });
@@ -364,6 +434,7 @@ Deno.serve(async (req) => {
     console.log(`  - Outside 24h window: ${statsOutsideWindow}`);
     console.log(`  - No markets: ${statsNoMarkets}`);
     console.log(`  - Markets by type: ${JSON.stringify(statsByMarketType)}`);
+    console.log(`  - Date sources used: ${JSON.stringify(statsByDateSource)}`);
     console.log(`  - QUALIFYING MARKETS: ${qualifying.length}`);
 
     // Log sample qualifying events by type
