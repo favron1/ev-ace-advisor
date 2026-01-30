@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Brain, RefreshCw, ChevronDown, ChevronUp, Check, X, AlertCircle, AlertTriangle, Info, Lightbulb } from 'lucide-react';
+import { Brain, RefreshCw, ChevronDown, ChevronUp, Check, X, AlertCircle, AlertTriangle, Info, Lightbulb, Send } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -53,9 +53,10 @@ interface RecommendationCardProps {
   recommendation: AdvisorRecommendation;
   onApply: (id: string) => void;
   onDismiss: (id: string) => void;
+  onSendToChat: (recommendation: AdvisorRecommendation) => void;
 }
 
-function RecommendationCard({ recommendation, onApply, onDismiss }: RecommendationCardProps) {
+function RecommendationCard({ recommendation, onApply, onDismiss, onSendToChat }: RecommendationCardProps) {
   const [expanded, setExpanded] = useState(false);
   const config = priorityConfig[recommendation.priority as keyof typeof priorityConfig] || priorityConfig.medium;
   const Icon = config.icon;
@@ -121,20 +122,28 @@ function RecommendationCard({ recommendation, onApply, onDismiss }: Recommendati
         <Button
           variant="outline"
           size="sm"
-          className="h-7 text-xs gap-1 flex-1 bg-green-500/10 border-green-500/30 text-green-500 hover:bg-green-500/20"
-          onClick={() => onApply(recommendation.id)}
+          className="h-7 text-xs gap-1 flex-1 bg-primary/10 border-primary/30 text-primary hover:bg-primary/20"
+          onClick={() => onSendToChat(recommendation)}
         >
-          <Check className="h-3 w-3" />
-          Applied
+          <Send className="h-3 w-3" />
+          Ask Lovable
         </Button>
         <Button
           variant="outline"
           size="sm"
-          className="h-7 text-xs gap-1 flex-1"
+          className="h-7 text-xs gap-1 bg-green-500/10 border-green-500/30 text-green-500 hover:bg-green-500/20"
+          onClick={() => onApply(recommendation.id)}
+        >
+          <Check className="h-3 w-3" />
+          Done
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 text-xs gap-1"
           onClick={() => onDismiss(recommendation.id)}
         >
           <X className="h-3 w-3" />
-          Dismiss
         </Button>
       </div>
     </div>
@@ -155,7 +164,8 @@ export function AdvisorPanel({ defaultOpen = true }: AdvisorPanelProps) {
     criticalCount,
     runAnalysis, 
     applyRecommendation, 
-    dismissRecommendation 
+    dismissRecommendation,
+    sendToChat
   } = useAdvisor();
 
   return (
@@ -219,6 +229,7 @@ export function AdvisorPanel({ defaultOpen = true }: AdvisorPanelProps) {
                     recommendation={rec}
                     onApply={applyRecommendation}
                     onDismiss={dismissRecommendation}
+                    onSendToChat={sendToChat}
                   />
                 ))}
               </div>

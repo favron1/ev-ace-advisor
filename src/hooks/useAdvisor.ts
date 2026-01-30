@@ -154,6 +154,36 @@ export function useAdvisor() {
     }
   }, [toast]);
 
+  const sendToChat = useCallback((recommendation: AdvisorRecommendation) => {
+    const categoryLabel = recommendation.insight_category || 'general';
+    const reasoning = recommendation.supporting_data?.reasoning || 'No additional context';
+    const expectedImpact = recommendation.supporting_data?.expected_impact || '';
+    
+    const message = `Please implement this AI Advisor recommendation:
+
+**CATEGORY:** ${categoryLabel}
+**PRIORITY:** ${recommendation.priority}
+**RECOMMENDATION:** ${recommendation.recommendation}
+**REASONING:** ${reasoning}${expectedImpact ? `\n**EXPECTED IMPACT:** ${expectedImpact}` : ''}`;
+
+    // Copy to clipboard as the primary action
+    navigator.clipboard.writeText(message).then(() => {
+      toast({
+        title: 'Copied to clipboard',
+        description: 'Paste this into the chat to ask me to implement it',
+      });
+    }).catch(() => {
+      // Fallback: try custom event
+      window.dispatchEvent(new CustomEvent('lovable-send-message', { 
+        detail: { message } 
+      }));
+      toast({
+        title: 'Ready to send',
+        description: 'Check the chat input',
+      });
+    });
+  }, [toast]);
+
   const activeCount = recommendations.length;
   const criticalCount = recommendations.filter(r => r.priority === 'critical').length;
   const highCount = recommendations.filter(r => r.priority === 'high').length;
@@ -168,6 +198,7 @@ export function useAdvisor() {
     runAnalysis,
     applyRecommendation,
     dismissRecommendation,
+    sendToChat,
     refresh: fetchRecommendations,
   };
 }
