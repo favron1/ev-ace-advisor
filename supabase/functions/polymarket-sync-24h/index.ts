@@ -284,8 +284,9 @@ Deno.serve(async (req) => {
       const question = event.question || '';
       const firstMarketQuestion = event.markets?.[0]?.question || '';
       
-      // Detect specific sport from title/question for bookmaker matching
-      const detectedSport = detectSport(title, question) || detectSport(title, firstMarketQuestion) || 'Sports';
+      // CRITICAL: Detect sport at EVENT level FIRST - this ensures Totals/Spreads/Props inherit the league
+      // from the parent event title, not from their individual market question (e.g., "Over 220.5?" won't match)
+      const eventLevelSport = detectSport(title, question) || detectSport(title, firstMarketQuestion);
 
       // Must have an end date
       if (!event.endDate) {
@@ -334,11 +335,16 @@ Deno.serve(async (req) => {
         // Track stats
         statsByMarketType[marketType] = (statsByMarketType[marketType] || 0) + 1;
         
+        // CRITICAL FIX: Use event-level sport for ALL markets, with fallback to market-level detection
+        // This ensures Totals/Spreads/Props inherit the league from the parent event (e.g., "Hawks vs Celtics")
+        // instead of returning null because "Over 220.5?" doesn't match any sport keywords
+        const marketSport = eventLevelSport || detectSport(title, market.question || '') || 'Sports';
+        
         qualifying.push({
           event,
           market,
           endDate,
-          detectedSport,
+          detectedSport: marketSport, // Now inherits from event level
           marketType,
         });
       }

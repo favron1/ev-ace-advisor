@@ -39,6 +39,57 @@ function normalizeName(name: string): string {
     .trim();
 }
 
+// Detect sport from text (for fallback when extracted_league is null)
+function detectSportFromText(title: string, question: string): string | null {
+  const combined = `${title} ${question}`.toLowerCase();
+  
+  const sportPatterns: Array<{ patterns: RegExp[]; sport: string }> = [
+    // NHL - check FIRST to catch "Blackhawks" before NBA's "hawks" pattern
+    { patterns: [/\bnhl\b/, /blackhawks|maple leafs|canadiens|habs|bruins|rangers|islanders|devils|flyers|penguins|capitals|caps|hurricanes|canes|panthers|lightning|bolts|red wings|senators|sens|sabres|blue jackets|blues|wild|avalanche|avs|stars|predators|preds|jets|flames|oilers|canucks|kraken|golden knights|knights|coyotes|sharks|ducks|kings/i], sport: 'NHL' },
+    
+    // NBA - team names and league
+    { patterns: [/\bnba\b/, /lakers|celtics|warriors|heat|bulls|knicks|nets|bucks|76ers|sixers|suns|nuggets|clippers|mavericks|rockets|grizzlies|timberwolves|pelicans|spurs|thunder|jazz|blazers|trail blazers|hornets|atlanta hawks|wizards|magic|pistons|cavaliers|raptors|pacers/i], sport: 'NBA' },
+    
+    // NFL - team names and league
+    { patterns: [/\bnfl\b/, /chiefs|eagles|49ers|niners|cowboys|bills|ravens|bengals|dolphins|lions|packers|patriots|broncos|chargers|raiders|steelers|browns|texans|colts|jaguars|titans|commanders|giants|saints|panthers|falcons|buccaneers|bucs|seahawks|rams|cardinals|bears|vikings/i], sport: 'NFL' },
+    
+    // UFC/MMA
+    { patterns: [/\bufc\b/, /\bmma\b/], sport: 'UFC' },
+    
+    // Tennis
+    { patterns: [/\batp\b/, /\bwta\b/, /djokovic|sinner|alcaraz|medvedev|zverev|sabalenka|swiatek|gauff/i], sport: 'Tennis' },
+    
+    // EPL
+    { patterns: [/premier league|\bepl\b|arsenal|chelsea|liverpool|man city|manchester city|man united|manchester united|tottenham|spurs/i], sport: 'EPL' },
+    
+    // MLB
+    { patterns: [/\bmlb\b|yankees|red sox|dodgers|mets|phillies|braves|cubs|cardinals/i], sport: 'MLB' },
+    
+    // Champions League
+    { patterns: [/champions league|\bucl\b|real madrid|barcelona|bayern|juventus/i], sport: 'UCL' },
+    
+    // La Liga
+    { patterns: [/la liga|laliga|atletico madrid|sevilla|villarreal/i], sport: 'LaLiga' },
+    
+    // Serie A
+    { patterns: [/serie a|napoli|roma|lazio|inter milan|ac milan/i], sport: 'SerieA' },
+    
+    // Bundesliga
+    { patterns: [/bundesliga|leverkusen|leipzig|dortmund|frankfurt/i], sport: 'Bundesliga' },
+    
+    // Boxing
+    { patterns: [/\bbox(?:ing)?\b|fury|usyk|joshua|canelo|crawford/i], sport: 'Boxing' },
+  ];
+  
+  for (const { patterns, sport } of sportPatterns) {
+    if (patterns.some(p => p.test(combined))) {
+      return sport;
+    }
+  }
+  
+  return null;
+}
+
 // Generate event key for movement detection
 function generateEventKey(eventName: string, outcome: string): string {
   return `${eventName.toLowerCase().replace(/[^a-z0-9]/g, '_')}::${outcome.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
@@ -554,19 +605,36 @@ Deno.serve(async (req) => {
 
     // Load markets marked for monitoring - filter to sports with bookmaker coverage
     // This is the "Scan Once, Monitor Continuously" architecture
+    // CRITICAL FIX: Include ALL market types (H2H, Totals, Spreads), not just those with extracted_league
     const supportedSports = Object.keys(SPORT_ENDPOINTS); // ['NBA', 'NFL', 'NHL', 'MLB', 'UFC', 'Tennis', 'EPL', 'UCL', 'LaLiga', 'SerieA', 'Bundesliga', 'Boxing']
     
-    const { data: watchedMarkets, error: cacheLoadError } = await supabase
+    // First, load markets WITH extracted_league
+    const { data: leagueMarkets, error: leagueLoadError } = await supabase
       .from('polymarket_h2h_cache')
       .select('*')
       .in('monitoring_status', ['watching', 'triggered'])
       .eq('status', 'active')
-      .in('extracted_league', supportedSports) // Only sports with bookmaker endpoints
-      .gte('volume', 5000) // Minimum liquidity filter
+      .in('extracted_league', supportedSports)
+      .gte('volume', 5000)
       .order('event_date', { ascending: true })
-      .limit(200); // Cap at 200 markets per run to avoid timeout
+      .limit(150);
 
-    if (cacheLoadError) throw new Error(`Failed to load markets: ${cacheLoadError.message}`);
+    // Then, load markets with NULL extracted_league (Totals/Spreads/Props that need re-detection)
+    const { data: nullLeagueMarkets, error: nullLeagueLoadError } = await supabase
+      .from('polymarket_h2h_cache')
+      .select('*')
+      .in('monitoring_status', ['watching', 'triggered'])
+      .eq('status', 'active')
+      .is('extracted_league', null)
+      .in('market_type', ['total', 'spread', 'player_prop', 'h2h']) // Skip pure futures
+      .gte('volume', 5000)
+      .order('event_date', { ascending: true })
+      .limit(50);
+
+    // Combine both sets
+    const watchedMarkets = [...(leagueMarkets || []), ...(nullLeagueMarkets || [])];
+    
+    if (leagueLoadError) throw new Error(`Failed to load markets: ${leagueLoadError.message}`);
 
     console.log(`[POLY-MONITOR] Loaded ${watchedMarkets?.length || 0} watched markets from cache`);
 
@@ -616,11 +684,19 @@ Deno.serve(async (req) => {
     console.log(`[POLY-MONITOR] Processing ${eventsToProcess.length} markets (${eventStateMap.size} with event_watch_state)`);
 
     // Group events by detected sport
+    // CRITICAL FIX: For markets with null extracted_league, try to detect from event_title
     const sportGroups: Map<string, typeof eventsToProcess> = new Map();
     
     for (const event of eventsToProcess) {
       const cache = cacheMap.get(event.polymarket_condition_id);
-      const sport = cache?.extracted_league || 'Unknown';
+      let sport = cache?.extracted_league;
+      
+      // Fallback: try to detect sport from event_title if extracted_league is null
+      if (!sport || sport === 'Sports' || sport === 'Unknown') {
+        const eventTitle = cache?.event_title || event.event_name || '';
+        const question = cache?.question || event.polymarket_question || '';
+        sport = detectSportFromText(eventTitle, question) || 'Unknown';
+      }
       
       if (!sportGroups.has(sport)) {
         sportGroups.set(sport, []);
