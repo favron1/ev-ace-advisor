@@ -1,149 +1,86 @@
 
+# Fix: Add NHL to Firecrawl Scraping for Accurate Prices
 
-# Firecrawl Integration as Polling Fallback
+## Problem Identified
 
-## Current Polling Architecture
+Your screenshots show Polymarket has **real prices** for all games:
+- Avalanche vs Red Wings: COL 61¢ / DET 40¢ ($87.80k volume)
+- Jets vs Panthers: WPG 39¢ / FLA 62¢
+- Spurs vs Hornets: SAS 62¢ / CHA 40¢
 
-The system currently runs three automated pg_cron jobs:
+But our database shows **stale 50¢/50¢ placeholders** for NHL games while NBA games have correct prices.
 
-| Job | Schedule | Function | Purpose |
-|-----|----------|----------|---------|
-| polymarket-sync-24h | Every 30 min | Sync Polymarket cache | Fetches API + Firecrawl data |
-| polymarket-monitor | Every 5 min | Edge detection | Compares cache vs bookmakers |
-| ingest-odds | Every 10 min | Bookmaker ingestion | Fetches The Odds API data |
+**Root Cause:** The `polymarket-sync-24h` function only scrapes NBA, CBB, and NFL via Firecrawl. NHL is missing, so NHL games rely on the Gamma API which returns stale/placeholder prices.
 
-## Identified Issues with Firecrawl Integration
+## Solution
 
-### 1. Volume Filter Blocks Scraped Data
-- **Problem**: `watch-mode-poll` applies `.gte('volume', 5000)` filter
-- **Impact**: All 18 Firecrawl markets have volume = 0, so they're excluded
-- **Current state**: 63 API markets pass volume filter, 0 Firecrawl markets pass
+Add NHL scraping to the Firecrawl pipeline, matching the pattern already used for NBA, CBB, and NFL.
 
-### 2. Firecrawl Only Runs During Sync (Not Monitoring)
-- **Problem**: Firecrawl scraping only happens in `polymarket-sync-24h` (every 30 min)
-- **Impact**: If API fails or returns stale prices, there's no Firecrawl fallback during the more frequent monitoring cycles (every 5 min)
+### Changes Required
 
-### 3. No Fallback in Active-Mode-Poll
-- **Problem**: `active-mode-poll` refreshes prices via CLOB API and Gamma API only
-- **Impact**: Firecrawl-sourced markets (NBA/CBB) can't get fresh prices during active monitoring
-
----
-
-## Proposed Changes
-
-### 1. Update `watch-mode-poll` to Include Firecrawl Markets
-
-Modify the market loading query to fetch Firecrawl-sourced markets separately (without volume filter) and combine them:
-
+**1. Add NHL team mapping** (in `polymarket-sync-24h`)
 ```typescript
-// Load API markets with volume filter
-const { data: apiMarkets } = await supabase
-  .from('polymarket_h2h_cache')
-  .select('*')
-  .eq('status', 'active')
-  .eq('market_type', 'h2h')
-  .gte('volume', minVolume)
-  .or('source.is.null,source.eq.api')
-  // ... existing filters
-
-// Load Firecrawl markets WITHOUT volume filter
-const { data: firecrawlMarkets } = await supabase
-  .from('polymarket_h2h_cache')
-  .select('*')
-  .eq('status', 'active')
-  .eq('market_type', 'h2h')
-  .eq('source', 'firecrawl')
-  .in('extracted_league', ['NBA', 'NCAA', 'NFL'])
-  // No volume filter - scraped data lacks volume
-
-// Combine both sets
-const polyMarkets = [...(apiMarkets || []), ...(firecrawlMarkets || [])];
+const NHL_TEAM_MAP: Record<string, string> = {
+  'col': 'Colorado Avalanche', 'det': 'Detroit Red Wings',
+  'wpg': 'Winnipeg Jets', 'fla': 'Florida Panthers',
+  // ... full NHL team mapping
+};
 ```
 
-### 2. Add Firecrawl Fallback to `active-mode-poll`
-
-When a Firecrawl-sourced market is in active monitoring, refresh its price by re-scraping:
-
+**2. Add NHL to Firecrawl scrape targets** (line 410-414)
 ```typescript
-// In active-mode-poll, if market source is 'firecrawl'
-if (event.source === 'firecrawl' && firecrawlApiKey) {
-  // Re-scrape the relevant sport page for fresh prices
-  const sportCode = getSportCodeFromLeague(event.extracted_league);
-  const freshGames = await scrapePolymarketGames(sportCode, firecrawlApiKey);
+const [nbaGames, cbbGames, nflGames, nhlGames] = await Promise.all([
+  scrapePolymarketGames('nba', firecrawlApiKey),
+  scrapePolymarketGames('cbb', firecrawlApiKey),
+  scrapePolymarketGames('nfl', firecrawlApiKey),
+  scrapePolymarketGames('nhl', firecrawlApiKey),  // NEW
+]);
+```
+
+**3. Update `scrapePolymarketGames` function** to support NHL
+```typescript
+async function scrapePolymarketGames(
+  sport: 'nba' | 'cbb' | 'nfl' | 'nhl',  // Add nhl
+  firecrawlApiKey: string
+): Promise<ParsedGame[]> {
+  const sportUrl = sport === 'nhl'
+    ? 'https://polymarket.com/sports/nhl/games'
+    : sport === 'cbb'
+      ? 'https://polymarket.com/sports/cbb/games'
+      : sport === 'nfl'
+        ? 'https://polymarket.com/sports/nfl/games'
+        : 'https://polymarket.com/sports/nba/games';
   
-  // Find matching game by team names
-  const matchedGame = findMatchingGame(freshGames, event.team_home, event.team_away);
-  if (matchedGame) {
-    livePolyPrice = matchedGame.team1Price;
-  }
+  const teamMap = sport === 'nhl' 
+    ? NHL_TEAM_MAP 
+    : sport === 'nfl' 
+      ? NFL_TEAM_MAP 
+      : NBA_TEAM_MAP;
+  // ...
 }
 ```
 
-### 3. Create Shared Firecrawl Scraping Module
-
-Extract the scraping logic into a shared utility that can be imported by multiple edge functions:
-
-```text
-supabase/functions/_shared/firecrawl-scraper.ts
-├── parseGamesFromMarkdown()
-├── scrapePolymarketGames()
-├── NBA_TEAM_MAP
-├── NFL_TEAM_MAP
-├── NCAA_TEAM_MAP (new)
-```
-
-### 4. Add Firecrawl Price Refresh to Monitor (Optional Enhancement)
-
-If API prices are stale (>10 min since last update), use Firecrawl as backup:
-
+**4. Include NHL games in Firecrawl upsert** (line 584-589)
 ```typescript
-// In polymarket-monitor, before edge calculation
-if (market.last_price_update < tenMinutesAgo && firecrawlApiKey) {
-  // Refresh via Firecrawl scrape as fallback
-  const freshPrice = await refreshViaFirecrawl(market);
-  if (freshPrice) {
-    market.yes_price = freshPrice;
-  }
-}
+const firecrawlGames: Array<{ game: ParsedGame; sport: string; sportCode: string }> = [
+  ...scrapedNba.map(g => ({ game: g, sport: 'NBA', sportCode: 'nba' })),
+  ...scrapedCbb.map(g => ({ game: g, sport: 'NCAA', sportCode: 'cbb' })),
+  ...scrapedNfl.map(g => ({ game: g, sport: 'NFL', sportCode: 'nfl' })),
+  ...scrapedNhl.map(g => ({ game: g, sport: 'NHL', sportCode: 'nhl' })), // NEW
+];
 ```
-
----
-
-## Files to Modify
-
-| File | Change |
-|------|--------|
-| `supabase/functions/watch-mode-poll/index.ts` | Add dual-query for API + Firecrawl markets |
-| `supabase/functions/active-mode-poll/index.ts` | Add Firecrawl fallback for price refresh |
-| `supabase/functions/_shared/firecrawl-scraper.ts` | Create shared module with scraping helpers |
-| `supabase/functions/polymarket-sync-24h/index.ts` | Import from shared module |
-| `supabase/functions/polymarket-monitor/index.ts` | (Optional) Add stale price fallback |
-
----
 
 ## Expected Outcome
 
-After implementation:
+After this fix:
+- NHL games will have **real prices** (e.g., 61¢/40¢ instead of 50¢/50¢)
+- NHL games will have **real volumes** (e.g., $87k instead of $339)
+- Edge detection will work correctly for NHL (it currently can't detect edges when prices are 50¢/50¢)
+- NHL signals will appear in the feed just like they did when you won those previous bets
 
-| Scenario | Current Behavior | New Behavior |
-|----------|-----------------|--------------|
-| NBA/CBB market in cache | Ignored (volume=0) | Included in watch-mode |
-| Firecrawl market goes active | Price can't refresh | Scrapes fresh price |
-| API returns stale data | Uses stale price | Falls back to Firecrawl |
-| 30-min sync fails | No NBA data until next sync | Monitor can scrape as fallback |
+## Technical Notes
 
----
-
-## Technical Considerations
-
-**Firecrawl Credit Usage**:
-- Current: ~48-72 credits/day (3 scrapes × every 30 min × 24h)
-- With fallback in active-mode: +1-5 scrapes/day for active markets
-- Estimated total: ~50-80 credits/day
-
-**Shared Module Pattern**:
-Deno edge functions support importing from `_shared` folders:
-```typescript
-import { scrapePolymarketGames } from '../_shared/firecrawl-scraper.ts';
-```
-
+- The NHL team codes on Polymarket appear to be 3-letter abbreviations (COL, DET, WPG, FLA, etc.)
+- Firecrawl scraping pattern `([a-z]{2,3})(\d+)¢` should work for NHL
+- No database schema changes required
+- Deploy will be automatic after code changes
