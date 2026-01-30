@@ -41,3 +41,6 @@ verify_jwt = false
 
 [functions.analyze-betting-patterns]
 verify_jwt = false
+
+[functions.scrape-polymarket-prices]
+verify_jwt = false

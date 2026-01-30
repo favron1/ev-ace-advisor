@@ -304,6 +304,7 @@ export type Database = {
           no_price: number
           orderbook_depth: number | null
           question: string
+          source: string | null
           sport_category: string | null
           spread_pct: number | null
           status: string | null
@@ -335,6 +336,7 @@ export type Database = {
           no_price: number
           orderbook_depth?: number | null
           question: string
+          source?: string | null
           sport_category?: string | null
           spread_pct?: number | null
           status?: string | null
@@ -366,6 +368,7 @@ export type Database = {
           no_price?: number
           orderbook_depth?: number | null
           question?: string
+          source?: string | null
           sport_category?: string | null
           spread_pct?: number | null
           status?: string | null
