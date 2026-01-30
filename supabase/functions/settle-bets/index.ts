@@ -82,41 +82,38 @@ async function checkMarketResolution(conditionId: string): Promise<MarketStatus>
     
     const market = markets[0];
     
-    // Check if market is closed (resolved)
-    if (market.closed || !market.active) {
+    // IMPORTANT: For sports, markets often become !active while the match is in-play.
+    // Only treat as resolved when `closed === true`.
+    if (market.closed) {
       // Determine winner based on final prices
       const yesToken = market.tokens?.find(t => t.outcome.toLowerCase() === 'yes');
       const yesPrice = yesToken?.price || 0;
-      
-      // Price of 0.99+ means YES won, 0.01- means NO won
-      if (yesPrice >= 0.9) {
+
+      // Be stricter to avoid false settlements from temporary price spikes.
+      // (At real resolution, YES/NO typically pins near 0 or 1.)
+      if (yesPrice >= 0.98) {
         return { resolved: true, inPlay: false, yesWon: true, price: yesPrice };
-      } else if (yesPrice <= 0.1) {
+      } else if (yesPrice <= 0.02) {
         return { resolved: true, inPlay: false, yesWon: false, price: yesPrice };
       }
-      
-      // Market closed but not clearly resolved (might be void)
+
+      // Closed but not clearly resolved (treat as void/manual review)
       return { resolved: true, inPlay: false, yesWon: null, price: yesPrice };
     }
+
+    // Not closed, but inactive => likely in-play (or temporarily suspended)
+    if (!market.active) {
+      return { resolved: false, inPlay: true, yesWon: null, price: null };
+    }
     
-    // Check if event has started but not ended (in-play)
+    // If we're past scheduled end by a long time and it's still not closed, flag it.
     if (market.end_date_iso) {
       const endDate = new Date(market.end_date_iso);
       const now = new Date();
-      
-      // If event end date is in the past but market still active, likely in-play
-      if (now > endDate) {
-        const hoursSinceEnd = (now.getTime() - endDate.getTime()) / (1000 * 60 * 60);
-        
-        // If more than 12 hours past end date, something's wrong - flag for review
-        if (hoursSinceEnd > 12) {
-          console.log(`[SETTLE-BETS] Event ${conditionId} ended ${hoursSinceEnd.toFixed(1)}h ago but not closed`);
-          return { resolved: true, inPlay: false, yesWon: null, price: null };
-        }
-        
-        // Within 12 hours of scheduled end and still active = in-play
-        console.log(`[SETTLE-BETS] Market ${conditionId} is IN-PLAY (${hoursSinceEnd.toFixed(1)}h past scheduled end)`);
-        return { resolved: false, inPlay: true, yesWon: null, price: null };
+      const hoursSinceEnd = (now.getTime() - endDate.getTime()) / (1000 * 60 * 60);
+      if (hoursSinceEnd > 24) {
+        console.log(`[SETTLE-BETS] Market ${conditionId} is past end_date by ${hoursSinceEnd.toFixed(1)}h but not closed`);
+        return { resolved: true, inPlay: false, yesWon: null, price: null };
       }
     }
     

@@ -21,7 +21,7 @@ export function EditBetDialog({ bet, open, onOpenChange, onSave, onDelete }: Edi
   const [entryPrice, setEntryPrice] = useState('');
   const [stakeAmount, setStakeAmount] = useState('');
   const [edgeAtSignal, setEdgeAtSignal] = useState('');
-  const [outcome, setOutcome] = useState<'pending' | 'win' | 'loss' | 'void'>('pending');
+  const [outcome, setOutcome] = useState<'pending' | 'in_play' | 'win' | 'loss' | 'void'>('pending');
   const [profitLoss, setProfitLoss] = useState('');
   const [isAutoCalculating, setIsAutoCalculating] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -35,7 +35,7 @@ export function EditBetDialog({ bet, open, onOpenChange, onSave, onDelete }: Edi
       setEntryPrice((bet.entry_price * 100).toFixed(0));
       setStakeAmount(bet.stake_amount?.toString() || '');
       setEdgeAtSignal(bet.edge_at_signal.toFixed(1));
-      setOutcome((bet.outcome as 'pending' | 'win' | 'loss' | 'void') || 'pending');
+      setOutcome((bet.outcome as 'pending' | 'in_play' | 'win' | 'loss' | 'void') || 'pending');
       setProfitLoss(bet.profit_loss?.toFixed(2) || '');
       setIsAutoCalculating(bet.profit_loss === null);
     }
@@ -57,6 +57,8 @@ export function EditBetDialog({ bet, open, onOpenChange, onSave, onDelete }: Edi
       setProfitLoss((-stake).toFixed(2));
     } else if (outcome === 'void') {
       setProfitLoss('0.00');
+    } else if (outcome === 'in_play') {
+      setProfitLoss('');
     } else {
       setProfitLoss('');
     }
@@ -73,7 +75,7 @@ export function EditBetDialog({ bet, open, onOpenChange, onSave, onDelete }: Edi
         entry_price: parseFloat(entryPrice) / 100,
         stake_amount: stakeAmount ? parseFloat(stakeAmount) : null,
         edge_at_signal: parseFloat(edgeAtSignal),
-        outcome: outcome === 'pending' ? null : outcome,
+          outcome: outcome === 'pending' ? null : outcome,
         profit_loss: profitLoss ? parseFloat(profitLoss) : null,
       };
 
@@ -185,12 +187,13 @@ export function EditBetDialog({ bet, open, onOpenChange, onSave, onDelete }: Edi
           {/* Status */}
           <div className="grid gap-2">
             <Label>Status</Label>
-            <Select value={outcome} onValueChange={(v) => setOutcome(v as 'pending' | 'win' | 'loss' | 'void')}>
+            <Select value={outcome} onValueChange={(v) => setOutcome(v as 'pending' | 'in_play' | 'win' | 'loss' | 'void')}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="pending">Pending</SelectItem>
+                <SelectItem value="in_play">In Play</SelectItem>
                 <SelectItem value="win">Win</SelectItem>
                 <SelectItem value="loss">Loss</SelectItem>
                 <SelectItem value="void">Void</SelectItem>
