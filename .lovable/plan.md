@@ -1,126 +1,94 @@
 
-# Fix: All Market Types Detection (Not Just H2H)
 
-## Problem Summary
+# Clean Up Non-Tradeable Markets
 
-The sync function correctly detects and stores ALL market types (H2H, Totals, Spreads, Player Props):
+## Problem
 
-| Market Type | Count in DB | Issue |
-|-------------|-------------|-------|
-| H2H | 219 | Working |
-| Futures | 1,356 | Correctly skipped (long-dated) |
-| Totals | 35 | `extracted_league = null` → SKIPPED |
-| Spreads | 1 | `extracted_league = null` → SKIPPED |
-| Player Props | 12 | `extracted_league = null` → SKIPPED |
-| Props | 75 | `extracted_league = null` → SKIPPED |
+The database contains **1,356 futures markets** that cannot be traded using the arbitrage engine:
 
-**Root Cause**: The `polymarket-monitor` filters markets by `extracted_league IN ('NBA', 'NHL', ...)`. Since Totals/Spreads/Props often have their league detection fail (returning `null`), they're silently excluded from monitoring.
+| Market Type | Count | Why Non-Tradeable |
+|-------------|-------|-------------------|
+| MVP Awards | 200+ | No bookmaker API for player awards |
+| DPOY/OPOY | 100+ | No bookmaker API for player awards |
+| Championship Futures | 200+ | Too far out (Feb-July 2026) |
+| Olympics 2026 | 50+ | No bookmaker API coverage |
+| Hart Trophy | 20+ | NHL award - no API |
+| Props (generic) | 75 | Mixed - some tradeable, most not |
 
----
+These markets:
+- Waste API monitoring resources
+- Clutter the cache with non-actionable data
+- Will **never** generate tradeable signals
 
-## Technical Fix
+## Solution
 
-### Step 1: Improve League Extraction in polymarket-sync-24h
+### 1. Delete Legacy Futures from Cache
 
-Currently, league detection runs on the market question, but for Totals/Spreads/Props, the question format is different (e.g., "Will Hawks vs. Celtics go OVER 220.5?"). The parent event title often has better context.
+Run a cleanup to remove all `market_type = 'futures'` entries:
 
-```typescript
-// CURRENT (line 287-288):
-const detectedSport = detectSport(title, question) || 
-                      detectSport(title, firstMarketQuestion) || 'Sports';
+```sql
+-- Remove 1,356 non-tradeable futures
+DELETE FROM polymarket_h2h_cache 
+WHERE market_type = 'futures' 
+  AND status = 'active';
 
-// FIX: Also try detecting from the specific market.question
-const detectedSport = detectSport(title, question) || 
-                      detectSport(title, market.question) ||
-                      detectSport(title, firstMarketQuestion) || 'Sports';
+-- Also remove associated watch states
+DELETE FROM event_watch_state 
+WHERE event_key LIKE 'poly_%'
+  AND polymarket_question ILIKE ANY (ARRAY[
+    '%mvp%', '%dpoy%', '%opoy%', '%champion%', 
+    '%olympic%', '%award%', '%trophy%', '%coach%'
+  ]);
 ```
 
-### Step 2: Inherit League from Parent Event
+### 2. Tighten Sync Filter
 
-For multi-market events (e.g., one NBA game has H2H + Totals + Spreads), all child markets should inherit the detected league from the parent event title:
+The sync already skips `marketType === 'futures'` (line 331), but add an **additional explicit keyword block** to catch edge cases:
 
 ```typescript
-// Calculate sport ONCE at the event level
-const eventSport = detectSport(event.title || '', event.question || '');
+// NEW: Explicit keyword blocklist for non-tradeable markets
+const NON_TRADEABLE_KEYWORDS = [
+  /championship/i, /champion/i, /mvp/i, /dpoy/i, /opoy/i,
+  /award/i, /trophy/i, /coach of the year/i,
+  /olympic/i, /gold medal/i, /world series winner/i,
+  /super bowl winner/i, /winner.*202[6-9]/i,
+  /coach.*year/i, /rookie.*year/i
+];
 
-// For EACH market in the event, use the event-level sport
-for (const market of markets) {
-  const marketType = detectMarketType(market.question);
-  
-  // Sport comes from EVENT, not individual market
-  qualifying.push({
-    event,
-    market,
-    endDate,
-    detectedSport: eventSport || 'Sports',  // Inherited from parent
-    marketType,
-  });
+// Inside market loop, BEFORE upsert:
+const isNonTradeable = NON_TRADEABLE_KEYWORDS.some(p => 
+  p.test(question) || p.test(title)
+);
+
+if (isNonTradeable) {
+  console.log(`[SKIP] Non-tradeable: ${question.substring(0, 50)}`);
+  continue;
 }
 ```
 
-### Step 3: Update Monitor to Handle All Market Types
+### 3. Keep Only Game-Specific Markets
 
-The monitor already supports spreads/totals in the `SPORT_ENDPOINTS` mapping (line 15-28):
-
-```typescript
-const SPORT_ENDPOINTS: Record<string, { sport: string; markets: string }> = {
-  'NBA': { sport: 'basketball_nba', markets: 'h2h,spreads,totals' },  // ✅ Already there
-  'NFL': { sport: 'americanfootball_nfl', markets: 'h2h,spreads,totals' },
-  // ...
-};
-```
-
-The matching logic `findBookmakerMatch()` already handles market types (lines 458-500) - it just needs the correct `extracted_league` to work.
-
-### Step 4: Backfill Existing Markets
-
-Run a one-time update to fix markets with null extracted_league by re-detecting from event_title:
-
-```sql
--- Example: Fix NHL totals that have team names in question
-UPDATE polymarket_h2h_cache 
-SET extracted_league = 'NHL'
-WHERE extracted_league IS NULL 
-  AND market_type IN ('total', 'spread')
-  AND (question ILIKE '%bruins%' OR question ILIKE '%rangers%' OR ...);
-```
+After cleanup, the cache will contain:
+- **H2H** (219) - Game matchups with bookmaker coverage
+- **Totals** (35) - Over/Under for specific games
+- **Spreads** (1) - Point spreads for specific games
+- **Player Props** (12) - May keep for future expansion
 
 ---
 
 ## Files to Modify
 
 1. **supabase/functions/polymarket-sync-24h/index.ts**
-   - Move sport detection to event level (before market loop)
-   - Pass inherited sport to all child markets
-   - Ensure extracted_league is never null for markets with identifiable teams
-
-2. **supabase/functions/polymarket-monitor/index.ts**
-   - Remove or loosen the `extracted_league IN (...)` filter
-   - Add fallback: try to detect sport from event_title if extracted_league is null
+   - Add `NON_TRADEABLE_KEYWORDS` blocklist
+   - Skip markets matching these patterns
+   - Log skipped counts for transparency
 
 ---
 
 ## Expected Outcome
 
-- All 35 Totals, 1 Spread, and 87 Props/Player Props become eligible for monitoring
-- Edge detection works across H2H, Totals, Spreads, and Player Props
-- Signal feed shows opportunities beyond just H2H markets
-- Same Polymarket-first architecture - just with broader market coverage
-
----
-
-## Technical Notes
-
-### Market Type to Bookmaker API Mapping
-| Polymarket Type | Bookmaker API Key |
-|-----------------|-------------------|
-| h2h | `h2h` (moneyline) |
-| total | `totals` (over/under) |
-| spread | `spreads` (handicap) |
-| player_prop | Not supported by Odds API v4 free tier |
-
-### Edge Calculation Differences
-- **Totals**: Compare Polymarket YES price vs. bookmaker OVER/UNDER probability
-- **Spreads**: Compare Polymarket YES price vs. bookmaker spread-adjusted probability
-- **H2H**: Standard fair probability comparison
+- Cache drops from **1,698 markets** to **~267 actionable markets**
+- Monitoring focuses exclusively on game-specific edges
+- No more Olympics, MVP, or Coach of the Year clutter
+- Same 24h rolling window, just cleaner data
 
