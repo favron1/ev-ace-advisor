@@ -206,11 +206,18 @@ export default function Stats() {
                               {log.event_name}
                             </TableCell>
                             <TableCell>
-                              <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                log.side === 'YES' ? 'bg-green-500/20 text-green-500' : 'bg-red-500/20 text-red-500'
-                              }`}>
-                                {log.side}
-                              </span>
+                              <div className="flex items-center gap-1.5">
+                                <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                  log.side === 'YES' ? 'bg-green-500/20 text-green-500' : 'bg-red-500/20 text-red-500'
+                                }`}>
+                                  {log.side}
+                                </span>
+                                {log.recommended_outcome && (
+                                  <span className="text-xs text-muted-foreground truncate max-w-[120px]" title={log.recommended_outcome}>
+                                    {log.recommended_outcome}
+                                  </span>
+                                )}
+                              </div>
                             </TableCell>
                             <TableCell className="text-right font-mono">
                               {(log.entry_price * 100).toFixed(0)}¢

@@ -16,6 +16,7 @@ export interface SignalLogEntry {
   settled_at: string | null;
   stake_amount: number | null;
   polymarket_condition_id: string | null;
+  recommended_outcome: string | null;
 }
 
 export interface DailyStats {
@@ -59,12 +60,24 @@ export function useSignalStats() {
       setLoading(true);
       const { data, error: fetchError } = await supabase
         .from('signal_logs')
-        .select('*')
+        .select(`
+          *,
+          signal_opportunities!signal_logs_opportunity_id_fkey (
+            recommended_outcome
+          )
+        `)
         .order('created_at', { ascending: false })
         .limit(500);
 
       if (fetchError) throw fetchError;
-      setLogs((data || []) as SignalLogEntry[]);
+      
+      // Flatten the joined data
+      const logsWithOutcome = (data || []).map((log: Record<string, unknown>) => ({
+        ...log,
+        recommended_outcome: (log.signal_opportunities as { recommended_outcome?: string } | null)?.recommended_outcome || null,
+      })) as SignalLogEntry[];
+      
+      setLogs(logsWithOutcome);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch logs');
