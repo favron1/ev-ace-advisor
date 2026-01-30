@@ -147,11 +147,43 @@ Deno.serve(async (req) => {
 
     // Parse optional request body for manual trigger
     let forceCheck = false;
+    let recalculatePL = false;
     try {
       const body = await req.json();
       forceCheck = body?.force === true;
+      recalculatePL = body?.recalculatePL === true;
     } catch {
       // No body or invalid JSON, use defaults
+    }
+    
+    // ========================================================================
+    // STEP 0: Fix any settled bets with $0 P/L (if recalculatePL requested)
+    // ========================================================================
+    let plFixedCount = 0;
+    if (recalculatePL) {
+      const { data: brokenBets, error: brokenError } = await supabase
+        .from('signal_logs')
+        .select('id, outcome, entry_price, stake_amount')
+        .in('outcome', ['win', 'loss'])
+        .eq('profit_loss', 0)
+        .gt('stake_amount', 0);
+      
+      if (!brokenError && brokenBets && brokenBets.length > 0) {
+        console.log(`[SETTLE-BETS] Fixing P/L for ${brokenBets.length} bets with $0 profit_loss`);
+        
+        for (const bet of brokenBets) {
+          const pl = calculatePL(bet.outcome as 'win' | 'loss', bet.stake_amount, bet.entry_price);
+          const { error: fixError } = await supabase
+            .from('signal_logs')
+            .update({ profit_loss: pl })
+            .eq('id', bet.id);
+          
+          if (!fixError) {
+            plFixedCount++;
+            console.log(`[SETTLE-BETS] Fixed P/L for bet ${bet.id}: ${pl >= 0 ? '+' : ''}$${pl.toFixed(2)}`);
+          }
+        }
+      }
     }
 
     // ========================================================================
@@ -317,6 +349,7 @@ Deno.serve(async (req) => {
         checked: checkedCount,
         settled: settledCount,
         in_play: inPlayCount,
+        plFixed: plFixedCount,
         results,
         duration_ms: duration,
       }),
