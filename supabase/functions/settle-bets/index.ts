@@ -20,6 +20,7 @@ interface PendingBet {
   stake_amount: number | null;
   polymarket_condition_id: string;
   created_at: string;
+  recommended_outcome: string | null;
 }
 
 interface GammaMarketResponse {
@@ -27,6 +28,7 @@ interface GammaMarketResponse {
   closed: boolean;
   active: boolean;
   end_date_iso: string;
+  question?: string;
   tokens?: Array<{
     token_id: string;
     outcome: string;
@@ -60,6 +62,7 @@ interface MarketStatus {
   inPlay: boolean;
   yesWon: boolean | null;
   price: number | null;
+  question?: string;
 }
 
 async function checkMarketResolution(conditionId: string): Promise<MarketStatus> {
@@ -92,13 +95,13 @@ async function checkMarketResolution(conditionId: string): Promise<MarketStatus>
       // Be stricter to avoid false settlements from temporary price spikes.
       // (At real resolution, YES/NO typically pins near 0 or 1.)
       if (yesPrice >= 0.98) {
-        return { resolved: true, inPlay: false, yesWon: true, price: yesPrice };
+        return { resolved: true, inPlay: false, yesWon: true, price: yesPrice, question: market.question };
       } else if (yesPrice <= 0.02) {
-        return { resolved: true, inPlay: false, yesWon: false, price: yesPrice };
+        return { resolved: true, inPlay: false, yesWon: false, price: yesPrice, question: market.question };
       }
 
       // Closed but not clearly resolved (treat as void/manual review)
-      return { resolved: true, inPlay: false, yesWon: null, price: yesPrice };
+      return { resolved: true, inPlay: false, yesWon: null, price: yesPrice, question: market.question };
     }
 
     // Not closed, but inactive => likely in-play (or temporarily suspended)
@@ -160,7 +163,10 @@ Deno.serve(async (req) => {
     
     const { data: pendingBets, error: fetchError } = await supabase
       .from('signal_logs')
-      .select('id, event_name, side, entry_price, stake_amount, polymarket_condition_id, created_at')
+      .select(`
+        id, event_name, side, entry_price, stake_amount, polymarket_condition_id, created_at,
+        signal_opportunities!signal_logs_opportunity_id_fkey (recommended_outcome)
+      `)
       .or('outcome.is.null,outcome.eq.pending,outcome.eq.in_play')
       .not('polymarket_condition_id', 'is', null)
       .lt('created_at', cutoff)
@@ -191,7 +197,19 @@ Deno.serve(async (req) => {
     let checkedCount = 0;
     const results: Array<{ id: string; outcome: string; pl: number }> = [];
 
-    for (const bet of pendingBets as PendingBet[]) {
+    // Transform the joined data to flatten recommended_outcome
+    const betsWithOutcome = pendingBets.map((bet: Record<string, unknown>) => ({
+      id: bet.id as string,
+      event_name: bet.event_name as string,
+      side: bet.side as string,
+      entry_price: bet.entry_price as number,
+      stake_amount: bet.stake_amount as number | null,
+      polymarket_condition_id: bet.polymarket_condition_id as string,
+      created_at: bet.created_at as string,
+      recommended_outcome: (bet.signal_opportunities as { recommended_outcome?: string } | null)?.recommended_outcome || null,
+    })) as PendingBet[];
+
+    for (const bet of betsWithOutcome) {
       checkedCount++;
       
       const resolution = await checkMarketResolution(bet.polymarket_condition_id);
@@ -215,16 +233,49 @@ Deno.serve(async (req) => {
       }
 
       // Determine bet outcome
+      // The key insight: Polymarket H2H markets are formatted as "Home vs Away" where YES = Home wins.
+      // But our recommended_outcome might be for the away team, meaning we should check NO, not YES.
+      // We need to determine if our recommended team actually won based on the market resolution.
       let outcome: 'win' | 'loss' | 'void';
       
       if (resolution.yesWon === null) {
         // Market resolved but unclear winner = void
         outcome = 'void';
-      } else if (bet.side === 'YES') {
-        outcome = resolution.yesWon ? 'win' : 'loss';
       } else {
-        // bet.side === 'NO'
-        outcome = resolution.yesWon ? 'loss' : 'win';
+        // Determine if our recommended team won
+        // For H2H markets: "Team A vs Team B" → YES = Team A wins, NO = Team B wins
+        // If recommended_outcome matches the YES team (first team in question), and yesWon = true → win
+        // If recommended_outcome matches the NO team (second team in question), and yesWon = false → win
+        
+        const question = resolution.question || bet.event_name;
+        const recOutcome = bet.recommended_outcome?.toLowerCase() || '';
+        
+        // Parse teams from question "Team A vs. Team B" or "Team A vs Team B"
+        const vsMatch = question.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
+        const homeTeam = vsMatch?.[1]?.toLowerCase().trim() || '';
+        const awayTeam = vsMatch?.[2]?.toLowerCase().trim() || '';
+        
+        // Check if recommended outcome matches home team (YES side) or away team (NO side)
+        const betOnHomeTeam = homeTeam && recOutcome.includes(homeTeam.split(' ').pop() || '');
+        const betOnAwayTeam = awayTeam && recOutcome.includes(awayTeam.split(' ').pop() || '');
+        
+        console.log(`[SETTLE-BETS] ${bet.event_name}: recOutcome="${recOutcome}", home="${homeTeam}", away="${awayTeam}", yesWon=${resolution.yesWon}, betOnHome=${betOnHomeTeam}, betOnAway=${betOnAwayTeam}`);
+        
+        if (betOnHomeTeam && !betOnAwayTeam) {
+          // We bet on home team (YES side)
+          outcome = resolution.yesWon ? 'win' : 'loss';
+        } else if (betOnAwayTeam && !betOnHomeTeam) {
+          // We bet on away team (NO side)
+          outcome = resolution.yesWon ? 'loss' : 'win';
+        } else {
+          // Fallback to the stored side if we can't determine from recommended_outcome
+          console.log(`[SETTLE-BETS] Falling back to side=${bet.side} for ${bet.event_name}`);
+          if (bet.side === 'YES') {
+            outcome = resolution.yesWon ? 'win' : 'loss';
+          } else {
+            outcome = resolution.yesWon ? 'loss' : 'win';
+          }
+        }
       }
 
       // Calculate P/L
