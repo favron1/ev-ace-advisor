@@ -1,102 +1,187 @@
 
-# Fix: Expand Polymarket Market Discovery
 
-## Problem Identified
+# Market Watch Dashboard
 
-The "Found 6 events" message is misleading. Your cache actually contains **511 markets** with **104 actively monitored**. The issue is:
+## Overview
 
-1. **Gamma API date problem**: 486 out of 500 events from the Gamma API have `endDate` set to season end (e.g., July 2026 for NBA) rather than game day, so they fail the 24-hour window filter
-2. **Toast message is incorrect**: It shows only Gamma API qualifiers (6), not the full picture including Firecrawl games (39+)
-3. **Firecrawl is working well**: It scraped 39 games (20 NHL, 10 NBA, 8 NCAA, 1 NFL) and they ARE being monitored
+Create a comprehensive, always-visible dashboard that shows exactly what the system is monitoring at any given time, broken down by sport, source, and status. This will eliminate confusion about what's being scanned, what's being watched, and what edges have been found.
 
-## Current Data in Your Cache
+## Current State
 
-| Source | Monitoring Status | Count |
-|--------|-------------------|-------|
-| Gamma API | Watching | 106 (NHL) |
-| Firecrawl | Watching | 50 (NHL: 30, NBA: 10, NCAA: 9, NFL: 1) |
-| Gamma API | Idle (futures/past) | 355 |
-| **Total Active Monitoring** | | **~156** |
+The existing `PolymarketCacheStats` component only shows aggregate counts. The data exists but isn't visible:
 
-## Technical Fixes
+| Status | Sport | Source | Count |
+|--------|-------|--------|-------|
+| watching | NHL | API | 50 |
+| watching | NHL | Firecrawl | 30 |
+| watching | NBA | Firecrawl | 10 |
+| watching | NCAA | Firecrawl | 9 |
+| watching | NFL | Both | 2 |
+| idle | basketball_nba | API | 100 (futures) |
+| triggered | NHL | API | 1 |
 
-### Fix 1: Correct the Toast Message
+**Total Active Monitoring: ~104 markets**
 
-Show the **total markets being monitored**, not just Gamma API qualifiers:
+## Proposed Solution
 
-```typescript
-// In useSignals.ts runDetection()
-const totalMarkets = syncData.upserted_to_cache + (syncData.firecrawl_upserted || 0);
-toast({ title: `Checking ${totalMarkets} markets for edges...` });
+### New Component: `MarketWatchDashboard.tsx`
 
-// Or show total from cache with watching status
-const watchingCount = syncData.total_watching || totalMarkets;
+A collapsible/expandable panel that shows:
+
+1. **Summary Row** - Quick stats at a glance
+2. **Sport Breakdown** - Expandable sections per sport
+3. **Market List** - Scrollable list of currently watched markets
+4. **Scan History** - Recent scan results with edge counts
+
+---
+
+## Visual Layout
+
+```text
++--------------------------------------------------+
+| MARKET WATCH                        [Collapse ^] |
++--------------------------------------------------+
+| MONITORING NOW                                   |
+| +--------+ +--------+ +--------+ +--------+      |
+| |  104   | |   1    | |   2    | |  511   |      |
+| |Watching| |Trigger | | Edges  | | Total  |      |
+| +--------+ +--------+ +--------+ +--------+      |
++--------------------------------------------------+
+| BY SPORT                                         |
+|                                                  |
+| NHL      [================] 81 watching          |
+|          API: 50 | Firecrawl: 30 | Triggered: 1  |
+|                                                  |
+| NBA      [====            ] 11 watching          |
+|          API: 1  | Firecrawl: 10                 |
+|                                                  |
+| NCAA     [===             ] 9 watching           |
+|          Firecrawl: 9                            |
+|                                                  |
+| NFL      [=               ] 2 watching           |
+|          API: 1  | Firecrawl: 1                  |
++--------------------------------------------------+
+| RECENT SCANS                                     |
+|                                                  |
+| 8:35am  104 markets | 2 edges | 1 triggered      |
+| 8:30am  102 markets | 0 edges | 0 triggered      |
+| 8:25am  100 markets | 1 edge  | 0 triggered      |
++--------------------------------------------------+
+| ACTIVE MARKETS (tap to expand)           [v]     |
+|                                                  |
+| Blue Jackets vs Blackhawks  $55K  +15.2% edge    |
+| Islanders vs Rangers        $776K  50/50         |
+| Stars vs Golden Knights     $558K  47/53         |
+| ... +98 more                                     |
++--------------------------------------------------+
 ```
 
-### Fix 2: Improve Date Detection for Gamma API Events
+---
 
-For events where `endDate` is far in the future (season end), use alternative date sources:
+## Technical Implementation
+
+### 1. New Hook: `useMarketWatch.ts`
+
+Consolidates data from multiple sources:
 
 ```typescript
-// Enhanced date detection in polymarket-sync-24h/index.ts
-function isWithin24HourWindow(event) {
-  // 1. startDate (most accurate)
-  // 2. Parse from market question: "on 2026-01-31?" or "January 31"
-  // 3. Parse from title: "Lakers vs Celtics - Jan 31"
-  // 4. Check if today's games by querying Odds API schedule
+interface MarketWatchStats {
+  // Summary counts
+  totalWatching: number;
+  totalTriggered: number;
+  totalEdgesFound: number;
+  totalInCache: number;
+  
+  // By sport breakdown
+  bySport: {
+    sport: string;
+    watching: number;
+    triggered: number;
+    apiCount: number;
+    firecrawlCount: number;
+  }[];
+  
+  // Active markets with details
+  watchedMarkets: {
+    id: string;
+    eventName: string;
+    sport: string;
+    source: 'api' | 'firecrawl';
+    volume: number;
+    yesPrice: number;
+    noPrice: number;
+    hasEdge: boolean;
+    edgePercent?: number;
+    status: 'watching' | 'triggered' | 'idle';
+  }[];
+  
+  // Scan history
+  recentScans: {
+    timestamp: Date;
+    marketsChecked: number;
+    edgesFound: number;
+    signalsCreated: number;
+  }[];
 }
 ```
 
-### Fix 3: Add Match-Day Detection from External Schedule
+### 2. New Component: `MarketWatchDashboard.tsx`
 
-Cross-reference Polymarket events with today's games from the Odds API:
+Features:
+- Collapsible sections for each sport
+- Color-coded status indicators
+- Real-time updates via Supabase subscription
+- Scrollable market list with search/filter
+- Compact mode for sidebar, full mode for modal
 
-```typescript
-// Fetch today's schedule from Odds API
-const todaysGames = await fetchOddsApi('basketball_nba', 'h2h');
-const gameToday = todaysGames.find(g => 
-  normalize(g.home_team).includes(normalize(polymarketTeam1)) ||
-  normalize(g.away_team).includes(normalize(polymarketTeam1))
-);
+### 3. Integration Points
 
-if (gameToday && gameToday.commence_time < in24Hours) {
-  // Override the bad Gamma API date with Odds API date
-  return { inWindow: true, resolvedDate: gameToday.commence_time };
-}
-```
+- Add to Terminal.tsx in the right sidebar
+- Subscribe to `polymarket_h2h_cache` changes
+- Subscribe to `signal_opportunities` changes
+- Track scan history locally or via new table
 
-### Fix 4: Update Sync Response to Include All Data
+---
 
-```typescript
-return {
-  success: true,
-  total_fetched: allEvents.length,
-  qualifying_from_gamma: qualifying.length,  // 6
-  qualifying_from_firecrawl: firecrawlGames.length,  // 39
-  total_monitoring: monitored,  // Combined total
-  // ...
-}
-```
+## Data Sources
 
-## Summary of Changes
+| Data | Source Table | Query |
+|------|--------------|-------|
+| Watching markets | `polymarket_h2h_cache` | `WHERE monitoring_status = 'watching'` |
+| Triggered markets | `polymarket_h2h_cache` | `WHERE monitoring_status = 'triggered'` |
+| Active edges | `signal_opportunities` | `WHERE status = 'active'` |
+| Event states | `event_watch_state` | All states |
+| Scan results | `signal_opportunities` | Group by hour |
 
-| File | Change |
-|------|--------|
-| `src/hooks/useSignals.ts` | Fix toast to show total monitored, not just Gamma qualifiers |
-| `supabase/functions/polymarket-sync-24h/index.ts` | Add Odds API cross-reference for date detection |
-| `supabase/functions/polymarket-sync-24h/index.ts` | Return clearer stats in response |
+---
 
-## What This Means for Your Trading
+## Files to Create/Modify
 
-Your system IS monitoring ~156 markets across all sports. The "6 events" message was just showing the wrong number. After this fix:
+| File | Action | Description |
+|------|--------|-------------|
+| `src/hooks/useMarketWatch.ts` | Create | Hook to fetch and aggregate market data |
+| `src/components/terminal/MarketWatchDashboard.tsx` | Create | Main dashboard component |
+| `src/pages/Terminal.tsx` | Modify | Replace/enhance PolymarketCacheStats |
 
-1. Toast will show "Checking ~156 markets for edges..."
-2. More NBA/NCAA games will qualify as their dates are properly detected
-3. The monitor will continue checking all 156 markets against bookmaker data
+---
 
-## Important Reality Check
+## Features
 
-Even with all markets being scanned, edges are rare because:
-- Polymarket NBA has low volume (most traders focus on NHL)
-- Bookmaker odds and Polymarket prices are often aligned (no mispricing)
-- When edges exist, they're typically 2-4% which nets ~0.5-2% after fees
+1. **Real-time Updates**: Supabase subscription refreshes data automatically
+2. **Sport Breakdown**: See exactly how many markets per sport are monitored
+3. **Source Tracking**: Distinguish API vs Firecrawl markets
+4. **Edge Visibility**: Highlight markets with detected edges
+5. **Scan History**: See results from recent scans at a glance
+6. **Expandable Markets**: Click to see full list of watched markets
+7. **Volume Indicators**: Show market liquidity for each game
+
+---
+
+## User Benefits
+
+- **No more confusion** about what "6 events" means
+- **Clear visibility** into multi-sport coverage
+- **Real-time feedback** when scans complete
+- **Easy verification** that your filters are working
+- **Confidence** that the system is actually monitoring what you expect
+
