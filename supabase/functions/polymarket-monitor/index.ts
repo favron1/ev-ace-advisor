@@ -566,11 +566,8 @@ async function sendSmsAlert(
   betSide: 'YES' | 'NO',
   movementDirection: 'shortening' | 'drifting' | null
 ): Promise<boolean> {
-  // Only send SMS for ELITE and STRONG signals (note: high-edge statics are now promoted to strong)
-  if (signalTier !== 'elite' && signalTier !== 'strong') {
-    console.log(`[POLY-MONITOR] Skipping SMS: tier=${signalTier}, edge=${(rawEdge * 100).toFixed(1)}% (need elite/strong or 10%+ raw edge)`);
-    return false;
-  }
+  // Send SMS for ALL new signals that make it to the signal feed
+  console.log(`[POLY-MONITOR] Sending SMS: tier=${signalTier}, edge=${(rawEdge * 100).toFixed(1)}%`);
   
   try {
     const { data: profiles } = await supabase
@@ -1385,10 +1382,9 @@ Deno.serve(async (req) => {
               console.log(`[POLY-MONITOR] Created new ${signalTier} ${betSide} signal for ${event.event_name}`);
             }
 
-            // Send SMS for NEW ELITE/STRONG signals OR high-edge (10%+) signals
-            const shouldSendSms = signalTier === 'elite' || signalTier === 'strong' || rawEdge >= 0.10;
-            if (!signalError && signal && !existingSignal && shouldSendSms) {
-              console.log(`[POLY-MONITOR] SMS eligible: tier=${signalTier}, rawEdge=${(rawEdge * 100).toFixed(1)}%`);
+            // Send SMS for ALL new signals added to the feed (user request)
+            if (!signalError && signal && !existingSignal) {
+              console.log(`[POLY-MONITOR] New signal created - sending SMS: tier=${signalTier}, rawEdge=${(rawEdge * 100).toFixed(1)}%`);
               const alertSent = await sendSmsAlert(
                 supabase, event, livePolyPrice, bookmakerFairProb,
                 rawEdge, netEdge, liveVolume, stakeAmount, marketType, teamName,
