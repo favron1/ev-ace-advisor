@@ -109,7 +109,77 @@ function expandTeamNamesLocally(
   return null;
 }
 
-// ============= END NICKNAME EXPANSION =============
+// ============= DIRECT ODDS API FUZZY MATCHING =============
+// Fast, reliable fallback before AI - directly matches against Odds API game list
+
+interface FuzzyMatchResult {
+  game: any;
+  homeTeam: string;
+  awayTeam: string;
+  similarity: number;
+}
+
+// Calculate similarity between two strings (Jaccard-like on words)
+function calculateSimilarity(str1: string, str2: string): number {
+  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(w => w.length > 2);
+  const words1 = new Set(normalize(str1));
+  const words2 = new Set(normalize(str2));
+  
+  if (words1.size === 0 || words2.size === 0) return 0;
+  
+  let intersection = 0;
+  for (const word of words1) {
+    if (words2.has(word)) intersection++;
+  }
+  
+  return intersection / Math.min(words1.size, words2.size);
+}
+
+// Direct fuzzy match against Odds API games - faster and more reliable than AI
+function findDirectOddsApiMatch(
+  eventName: string,
+  bookmakerGames: any[],
+  minSimilarity: number = 0.5
+): FuzzyMatchResult | null {
+  if (!eventName || bookmakerGames.length === 0) return null;
+  
+  const eventNorm = eventName.toLowerCase().replace(/[^a-z0-9\s]/g, '');
+  let bestMatch: FuzzyMatchResult | null = null;
+  let bestScore = 0;
+  
+  for (const game of bookmakerGames) {
+    const homeTeam = game.home_team || '';
+    const awayTeam = game.away_team || '';
+    
+    // Build full game name for comparison
+    const gameFullName = `${homeTeam} vs ${awayTeam}`;
+    
+    // Calculate similarity
+    const similarity = calculateSimilarity(eventNorm, gameFullName.toLowerCase());
+    
+    if (similarity >= minSimilarity && similarity > bestScore) {
+      // Additional validation: at least one team's nickname should appear in event
+      const homeNickname = homeTeam.split(' ').pop()?.toLowerCase() || '';
+      const awayNickname = awayTeam.split(' ').pop()?.toLowerCase() || '';
+      
+      const homeInEvent = homeNickname.length > 2 && eventNorm.includes(homeNickname);
+      const awayInEvent = awayNickname.length > 2 && eventNorm.includes(awayNickname);
+      
+      if (homeInEvent || awayInEvent) {
+        bestScore = similarity;
+        bestMatch = { game, homeTeam, awayTeam, similarity };
+      }
+    }
+  }
+  
+  if (bestMatch) {
+    console.log(`[POLY-MONITOR] FUZZY MATCH: "${eventName}" → ${bestMatch.homeTeam} vs ${bestMatch.awayTeam} (${(bestMatch.similarity * 100).toFixed(0)}% sim)`);
+  }
+  
+  return bestMatch;
+}
+
+// ============= END DIRECT ODDS API FUZZY MATCHING =============
 
 // Track AI calls per run to avoid timeouts
 let aiCallsThisRun = 0;
@@ -143,8 +213,18 @@ async function resolveTeamNamesWithAI(
   }
 
   aiCallsThisRun++;
-  const prompt = `What exact sports matchup is being referred to here: "${eventName}" in ${sport}?
-Return the full official team names (e.g., "Philadelphia Flyers" not "Flyers").`;
+  
+  // IMPROVED PROMPT: Require EXACT team name presence in query
+  // Prevents AI from returning semantically related but wrong games
+  const prompt = `Find the EXACT ${sport} matchup for: "${eventName}"
+
+CRITICAL RULES:
+1. Your response MUST contain BOTH teams that appear in the query
+2. If the query says "Flyers vs Bruins", you MUST return teams containing "Flyers" AND "Bruins"
+3. If no exact match exists, respond with confidence "low"
+4. Return the full official team names (e.g., "Philadelphia Flyers" not just "Flyers")
+
+Example: "Flyers vs Bruins" → {"home_team": "Philadelphia Flyers", "away_team": "Boston Bruins"}`;
 
   try {
     // Add timeout to AI call (8 seconds max, increased from 5)
@@ -163,7 +243,7 @@ Return the full official team names (e.g., "Philadelphia Flyers" not "Flyers").`
         messages: [
           { 
             role: "system", 
-            content: "You are a sports team name resolver. Return the full official team names for abbreviated matchups in US professional sports (NHL, NBA, NFL, NCAA)." 
+            content: "You are a sports team name resolver for US professional sports (NHL, NBA, NFL, NCAA). CRITICAL: You must ONLY return team names that appear in the user's query. Never return teams that aren't mentioned. If unsure, use low confidence." 
           },
           { role: "user", content: prompt }
         ],
@@ -171,13 +251,13 @@ Return the full official team names (e.g., "Philadelphia Flyers" not "Flyers").`
           type: "function",
           function: {
             name: "resolve_matchup",
-            description: "Return the full official team names for a matchup",
+            description: "Return the full official team names for a matchup. Teams MUST be from the input query.",
             parameters: {
               type: "object",
               properties: {
-                home_team: { type: "string", description: "Full official name e.g. 'Philadelphia Flyers'" },
-                away_team: { type: "string", description: "Full official name e.g. 'Boston Bruins'" },
-                confidence: { type: "string", enum: ["high", "medium", "low"] }
+                home_team: { type: "string", description: "Full official name of first team from query (e.g. 'Philadelphia Flyers')" },
+                away_team: { type: "string", description: "Full official name of second team from query (e.g. 'Boston Bruins')" },
+                confidence: { type: "string", enum: ["high", "medium", "low"], description: "Use 'low' if teams in query don't match standard team names" }
               },
               required: ["home_team", "away_team", "confidence"]
             }
@@ -213,8 +293,29 @@ Return the full official team names (e.g., "Philadelphia Flyers" not "Flyers").`
     }
 
     const result = { homeTeam: args.home_team, awayTeam: args.away_team };
+    
+    // NEW: Validate AI response contains teams from the original query
+    // Prevents AI from returning wrong games (e.g., "Pelicans" for "Blazers vs Knicks")
+    const eventNorm = eventName.toLowerCase().replace(/[^a-z0-9\s]/g, '');
+    const homeNorm = args.home_team.toLowerCase().replace(/[^a-z0-9\s]/g, '');
+    const awayNorm = args.away_team.toLowerCase().replace(/[^a-z0-9\s]/g, '');
+    
+    // Extract last words (nicknames) from resolved teams
+    const homeNickname = homeNorm.split(' ').pop() || '';
+    const awayNickname = awayNorm.split(' ').pop() || '';
+    
+    // At least one team's nickname must appear in the original query
+    const homeInQuery = homeNickname.length > 2 && eventNorm.includes(homeNickname);
+    const awayInQuery = awayNickname.length > 2 && eventNorm.includes(awayNickname);
+    
+    if (!homeInQuery && !awayInQuery) {
+      console.log(`[POLY-MONITOR] AI INVALID: resolved teams "${args.home_team}" / "${args.away_team}" not found in "${eventName}" - REJECTING`);
+      aiResolvedNames.set(cacheKey, null);
+      return null;
+    }
+    
     aiResolvedNames.set(cacheKey, result);
-    console.log(`[POLY-MONITOR] AI resolved "${eventName}" → ${result.homeTeam} vs ${result.awayTeam} (${args.confidence})`);
+    console.log(`[POLY-MONITOR] AI resolved "${eventName}" → ${result.homeTeam} vs ${result.awayTeam} (${args.confidence}, validated)`);
     
     return result;
   } catch (error) {
@@ -1088,7 +1189,23 @@ Deno.serve(async (req) => {
           }
         }
 
-        // TIER 3: AI resolution (slower, but handles edge cases)
+        // TIER 3: Direct Odds API fuzzy matching (fast, no AI overhead)
+        if (!match && bookmakerGames.length > 0) {
+          const fuzzyResult = findDirectOddsApiMatch(event.event_name, bookmakerGames, 0.5);
+          if (fuzzyResult) {
+            match = findBookmakerMatch(
+              `${fuzzyResult.homeTeam} vs ${fuzzyResult.awayTeam}`,
+              event.polymarket_question || '',
+              marketType,
+              bookmakerGames
+            );
+            if (match) {
+              matchMethod = 'fuzzy';
+            }
+          }
+        }
+
+        // TIER 4: AI resolution (slower, but handles edge cases)
         if (!match && bookmakerGames.length > 0) {
           const resolved = await resolveTeamNamesWithAI(event.event_name, sport);
           
