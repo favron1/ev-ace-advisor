@@ -14,6 +14,42 @@ export type Database = {
   }
   public: {
     Tables: {
+      ai_advisor_logs: {
+        Row: {
+          analysis_type: string
+          applied_at: string | null
+          created_at: string | null
+          id: string
+          insight_category: string | null
+          priority: string | null
+          recommendation: string
+          status: string | null
+          supporting_data: Json | null
+        }
+        Insert: {
+          analysis_type: string
+          applied_at?: string | null
+          created_at?: string | null
+          id?: string
+          insight_category?: string | null
+          priority?: string | null
+          recommendation: string
+          status?: string | null
+          supporting_data?: Json | null
+        }
+        Update: {
+          analysis_type?: string
+          applied_at?: string | null
+          created_at?: string | null
+          id?: string
+          insight_category?: string | null
+          priority?: string | null
+          recommendation?: string
+          status?: string | null
+          supporting_data?: Json | null
+        }
+        Relationships: []
+      }
       arbitrage_config: {
         Row: {
           created_at: string | null
