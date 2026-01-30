@@ -1,61 +1,85 @@
 
-# Fix: Restore Bookmaker Odds Ingestion Pipeline
 
-## Problem
-New bets aren't coming through because the **sharp bookmaker data pipeline is broken**. The movement detection system that triggers signals requires fresh odds data to track probability changes, but no new data has been captured in over 8 hours.
+# Fix: Remove Bookmaker-First Detection (Orphaned Signals)
 
-## What Broke
-1. The `ingest-odds` function (which fetches bookmaker odds and populates the `sharp_book_snapshots` table) is not scheduled to run automatically
-2. Without fresh snapshots, the movement detection system can't calculate if sharp books are moving
-3. Without movement detection, signals below 5% raw edge are filtered out as "No trigger"
+## Root Cause Identified
+The system has **two conflicting detection functions**:
 
-## Technical Details
-The detection system uses a "Dual Trigger" approach:
-- **Edge Trigger**: Raw edge ≥ 5% (works without movement data)
-- **Movement Trigger**: ≥2 sharp books moving same direction (requires fresh snapshots)
+| Function | Approach | Status |
+|----------|----------|--------|
+| `detect-signals` | Bookmaker-first → Creates orphaned signals | **WRONG - Still running** |
+| `polymarket-monitor` | Polymarket-first → Only tradeable signals | **CORRECT - The intended flow** |
 
-Most real arbitrage edges are 3-8%, which need the Movement Trigger to surface them.
+The 12 orphaned signals exist because `detect-signals` fetched bookmaker data for NBA/Tennis (which have no Polymarket H2H markets) and created signals with `is_true_arbitrage = false`.
 
-## Fix Plan
+---
 
-### Step 1: Add pg_cron Job for `ingest-odds`
-Schedule `ingest-odds` to run every 10 minutes to continuously populate the sharp book snapshots table:
+## Technical Fix
+
+### Step 1: Clean Up Orphaned Signals
+Delete all signals that weren't matched to Polymarket (they're not tradeable):
 
 ```sql
-SELECT cron.schedule(
-  'ingest-odds-10min',
-  '*/10 * * * *',
-  $$
-  SELECT net.http_post(
-    url:='https://tjwqkbyyplaycvnjwqbh.supabase.co/functions/v1/ingest-odds',
-    headers:='{"Content-Type": "application/json", "Authorization": "Bearer <anon_key>"}'::jsonb,
-    body:='{}'::jsonb
-  ) as request_id;
-  $$
+DELETE FROM signal_opportunities 
+WHERE is_true_arbitrage = false 
+  AND status = 'active';
+```
+
+### Step 2: Prevent Future Orphans
+Modify `detect-signals` to exit early and defer to `polymarket-monitor`. Add this guard at the top of the function:
+
+```typescript
+// DEPRECATED: This function uses bookmaker-first logic.
+// Use polymarket-monitor instead which follows Polymarket-first architecture.
+console.log('[DETECT-SIGNALS] DEPRECATED - Use polymarket-monitor instead');
+return new Response(
+  JSON.stringify({ 
+    deprecated: true, 
+    message: 'Use polymarket-monitor for Polymarket-first detection' 
+  }),
+  { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
 );
 ```
 
-### Step 2: Run Immediate Ingestion
-Manually trigger `ingest-odds` to populate fresh data immediately so the movement detection pipeline can start working.
-
-### Step 3: Clean Up Stale Snapshots
-Add a cleanup step to remove snapshots older than 2 hours (they're not useful for 30-minute movement windows):
+### Step 3: Remove Any Scheduled Runs of `detect-signals`
+Check for and remove any pg_cron jobs that call `detect-signals`:
 
 ```sql
-DELETE FROM sharp_book_snapshots 
-WHERE captured_at < NOW() - INTERVAL '2 hours';
+SELECT * FROM cron.job WHERE command LIKE '%detect-signals%';
+-- If found: SELECT cron.unschedule('job_name');
 ```
 
+---
+
+## How the Correct Flow Works
+
+```text
+polymarket-sync-24h (every 30min)
+         │
+         ▼
+   polymarket_h2h_cache
+   (Only Polymarket markets
+    with teams/prices)
+         │
+         ▼
+polymarket-monitor (every 5min)
+   │
+   ├── 1. Load markets from cache (Polymarket-first)
+   ├── 2. Group by sport (NHL, EPL, etc.)
+   ├── 3. Fetch bookmaker odds ONLY for those sports
+   ├── 4. Match Polymarket → Bookmaker
+   └── 5. Create signal ONLY if match found
+         │
+         ▼
+   signal_opportunities
+   (All signals have is_true_arbitrage = true)
+```
+
+---
+
 ## Expected Outcome
-- Fresh sharp book data every 10 minutes
-- Movement detection system can track probability shifts
-- Edges in the 3-8% range will trigger signals again
-- SMS alerts will resume for ELITE/STRONG signals
+- No more orphaned signals (NBA/Tennis without Polymarket H2H)
+- Signal feed shows only tradeable opportunities
+- `detect-signals` is deprecated and returns early
+- `polymarket-monitor` remains the sole detection path
 
-## API Quota Consideration
-Each `ingest-odds` call uses ~15-20 Odds API requests (one per sport). At 6 runs/hour × 24 hours = 144 runs × ~17 requests = ~2,450 requests/day.
-
-If you're on the free tier (500 requests/month), this will exceed limits quickly. You may need to:
-1. Reduce frequency to every 30 minutes (864 requests/day)
-2. Limit sports to NHL/NBA/Tennis only (~600 requests/day)
-3. Upgrade Odds API plan
