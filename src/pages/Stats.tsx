@@ -251,15 +251,19 @@ export default function Stats() {
                             </TableCell>
                             <TableCell>
                               {log.outcome === 'in_play' ? (
-                                <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-2 flex-wrap">
                                   <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-500/20 text-blue-500 animate-pulse">
                                     LIVE
                                   </span>
-                                  {log.live_score && (
+                                  {log.home_team && log.away_team && log.home_score && log.away_score ? (
+                                    <span className="text-xs font-mono font-medium text-foreground">
+                                      {log.home_team.substring(0, 3).toUpperCase()} {log.home_score}-{log.away_score} {log.away_team.substring(0, 3).toUpperCase()}
+                                    </span>
+                                  ) : log.live_score ? (
                                     <span className="text-xs font-mono font-medium text-foreground">
                                       {log.live_score}
                                     </span>
-                                  )}
+                                  ) : null}
                                   {log.game_status && (
                                     <span className="text-xs text-muted-foreground">
                                       ({log.game_status})

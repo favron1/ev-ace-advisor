@@ -21,6 +21,10 @@ export interface SignalLogEntry {
   // Live score data
   live_score?: string | null;
   game_status?: string | null;
+  home_team?: string | null;
+  away_team?: string | null;
+  home_score?: string | null;
+  away_score?: string | null;
 }
 
 export interface DailyStats {
@@ -105,6 +109,10 @@ export function useSignalStats() {
             if (score) {
               log.live_score = score.score;
               log.game_status = score.status;
+              log.home_team = score.home_team;
+              log.away_team = score.away_team;
+              log.home_score = score.home_score;
+              log.away_score = score.away_score;
             }
           }
         });
@@ -152,8 +160,8 @@ export function useSignalStats() {
   };
 
   // Fetch live scores from The Odds API via edge function
-  const fetchLiveScores = async (eventNames: string[]): Promise<Record<string, { score: string; status: string }>> => {
-    const scores: Record<string, { score: string; status: string }> = {};
+  const fetchLiveScores = async (eventNames: string[]): Promise<Record<string, { score: string; status: string; home_team: string; away_team: string; home_score: string; away_score: string }>> => {
+    const scores: Record<string, { score: string; status: string; home_team: string; away_team: string; home_score: string; away_score: string }> = {};
     
     try {
       const { data, error } = await supabase.functions.invoke('fetch-live-scores', {
@@ -167,17 +175,16 @@ export function useSignalStats() {
       
       if (data?.scores) {
         for (const score of data.scores) {
-          if (score.home_score !== null && score.away_score !== null) {
-            scores[score.event_name] = {
-              score: `${score.home_score}-${score.away_score}`,
-              status: score.game_status || '',
-            };
-          } else if (score.game_status) {
-            scores[score.event_name] = {
-              score: '',
-              status: score.game_status,
-            };
-          }
+          scores[score.event_name] = {
+            score: score.home_score !== null && score.away_score !== null 
+              ? `${score.home_score}-${score.away_score}` 
+              : '',
+            status: score.game_status || '',
+            home_team: score.home_team || '',
+            away_team: score.away_team || '',
+            home_score: score.home_score || '',
+            away_score: score.away_score || '',
+          };
         }
       }
     } catch (err) {
