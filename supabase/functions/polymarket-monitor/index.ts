@@ -2,6 +2,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { 
   buildSportEndpoints,
   detectSportFromText,
+  SPORTS_CONFIG,
+  getSportCodeFromLeague,
 } from '../_shared/sports-config.ts';
 
 const corsHeaders = {
@@ -23,6 +25,91 @@ const SHARP_BOOKS = ['pinnacle', 'betfair', 'betfair_ex_eu'];
 
 // AI resolution cache - persists across poll cycles
 const aiResolvedNames = new Map<string, { homeTeam: string; awayTeam: string } | null>();
+
+// ============= NICKNAME EXPANSION (FAST LOCAL MATCHING) =============
+
+// Build reverse nickname map: "flyers" -> "Philadelphia Flyers", "bruins" -> "Boston Bruins"
+function buildNicknameMap(sportCode: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const config = SPORTS_CONFIG[sportCode as keyof typeof SPORTS_CONFIG];
+  if (!config?.teamMap) return map;
+  
+  // Add abbreviation -> full name
+  for (const [abbr, fullName] of Object.entries(config.teamMap)) {
+    map.set(abbr.toLowerCase(), fullName);
+    
+    // Extract nickname from full name: "Philadelphia Flyers" -> "flyers"
+    const parts = fullName.split(' ');
+    if (parts.length >= 2) {
+      const nickname = parts[parts.length - 1].toLowerCase();
+      map.set(nickname, fullName);
+      
+      // Also add city name
+      const city = parts.slice(0, -1).join(' ').toLowerCase();
+      map.set(city, fullName);
+    }
+  }
+  
+  return map;
+}
+
+// Try to expand abbreviated team names using local team maps
+function expandTeamNamesLocally(
+  eventName: string,
+  sport: string
+): { homeTeam: string; awayTeam: string } | null {
+  const sportCode = getSportCodeFromLeague(sport);
+  if (!sportCode) return null;
+  
+  const nicknameMap = buildNicknameMap(sportCode);
+  if (nicknameMap.size === 0) return null;
+  
+  // Parse "Team A vs Team B" or "Team A vs. Team B"
+  const vsMatch = eventName.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
+  if (!vsMatch) return null;
+  
+  const team1Raw = vsMatch[1].trim().toLowerCase();
+  const team2Raw = vsMatch[2].trim().toLowerCase();
+  
+  // Try to find full names for both teams
+  let team1Full: string | null = null;
+  let team2Full: string | null = null;
+  
+  // Direct lookup first
+  if (nicknameMap.has(team1Raw)) {
+    team1Full = nicknameMap.get(team1Raw)!;
+  }
+  if (nicknameMap.has(team2Raw)) {
+    team2Full = nicknameMap.get(team2Raw)!;
+  }
+  
+  // Try partial matching if direct lookup failed
+  if (!team1Full) {
+    for (const [key, fullName] of nicknameMap) {
+      if (team1Raw.includes(key) || key.includes(team1Raw)) {
+        team1Full = fullName;
+        break;
+      }
+    }
+  }
+  if (!team2Full) {
+    for (const [key, fullName] of nicknameMap) {
+      if (team2Raw.includes(key) || key.includes(team2Raw)) {
+        team2Full = fullName;
+        break;
+      }
+    }
+  }
+  
+  // Only return if BOTH teams resolved
+  if (team1Full && team2Full) {
+    return { homeTeam: team1Full, awayTeam: team2Full };
+  }
+  
+  return null;
+}
+
+// ============= END NICKNAME EXPANSION =============
 
 // Resolve abbreviated team names using AI
 async function resolveTeamNamesWithAI(
@@ -918,21 +1005,40 @@ Deno.serve(async (req) => {
           }
         }
 
-        // Find bookmaker match - try direct matching first
+        // ============= TIERED MATCHING STRATEGY =============
+        // (sport already defined above from cache?.extracted_league)
+        
+        // TIER 1: Direct string matching (fastest)
         let match = findBookmakerMatch(
           event.event_name,
           event.polymarket_question || '',
           marketType,
           bookmakerGames
         );
+        let matchMethod = 'direct';
 
-        // AI FALLBACK: If no direct match and we have bookmaker data, ask AI to resolve team names
+        // TIER 2: Local nickname expansion (fast, no API)
         if (!match && bookmakerGames.length > 0) {
-          const sport = cache?.extracted_league || 'sports';
+          const expanded = expandTeamNamesLocally(event.event_name, sport);
+          if (expanded) {
+            match = findBookmakerMatch(
+              `${expanded.homeTeam} vs ${expanded.awayTeam}`,
+              event.polymarket_question || '',
+              marketType,
+              bookmakerGames
+            );
+            if (match) {
+              console.log(`[POLY-MONITOR] NICKNAME MATCH: "${event.event_name}" → ${expanded.homeTeam} vs ${expanded.awayTeam}`);
+              matchMethod = 'nickname';
+            }
+          }
+        }
+
+        // TIER 3: AI resolution (slower, but handles edge cases)
+        if (!match && bookmakerGames.length > 0) {
           const resolved = await resolveTeamNamesWithAI(event.event_name, sport);
           
           if (resolved) {
-            // Try matching again with AI-resolved full team names
             match = findBookmakerMatch(
               `${resolved.homeTeam} vs ${resolved.awayTeam}`,
               event.polymarket_question || '',
@@ -941,10 +1047,12 @@ Deno.serve(async (req) => {
             );
             
             if (match) {
-              console.log(`[POLY-MONITOR] AI fallback SUCCESS: "${event.event_name}" matched via ${resolved.homeTeam} vs ${resolved.awayTeam}`);
+              console.log(`[POLY-MONITOR] AI MATCH: "${event.event_name}" → ${resolved.homeTeam} vs ${resolved.awayTeam}`);
+              matchMethod = 'ai';
             }
           }
         }
+        // ============= END TIERED MATCHING =============
 
         let bookmakerFairProb: number | null = null;
         let teamName: string | null = null;
