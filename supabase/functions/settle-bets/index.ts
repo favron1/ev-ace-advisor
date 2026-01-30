@@ -152,7 +152,7 @@ Deno.serve(async (req) => {
     }
 
     // ========================================================================
-    // STEP 1: Get pending bets with condition_id
+    // STEP 1: Get pending/in_play bets with condition_id
     // ========================================================================
     // Only check bets older than 2 hours (unless force mode)
     const minAge = forceCheck ? 0 : 2 * 60 * 60 * 1000;
@@ -161,7 +161,7 @@ Deno.serve(async (req) => {
     const { data: pendingBets, error: fetchError } = await supabase
       .from('signal_logs')
       .select('id, event_name, side, entry_price, stake_amount, polymarket_condition_id, created_at')
-      .or('outcome.is.null,outcome.eq.pending')
+      .or('outcome.is.null,outcome.eq.pending,outcome.eq.in_play')
       .not('polymarket_condition_id', 'is', null)
       .lt('created_at', cutoff)
       .limit(50);
