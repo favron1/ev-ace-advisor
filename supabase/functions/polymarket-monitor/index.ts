@@ -38,18 +38,8 @@ function detectSportFromTextLocal(title: string, question: string): string | nul
   const detected = detectSportFromText(combined);
   if (detected) return detected;
   
-  // Fallback for additional sports not in main config
-  const fallbackPatterns: Array<{ patterns: RegExp[]; sport: string }> = [
-    { patterns: [/\bufc\b/, /\bmma\b/], sport: 'UFC' },
-    { patterns: [/\batp\b/, /\bwta\b/, /djokovic|sinner|alcaraz|medvedev|zverev|sabalenka|swiatek|gauff/i], sport: 'Tennis' },
-    { patterns: [/premier league|\bepl\b|arsenal|chelsea|liverpool|man city|manchester city|man united|manchester united|tottenham|spurs/i], sport: 'EPL' },
-    { patterns: [/\bmlb\b|yankees|red sox|dodgers|mets|phillies|braves|cubs|cardinals/i], sport: 'MLB' },
-    { patterns: [/champions league|\bucl\b|real madrid|barcelona|bayern|juventus/i], sport: 'UCL' },
-    { patterns: [/la liga|laliga|atletico madrid|sevilla|villarreal/i], sport: 'LaLiga' },
-    { patterns: [/serie a|napoli|roma|lazio|inter milan|ac milan/i], sport: 'SerieA' },
-    { patterns: [/bundesliga|leverkusen|leipzig|dortmund|frankfurt/i], sport: 'Bundesliga' },
-    { patterns: [/\bbox(?:ing)?\b|fury|usyk|joshua|canelo|crawford/i], sport: 'Boxing' },
-  ];
+  // No fallback patterns needed - using shared config for core 4 sports only
+  const fallbackPatterns: Array<{ patterns: RegExp[]; sport: string }> = [];
   
   for (const { patterns, sport } of fallbackPatterns) {
     if (patterns.some(p => p.test(combined))) {

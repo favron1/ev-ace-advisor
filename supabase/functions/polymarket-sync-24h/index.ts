@@ -30,33 +30,8 @@ function detectSport(title: string, question: string): string | null {
   const detected = detectSportFromText(combined);
   if (detected) return detected;
   
-  // Fallback for additional sports not in main config (Tennis, UFC, etc.)
-  const fallbackPatterns: Array<{ patterns: RegExp[]; sport: string }> = [
-    // UFC/MMA
-    { patterns: [/\bufc\b/, /\bmma\b/, /adesanya|jones|pereira|volkanovski|makhachev/i], sport: 'UFC' },
-    // Tennis
-    { patterns: [/\batp\b/, /\bwta\b/, /djokovic|sinner|alcaraz|medvedev|zverev/i, /australian open|french open|wimbledon|us open/i], sport: 'Tennis' },
-    // EPL
-    { patterns: [/premier league|\bepl\b|arsenal|chelsea|liverpool|man city|manchester city|man united/i], sport: 'EPL' },
-    // MLB
-    { patterns: [/\bmlb\b|yankees|red sox|dodgers|mets|phillies|braves/i], sport: 'MLB' },
-    // Champions League
-    { patterns: [/champions league|\bucl\b|real madrid|barcelona|bayern|juventus/i], sport: 'UCL' },
-    // La Liga
-    { patterns: [/la liga|laliga|atletico madrid|sevilla|villarreal/i], sport: 'LaLiga' },
-    // Serie A
-    { patterns: [/serie a|napoli|roma|lazio|inter milan|ac milan/i], sport: 'SerieA' },
-    // Bundesliga
-    { patterns: [/bundesliga|leverkusen|leipzig|dortmund|frankfurt/i], sport: 'Bundesliga' },
-    // Boxing
-    { patterns: [/\bbox(?:ing)?\b|fury|usyk|joshua|canelo|crawford/i], sport: 'Boxing' },
-    // Golf
-    { patterns: [/\bpga\b|\bgolf\b|masters|us open golf|british open/i], sport: 'Golf' },
-    // F1
-    { patterns: [/formula 1|\bf1\b|verstappen|hamilton|leclerc|norris/i], sport: 'F1' },
-    // Generic sports
-    { patterns: [/\bvs\.?\b.*(?:win|beat|defeat)/, /who\s+will\s+win.*(?:game|match|fight|bout)/i], sport: 'Sports' },
-  ];
+  // No fallback patterns needed - using shared config for core 4 sports only
+  const fallbackPatterns: Array<{ patterns: RegExp[]; sport: string }> = [];
   
   for (const { patterns, sport } of fallbackPatterns) {
     if (patterns.some(p => p.test(combined))) {

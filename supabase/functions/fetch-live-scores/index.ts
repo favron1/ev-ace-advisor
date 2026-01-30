@@ -32,11 +32,11 @@ interface OddsApiScore {
   last_update: string | null;
 }
 
-// Sport detection based on event name patterns
+// Sport detection based on event name patterns - CORE 4 SPORTS ONLY
 function detectSport(eventName: string): string[] {
   const name = eventName.toLowerCase();
   
-  // NHL detection - check first due to overlapping team names
+  // NHL detection - check first due to overlapping team names (Hawks = Blackhawks not Atlanta)
   const nhlTeams = ['blackhawks', 'bruins', 'canadiens', 'canucks', 'capitals', 'coyotes', 
     'devils', 'ducks', 'flames', 'flyers', 'hurricanes', 'islanders', 'jets', 'kings',
     'lightning', 'maple leafs', 'oilers', 'panthers', 'penguins', 'predators', 'rangers',
@@ -58,22 +58,18 @@ function detectSport(eventName: string): string[] {
     return ['basketball_nba'];
   }
   
-  // Soccer - EPL and major leagues
-  const eplTeams = ['arsenal', 'chelsea', 'liverpool', 'manchester', 'tottenham', 
-    'newcastle', 'brighton', 'aston villa', 'west ham', 'crystal palace', 'everton',
-    'fulham', 'wolves', 'bournemouth', 'brentford', 'nottingham', 'ipswich', 'leicester'];
+  // NFL detection
+  const nflTeams = ['chiefs', 'eagles', 'cowboys', 'patriots', 'packers', '49ers',
+    'ravens', 'bills', 'dolphins', 'jets', 'bengals', 'steelers', 'browns', 'colts',
+    'titans', 'jaguars', 'texans', 'broncos', 'raiders', 'chargers', 'commanders',
+    'giants', 'lions', 'vikings', 'bears', 'saints', 'falcons', 'buccaneers', 'panthers',
+    'rams', 'seahawks', 'cardinals'];
   
-  if (eplTeams.some(team => name.includes(team))) {
-    return ['soccer_epl'];
+  if (nflTeams.some(team => name.includes(team))) {
+    return ['americanfootball_nfl'];
   }
   
-  // Tennis - check for common patterns
-  if (name.includes(' vs ') && !name.includes('fc ') && !name.includes('city')) {
-    // Could be tennis - return multiple tennis sport keys
-    return ['tennis_atp_aus_open_singles', 'tennis_wta_aus_open_singles'];
-  }
-  
-  // Default: try NBA and NHL
+  // Default: try NBA and NHL (most common)
   return ['basketball_nba', 'icehockey_nhl'];
 }
 
