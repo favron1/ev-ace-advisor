@@ -1,117 +1,126 @@
 
 
-## Revert to 24-Hour Window + Expand to ALL Market Types
+## Plan: Fix Check Pending Button & Add Live Scores for In-Play Bets
 
-### Summary
+### Problem Summary
 
-The current system was recently expanded to a 7-day window but is restricted to H2H markets only. You want to go back to a **24-hour window** but capture **ALL market types** offered on Polymarket (H2H, Totals, Spreads, Player Props). This gives you comprehensive coverage of every tradeable opportunity within the critical execution window.
+1. **Check Pending Button Missing**: The button only appears when there are bets with `outcome = 'pending'` or `NULL`. Since all your recent bets were marked as `in_play` or `loss`, the button is hidden.
 
----
-
-### What Changes
-
-| Setting | Current | Proposed |
-|---------|---------|----------|
-| Time Window | 7 days | **24 hours** |
-| Market Types | H2H only | **All (H2H, Totals, Spreads, Props)** |
-| Sports Coverage | All sports | All sports (unchanged) |
-| Movement Tracking | All markets | All markets (unchanged) |
+2. **No Live Scores**: The system shows the current Polymarket price for in-play bets, but not actual game scores (e.g., "2-1, 75'").
 
 ---
 
-### Why 24 Hours + All Markets
+### Solution
 
-- **24-hour window**: Sharp money moves happen closest to event start; longer horizons add noise without increasing actionable edges
-- **All market types**: Polymarket offers Totals (Over/Under 220.5), Spreads (-5.5), and Props - each represents an independent edge opportunity
-- **Comprehensive coverage**: Every market within 24 hours gets monitored for both price edges AND bookmaker movement
+#### Part 1: Fix "Check Pending" Button Visibility
+
+**Change**: Modify the button to also appear when there are `in_play` bets, not just `pending` ones.
+
+- Rename button to "Check Bets" or "Refresh Results"  
+- Show when: `pending` OR `in_play` bets exist
+- Display count of both categories
+
+**File**: `src/pages/Stats.tsx`
 
 ---
 
-### Technical Changes
+#### Part 2: Add Live Scores Backend
 
-#### File: `supabase/functions/polymarket-sync-24h/index.ts`
+**Create**: New edge function `fetch-live-scores` that queries The Odds API scores endpoint.
 
-**Change 1: Revert to 24-hour window**
-```typescript
-// BEFORE (current):
-const in7Days = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-
-// AFTER:
-const in24Hours = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+**API Endpoint**:
+```
+GET https://api.the-odds-api.com/v4/sports/{sport}/scores/?apiKey={key}&daysFrom=1
 ```
 
-**Change 2: Process ALL markets per event (not just H2H)**
-```typescript
-// BEFORE: Only finds H2H market, skips if not found
-const h2hMarket = markets.find(...); // Filters out totals/spreads
-if (!h2hMarket) continue;
+**Response includes**:
+- `completed`: true/false  
+- `scores`: Array of `{ name: "Team A", score: "2" }`
+- `commence_time`: When the event started
+- `last_update`: Last score update time
 
-// AFTER: Process ALL valid markets from each event
-for (const market of markets) {
-  const marketType = detectMarketType(market.question);
-  // Upsert each market separately with its own condition_id
-  // Track H2H, total, spread, player_prop types
+**Logic**:
+1. Extract sport key from the bet's event name or store it in `signal_logs`
+2. Query scores API for relevant sports (NHL, NBA, tennis, soccer)
+3. Fuzzy-match event names to find the correct game
+4. Return score, game time/period, and completion status
+
+**File**: `supabase/functions/fetch-live-scores/index.ts`
+
+---
+
+#### Part 3: Display Live Scores in UI
+
+**Update**: The Stats page to show live scores alongside the LIVE badge.
+
+**Display format by sport**:
+- **Hockey/Soccer**: "2-1 (P2)" or "1-0 (65')"  
+- **Basketball**: "98-87 (Q3)"
+- **Tennis**: "2-1 sets"
+
+**Changes**:
+1. Add `live_score` and `game_status` fields to `SignalLogEntry` interface
+2. Fetch live scores when loading in-play bets
+3. Update the Status column to show score data
+
+**Files**: 
+- `src/hooks/useSignalStats.ts`
+- `src/pages/Stats.tsx`
+
+---
+
+### Technical Details
+
+#### Database Changes (Optional Enhancement)
+Add `sport_key` column to `signal_logs` to enable direct score lookups without fuzzy matching:
+
+```sql
+ALTER TABLE signal_logs ADD COLUMN sport_key text;
+```
+
+#### Edge Function Structure
+```typescript
+// fetch-live-scores/index.ts
+interface ScoreRequest {
+  event_names: string[];  // Events to look up
+  sport_hint?: string;    // Optional sport filter
+}
+
+interface LiveScore {
+  event_name: string;
+  home_team: string;
+  away_team: string;
+  home_score: number;
+  away_score: number;
+  completed: boolean;
+  game_status: string;   // "P2", "Q3", "65'", "Final"
+  last_update: string;
 }
 ```
 
-**Change 3: Update logging to reflect new scope**
-- Change log messages from "No H2H market" to "Market type: X"
-- Track stats for each market type discovered
-
-#### File: `supabase/functions/polymarket-monitor/index.ts`
-
-**Change: Support all market types in matching logic**
-- The monitor already fetches `h2h,spreads,totals` from bookmakers
-- Needs to match Polymarket totals to bookmaker totals (same threshold)
-- Needs to match Polymarket spreads to bookmaker spreads (same line)
+#### Sport Key Mapping
+| Event Pattern | API Sport Key |
+|--------------|---------------|
+| "vs." + NHL teams | `icehockey_nhl` |
+| "vs." + NBA teams | `basketball_nba` |
+| Tennis names | `tennis_*` |
+| Soccer leagues | `soccer_epl`, etc. |
 
 ---
 
-### Data Flow After Change
+### Implementation Order
 
-```text
-FULL SCAN → Fetch ALL Polymarket sports markets ending in 24h
-         → For EACH event:
-              → Process H2H market (if exists)
-              → Process Total (O/U) market (if exists)
-              → Process Spread market (if exists)
-              → Process Player Props (if exists)
-         → Upsert ALL to polymarket_h2h_cache
-         
-BACKGROUND MONITOR (every 5 min)
-         → Load all watching markets (H2H + Totals + Spreads)
-         → Fetch bookmaker odds (h2h,spreads,totals)
-         → Match by market type + threshold
-         → Calculate edge per market type
-         → Trigger on Edge ≥5% OR Movement confirmed
-```
+1. **Fix button visibility** - Quick fix, immediate impact
+2. **Create fetch-live-scores function** - Backend infrastructure  
+3. **Integrate scores into useSignalStats** - Data layer
+4. **Update Stats UI** - Display scores with LIVE badge
 
 ---
 
-### Expected Outcome
+### API Quota Consideration
 
-| Metric | Before | After |
-|--------|--------|-------|
-| Time window | 7 days | 24 hours |
-| Markets per event | 1 (H2H only) | 3-5 (H2H + Totals + Spreads + Props) |
-| Total markets monitored | ~145 | ~300-500 |
-| Movement tracking | All | All (unchanged) |
-
----
-
-### Files to Modify
-
-| File | Changes |
-|------|---------|
-| `supabase/functions/polymarket-sync-24h/index.ts` | Revert to 24h window, process ALL markets per event |
-| `supabase/functions/polymarket-monitor/index.ts` | Add Totals/Spreads matching logic (threshold-based) |
-
----
-
-### Edge Cases Handled
-
-- **Multiple markets per event**: Each gets its own `condition_id` entry in cache
-- **Threshold matching**: Totals match on "Over 220.5" ↔ bookmaker "220.5" line
-- **Spread matching**: Spreads match on "-5.5" ↔ bookmaker "-5.5" line
-- **No double-counting**: Each market type tracked independently
+The Odds API scores endpoint costs **1 request per sport**. To minimize usage:
+- Only query sports with active in-play bets
+- Cache results for 60 seconds
+- Batch multiple events per sport query
 
