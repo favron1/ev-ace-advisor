@@ -18,6 +18,9 @@ export interface SignalLogEntry {
   polymarket_condition_id: string | null;
   recommended_outcome: string | null;
   live_price?: number | null;
+  // Live score data
+  live_score?: string | null;
+  game_status?: string | null;
 }
 
 export interface DailyStats {
@@ -78,15 +81,31 @@ export function useSignalStats() {
         recommended_outcome: (log.signal_opportunities as { recommended_outcome?: string } | null)?.recommended_outcome || null,
       })) as SignalLogEntry[];
       
-      // Fetch live prices for in-play bets
-      const inPlayLogs = logsWithOutcome.filter(l => l.outcome === 'in_play' && l.polymarket_condition_id);
+      // Fetch live prices and scores for in-play bets
+      const inPlayLogs = logsWithOutcome.filter(l => l.outcome === 'in_play');
       if (inPlayLogs.length > 0) {
-        const livePrices = await fetchLivePrices(inPlayLogs.map(l => l.polymarket_condition_id!));
+        // Fetch prices for bets with condition IDs
+        const logsWithConditionId = inPlayLogs.filter(l => l.polymarket_condition_id);
+        if (logsWithConditionId.length > 0) {
+          const livePrices = await fetchLivePrices(logsWithConditionId.map(l => l.polymarket_condition_id!));
+          
+          logsWithOutcome.forEach(log => {
+            if (log.outcome === 'in_play' && log.polymarket_condition_id) {
+              log.live_price = livePrices[log.polymarket_condition_id] || null;
+            }
+          });
+        }
         
-        // Merge live prices into logs
+        // Fetch live scores for all in-play bets
+        const liveScores = await fetchLiveScores(inPlayLogs.map(l => l.event_name));
+        
         logsWithOutcome.forEach(log => {
-          if (log.outcome === 'in_play' && log.polymarket_condition_id) {
-            log.live_price = livePrices[log.polymarket_condition_id] || null;
+          if (log.outcome === 'in_play') {
+            const score = liveScores[log.event_name];
+            if (score) {
+              log.live_score = score.score;
+              log.game_status = score.status;
+            }
           }
         });
       }
@@ -130,6 +149,42 @@ export function useSignalStats() {
     }
     
     return prices;
+  };
+
+  // Fetch live scores from The Odds API via edge function
+  const fetchLiveScores = async (eventNames: string[]): Promise<Record<string, { score: string; status: string }>> => {
+    const scores: Record<string, { score: string; status: string }> = {};
+    
+    try {
+      const { data, error } = await supabase.functions.invoke('fetch-live-scores', {
+        body: { event_names: eventNames },
+      });
+      
+      if (error) {
+        console.error('Error fetching live scores:', error);
+        return scores;
+      }
+      
+      if (data?.scores) {
+        for (const score of data.scores) {
+          if (score.home_score !== null && score.away_score !== null) {
+            scores[score.event_name] = {
+              score: `${score.home_score}-${score.away_score}`,
+              status: score.game_status || '',
+            };
+          } else if (score.game_status) {
+            scores[score.event_name] = {
+              score: '',
+              status: score.game_status,
+            };
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch live scores:', err);
+    }
+    
+    return scores;
   };
 
   useEffect(() => {

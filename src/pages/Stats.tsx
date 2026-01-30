@@ -59,6 +59,8 @@ export default function Stats() {
   };
 
   const pendingCount = logs.filter(l => !l.outcome || l.outcome === 'pending').length;
+  const inPlayCount = logs.filter(l => l.outcome === 'in_play').length;
+  const actionableBetsCount = pendingCount + inPlayCount;
 
   return (
     <div className="min-h-screen bg-background p-4 md:p-6">
@@ -173,7 +175,7 @@ export default function Stats() {
             <Card>
               <CardHeader className="flex flex-row items-center justify-between">
                 <CardTitle className="text-lg">Bet History</CardTitle>
-                {pendingCount > 0 && (
+                {actionableBetsCount > 0 && (
                   <Button
                     variant="outline"
                     size="sm"
@@ -182,7 +184,7 @@ export default function Stats() {
                     className="gap-2"
                   >
                     <RefreshCw className={`h-4 w-4 ${checkingPending ? 'animate-spin' : ''}`} />
-                    {checkingPending ? 'Checking...' : `Check ${pendingCount} Pending`}
+                    {checkingPending ? 'Checking...' : `Check ${actionableBetsCount} Bets`}
                   </Button>
                 )}
               </CardHeader>
@@ -253,6 +255,16 @@ export default function Stats() {
                                   <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-500/20 text-blue-500 animate-pulse">
                                     LIVE
                                   </span>
+                                  {log.live_score && (
+                                    <span className="text-xs font-mono font-medium text-foreground">
+                                      {log.live_score}
+                                    </span>
+                                  )}
+                                  {log.game_status && (
+                                    <span className="text-xs text-muted-foreground">
+                                      ({log.game_status})
+                                    </span>
+                                  )}
                                   {log.live_price != null && (
                                     <span className="text-xs font-mono text-muted-foreground">
                                       {(log.live_price * 100).toFixed(0)}¢
