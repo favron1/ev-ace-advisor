@@ -1,121 +1,109 @@
 
 
-# Integrated Basketball Scraping + Sport Focus
+# Firecrawl Integration as Polling Fallback
 
-## Overview
+## Current Polling Architecture
 
-This plan integrates Firecrawl-based scraping directly into the scan flow (no separate NBA button) and focuses the system exclusively on **NHL, NBA, NCAA CBB, and NFL**.
+The system currently runs three automated pg_cron jobs:
 
----
+| Job | Schedule | Function | Purpose |
+|-----|----------|----------|---------|
+| polymarket-sync-24h | Every 30 min | Sync Polymarket cache | Fetches API + Firecrawl data |
+| polymarket-monitor | Every 5 min | Edge detection | Compares cache vs bookmakers |
+| ingest-odds | Every 10 min | Bookmaker ingestion | Fetches The Odds API data |
 
-## Current Scan Flow
+## Identified Issues with Firecrawl Integration
 
-When you press the "Full Scan" button, this happens:
+### 1. Volume Filter Blocks Scraped Data
+- **Problem**: `watch-mode-poll` applies `.gte('volume', 5000)` filter
+- **Impact**: All 18 Firecrawl markets have volume = 0, so they're excluded
+- **Current state**: 63 API markets pass volume filter, 0 Firecrawl markets pass
 
-```text
-1. useSignals.runDetection() called
-   ↓
-2. polymarket-sync-24h invoked
-   → Fetches sports events from Polymarket Gamma API (tag_slug=sports)
-   → Filters to 24-hour window
-   → Upserts to polymarket_h2h_cache
-   ↓
-3. polymarket-monitor invoked
-   → Reads cache, fetches CLOB prices
-   → Fetches bookmaker odds from The Odds API
-   → Compares prices, creates signals
-```
+### 2. Firecrawl Only Runs During Sync (Not Monitoring)
+- **Problem**: Firecrawl scraping only happens in `polymarket-sync-24h` (every 30 min)
+- **Impact**: If API fails or returns stale prices, there's no Firecrawl fallback during the more frequent monitoring cycles (every 5 min)
 
-**The Problem**: Polymarket's Gamma API doesn't expose NBA/NCAA H2H games, so Step 2 captures 0 basketball markets.
+### 3. No Fallback in Active-Mode-Poll
+- **Problem**: `active-mode-poll` refreshes prices via CLOB API and Gamma API only
+- **Impact**: Firecrawl-sourced markets (NBA/CBB) can't get fresh prices during active monitoring
 
 ---
 
 ## Proposed Changes
 
-### 1. Modify `polymarket-sync-24h` to Include Firecrawl Scraping
+### 1. Update `watch-mode-poll` to Include Firecrawl Markets
 
-After fetching from the Gamma API, the function will **also** scrape Polymarket's basketball pages:
-
-```text
-polymarket-sync-24h:
-  ├── Fetch from Gamma API (tag_slug=sports)
-  ├── NEW: Scrape /sports/nba/games via Firecrawl
-  ├── NEW: Scrape /sports/cbb/games via Firecrawl  
-  ├── NEW: Scrape /sports/nfl/games via Firecrawl (if available)
-  ├── Filter to 24h window
-  └── Upsert ALL to polymarket_h2h_cache
-```
-
-### 2. Update Sport Filtering to Focus on 4 Leagues
-
-The scan will **only process** markets from:
-- **NHL** (already works via API)
-- **NBA** (via Firecrawl scrape)
-- **NCAA CBB** (via Firecrawl scrape)
-- **NFL** (via API + Firecrawl backup)
-
-All other sports (Tennis, UFC, Soccer, etc.) will be temporarily suspended.
-
-### 3. Remove Standalone NBA Scrape Button
-
-The PolymarketCacheStats component will revert to showing just the "Sync API" button. Scraping happens automatically during Full Scan.
-
-### 4. Update `polymarket-monitor` Sport Endpoints
-
-Focus only on the 4 target sports when fetching bookmaker odds:
-
-| Sport | Odds API Endpoint | Markets |
-|-------|------------------|---------|
-| NHL | icehockey_nhl | h2h |
-| NBA | basketball_nba | h2h |
-| NCAA | basketball_ncaab | h2h |
-| NFL | americanfootball_nfl | h2h |
-
----
-
-## Technical Details
-
-### Modified `polymarket-sync-24h` Flow
+Modify the market loading query to fetch Firecrawl-sourced markets separately (without volume filter) and combine them:
 
 ```typescript
-// After Gamma API fetch...
+// Load API markets with volume filter
+const { data: apiMarkets } = await supabase
+  .from('polymarket_h2h_cache')
+  .select('*')
+  .eq('status', 'active')
+  .eq('market_type', 'h2h')
+  .gte('volume', minVolume)
+  .or('source.is.null,source.eq.api')
+  // ... existing filters
 
-// Scrape NBA games
-const nbaGames = await scrapePolymarketGames('nba');
-for (const game of nbaGames) {
-  qualifying.push({
-    conditionId: `firecrawl_nba_${game.team1Code}_${game.team2Code}`,
-    title: `${game.team1Name} vs ${game.team2Name}`,
-    yesPrice: game.team1Price,
-    noPrice: game.team2Price,
-    sport: 'NBA',
-    source: 'firecrawl'
-  });
+// Load Firecrawl markets WITHOUT volume filter
+const { data: firecrawlMarkets } = await supabase
+  .from('polymarket_h2h_cache')
+  .select('*')
+  .eq('status', 'active')
+  .eq('market_type', 'h2h')
+  .eq('source', 'firecrawl')
+  .in('extracted_league', ['NBA', 'NCAA', 'NFL'])
+  // No volume filter - scraped data lacks volume
+
+// Combine both sets
+const polyMarkets = [...(apiMarkets || []), ...(firecrawlMarkets || [])];
+```
+
+### 2. Add Firecrawl Fallback to `active-mode-poll`
+
+When a Firecrawl-sourced market is in active monitoring, refresh its price by re-scraping:
+
+```typescript
+// In active-mode-poll, if market source is 'firecrawl'
+if (event.source === 'firecrawl' && firecrawlApiKey) {
+  // Re-scrape the relevant sport page for fresh prices
+  const sportCode = getSportCodeFromLeague(event.extracted_league);
+  const freshGames = await scrapePolymarketGames(sportCode, firecrawlApiKey);
+  
+  // Find matching game by team names
+  const matchedGame = findMatchingGame(freshGames, event.team_home, event.team_away);
+  if (matchedGame) {
+    livePolyPrice = matchedGame.team1Price;
+  }
 }
-
-// Scrape NCAA CBB games
-const ncaaGames = await scrapePolymarketGames('cbb');
-// ... same pattern
 ```
 
-### Firecrawl Parsing (Already Built)
+### 3. Create Shared Firecrawl Scraping Module
 
-The scraper extracts game data like:
+Extract the scraping logic into a shared utility that can be imported by multiple edge functions:
+
 ```text
-tor48¢  orl53¢  →  { Toronto Raptors: 0.48, Orlando Magic: 0.53 }
+supabase/functions/_shared/firecrawl-scraper.ts
+├── parseGamesFromMarkdown()
+├── scrapePolymarketGames()
+├── NBA_TEAM_MAP
+├── NFL_TEAM_MAP
+├── NCAA_TEAM_MAP (new)
 ```
 
-### Sport Focus Filter
+### 4. Add Firecrawl Price Refresh to Monitor (Optional Enhancement)
 
-Add early filter in both edge functions:
+If API prices are stale (>10 min since last update), use Firecrawl as backup:
 
 ```typescript
-const ALLOWED_SPORTS = ['NHL', 'NBA', 'NCAA', 'NFL', 'basketball_nba', 
-                        'basketball_ncaab', 'icehockey_nhl', 'americanfootball_nfl'];
-
-// Skip if not in allowed list
-if (!ALLOWED_SPORTS.some(s => detectedSport.includes(s))) {
-  continue;
+// In polymarket-monitor, before edge calculation
+if (market.last_price_update < tenMinutesAgo && firecrawlApiKey) {
+  // Refresh via Firecrawl scrape as fallback
+  const freshPrice = await refreshViaFirecrawl(market);
+  if (freshPrice) {
+    market.yes_price = freshPrice;
+  }
 }
 ```
 
@@ -125,32 +113,37 @@ if (!ALLOWED_SPORTS.some(s => detectedSport.includes(s))) {
 
 | File | Change |
 |------|--------|
-| `supabase/functions/polymarket-sync-24h/index.ts` | Add Firecrawl scraping for NBA/CBB/NFL after Gamma fetch |
-| `supabase/functions/polymarket-monitor/index.ts` | Filter SPORT_ENDPOINTS to only NHL/NBA/NCAA/NFL |
-| `src/components/terminal/PolymarketCacheStats.tsx` | Remove NBA scrape button, simplify to single sync |
-| `supabase/functions/scrape-polymarket-prices/index.ts` | Add NCAA team mappings, export helper functions |
+| `supabase/functions/watch-mode-poll/index.ts` | Add dual-query for API + Firecrawl markets |
+| `supabase/functions/active-mode-poll/index.ts` | Add Firecrawl fallback for price refresh |
+| `supabase/functions/_shared/firecrawl-scraper.ts` | Create shared module with scraping helpers |
+| `supabase/functions/polymarket-sync-24h/index.ts` | Import from shared module |
+| `supabase/functions/polymarket-monitor/index.ts` | (Optional) Add stale price fallback |
 
 ---
 
-## Expected Result
+## Expected Outcome
 
-After pressing "Full Scan":
+After implementation:
 
-| Sport | Source | Expected Markets |
-|-------|--------|-----------------|
-| NHL | Gamma API | ~60-70 H2H games |
-| NBA | Firecrawl | ~10-15 H2H games |
-| NCAA CBB | Firecrawl | ~100-400 H2H games |
-| NFL | API + Firecrawl | ~10-16 H2H games |
-| **Total** | Combined | **~180-500 H2H markets** |
+| Scenario | Current Behavior | New Behavior |
+|----------|-----------------|--------------|
+| NBA/CBB market in cache | Ignored (volume=0) | Included in watch-mode |
+| Firecrawl market goes active | Price can't refresh | Scrapes fresh price |
+| API returns stale data | Uses stale price | Falls back to Firecrawl |
+| 30-min sync fails | No NBA data until next sync | Monitor can scrape as fallback |
 
 ---
 
-## Considerations
+## Technical Considerations
 
-**Firecrawl Usage**: Each scan will use 2-3 Firecrawl credits (one per sport page). With a 30-minute scan interval, this means ~48-72 credits/day.
+**Firecrawl Credit Usage**:
+- Current: ~48-72 credits/day (3 scrapes × every 30 min × 24h)
+- With fallback in active-mode: +1-5 scrapes/day for active markets
+- Estimated total: ~50-80 credits/day
 
-**Parsing Reliability**: If Polymarket changes their page layout, the regex patterns may need updating. The scraper includes fallback logging to detect format changes.
-
-**NCAA Team Mapping**: NCAA has hundreds of teams. The initial implementation will use the team codes directly from the scraped data, relying on bookmaker matching by partial name.
+**Shared Module Pattern**:
+Deno edge functions support importing from `_shared` folders:
+```typescript
+import { scrapePolymarketGames } from '../_shared/firecrawl-scraper.ts';
+```
 
