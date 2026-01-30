@@ -103,6 +103,9 @@ export function useSignalStats() {
         // Fetch live scores for all in-play bets
         const liveScores = await fetchLiveScores(inPlayLogs.map(l => l.event_name));
         
+        // Track if any games have completed so we can trigger settlement
+        let hasCompletedGames = false;
+        
         logsWithOutcome.forEach(log => {
           if (log.outcome === 'in_play') {
             const score = liveScores[log.event_name];
@@ -113,9 +116,26 @@ export function useSignalStats() {
               log.away_team = score.away_team;
               log.home_score = score.home_score;
               log.away_score = score.away_score;
+              
+              // Check if this game has completed
+              if (score.completed) {
+                hasCompletedGames = true;
+              }
             }
           }
         });
+        
+        // If any games completed, trigger settlement check in background
+        if (hasCompletedGames) {
+          console.log('Completed games detected, triggering settlement...');
+          supabase.functions.invoke('settle-bets', { body: { force: true } })
+            .then(res => {
+              if (res.data?.settled > 0) {
+                console.log(`Auto-settled ${res.data.settled} bets`);
+              }
+            })
+            .catch(err => console.error('Auto-settlement failed:', err));
+        }
       }
       
       setLogs(logsWithOutcome);
@@ -160,8 +180,8 @@ export function useSignalStats() {
   };
 
   // Fetch live scores from The Odds API via edge function
-  const fetchLiveScores = async (eventNames: string[]): Promise<Record<string, { score: string; status: string; home_team: string; away_team: string; home_score: string; away_score: string }>> => {
-    const scores: Record<string, { score: string; status: string; home_team: string; away_team: string; home_score: string; away_score: string }> = {};
+  const fetchLiveScores = async (eventNames: string[]): Promise<Record<string, { score: string; status: string; home_team: string; away_team: string; home_score: string; away_score: string; completed: boolean }>> => {
+    const scores: Record<string, { score: string; status: string; home_team: string; away_team: string; home_score: string; away_score: string; completed: boolean }> = {};
     
     try {
       const { data, error } = await supabase.functions.invoke('fetch-live-scores', {
@@ -184,6 +204,7 @@ export function useSignalStats() {
             away_team: score.away_team || '',
             home_score: score.home_score || '',
             away_score: score.away_score || '',
+            completed: score.completed || false,
           };
         }
       }
