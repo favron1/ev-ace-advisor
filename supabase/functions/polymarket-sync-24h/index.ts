@@ -211,6 +211,40 @@ Deno.serve(async (req) => {
 
     console.log(`[POLY-SYNC-24H] Window: now to ${in24Hours.toISOString()} (24 hours)`);
 
+    // ============= ODDS API SCHEDULE FETCH =============
+    // Pre-fetch today's games from Odds API to cross-reference with Polymarket events
+    // This fixes NBA/NCAAB where Gamma API endDate is set to season end, not game day
+    const ODDS_API_KEY = Deno.env.get('ODDS_API_KEY');
+    let oddsApiGames: Array<{ home_team: string; away_team: string; commence_time: string; sport_key: string }> = [];
+    
+    if (ODDS_API_KEY) {
+      const sportsToFetch = ['basketball_nba', 'basketball_ncaab', 'icehockey_nhl', 'americanfootball_nfl'];
+      
+      await Promise.all(sportsToFetch.map(async (sport) => {
+        try {
+          const url = `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h&dateFormat=iso`;
+          const response = await fetch(url);
+          if (response.ok) {
+            const games = await response.json();
+            for (const game of games) {
+              oddsApiGames.push({
+                home_team: game.home_team,
+                away_team: game.away_team,
+                commence_time: game.commence_time,
+                sport_key: sport,
+              });
+            }
+          }
+        } catch (e) {
+          console.log(`[POLY-SYNC-24H] Odds API fetch failed for ${sport}`);
+        }
+      }));
+      
+      console.log(`[POLY-SYNC-24H] Pre-fetched ${oddsApiGames.length} games from Odds API for date cross-reference`);
+    } else {
+      console.log(`[POLY-SYNC-24H] No ODDS_API_KEY - skipping date cross-reference`);
+    }
+
     // Fetch sports events using tag_slug=sports filter
     let allEvents: any[] = [];
     let offset = 0;
@@ -271,6 +305,14 @@ Deno.serve(async (req) => {
       console.log(`  ${i + 1}. title="${e.title || 'N/A'}" endDate="${e.endDate || 'N/A'}"`);
     });
 
+    // Helper: Normalize team name for matching
+    function normalizeForMatch(name: string): string {
+      return name.toLowerCase()
+        .replace(/^the\s+/, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
     // Helper: Check if event is within 24-hour window using multiple date sources
     // This fixes NBA/Tennis where endDate is set to season end, not game day
     function isWithin24HourWindow(event: any, now: Date, in24Hours: Date): { inWindow: boolean; dateSource: string; resolvedDate: Date | null } {
@@ -327,6 +369,33 @@ Deno.serve(async (req) => {
           
           if (parsedDate >= now && parsedDate <= in24Hours) {
             return { inWindow: true, dateSource: 'question-natural', resolvedDate: parsedDate };
+          }
+        }
+      }
+      
+      // 4. NEW: Cross-reference with Odds API schedule
+      // Extract team names from Polymarket title and match against today's games
+      const title = event.title || '';
+      const titleNorm = normalizeForMatch(title);
+      
+      for (const game of oddsApiGames) {
+        const homeNorm = normalizeForMatch(game.home_team);
+        const awayNorm = normalizeForMatch(game.away_team);
+        
+        // Check if both teams appear in the Polymarket title (or last word of team name)
+        const homeWords = homeNorm.split(' ');
+        const awayWords = awayNorm.split(' ');
+        const homeLast = homeWords[homeWords.length - 1];
+        const awayLast = awayWords[awayWords.length - 1];
+        
+        const matchesHome = titleNorm.includes(homeNorm) || (homeLast.length > 3 && titleNorm.includes(homeLast));
+        const matchesAway = titleNorm.includes(awayNorm) || (awayLast.length > 3 && titleNorm.includes(awayLast));
+        
+        if (matchesHome && matchesAway) {
+          const gameTime = new Date(game.commence_time);
+          if (!isNaN(gameTime.getTime()) && gameTime >= now && gameTime <= in24Hours) {
+            console.log(`[POLY-SYNC-24H] Matched via Odds API: "${title}" -> ${game.home_team} vs ${game.away_team} at ${game.commence_time}`);
+            return { inWindow: true, dateSource: 'odds-api', resolvedDate: gameTime };
           }
         }
       }
@@ -739,13 +808,24 @@ Deno.serve(async (req) => {
     const duration = Date.now() - startTime;
     console.log(`[POLY-SYNC-24H] Complete: ${upserted} cached, ${monitored} monitored, ${expiredCount} expired, ${skippedNonTradeable} non-tradeable skipped in ${duration}ms`);
 
+    // Query total watching count from cache for accurate stats
+    const { count: totalWatchingCount } = await supabase
+      .from('polymarket_h2h_cache')
+      .select('*', { count: 'exact', head: true })
+      .eq('monitoring_status', 'watching')
+      .eq('status', 'active');
+
     return new Response(
       JSON.stringify({
         success: true,
         total_fetched: allEvents.length,
         qualifying_events: qualifying.length,
+        qualifying_from_gamma: qualifying.length,
+        qualifying_from_firecrawl: firecrawlGames.length,
+        firecrawl_upserted: firecrawlUpserted,
         upserted_to_cache: upserted,
         now_monitored: monitored,
+        total_watching: totalWatchingCount || (upserted + firecrawlUpserted),
         expired: expiredCount,
         skipped_non_tradeable: skippedNonTradeable,
         duration_ms: duration,
@@ -754,6 +834,7 @@ Deno.serve(async (req) => {
           outside_window: statsOutsideWindow,
           no_markets: statsNoMarkets,
           markets_by_type: statsByMarketType,
+          date_sources: statsByDateSource,
         },
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
