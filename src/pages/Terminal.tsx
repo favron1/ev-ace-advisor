@@ -5,13 +5,10 @@ import { Header } from '@/components/terminal/Header';
 import { SignalFeed } from '@/components/terminal/SignalFeed';
 import { StatsBar } from '@/components/terminal/StatsBar';
 import { FiltersBar } from '@/components/terminal/FiltersBar';
-import { MarketsSidebar } from '@/components/terminal/MarketsSidebar';
 import { ScanControlPanel } from '@/components/terminal/ScanControlPanel';
 import { AutomationPanel } from '@/components/terminal/AutomationPanel';
-import { PolymarketAvailability } from '@/components/terminal/PolymarketAvailability';
 import { PolymarketCacheStats } from '@/components/terminal/PolymarketCacheStats';
 import { useSignals } from '@/hooks/useSignals';
-import { usePolymarket } from '@/hooks/usePolymarket';
 import { useScanConfig } from '@/hooks/useScanConfig';
 import { useWatchState } from '@/hooks/useWatchState';
 import { useAutoPolling } from '@/hooks/useAutoPolling';
@@ -69,7 +66,7 @@ export default function Terminal() {
     refreshSignals,
   } = useSignals();
   
-  const { markets, loading: marketsLoading } = usePolymarket();
+  
   
   // Overnight stats for server-side poll activity
   const { stats: overnightStats, refresh: refreshOvernightStats } = useOvernightStats();
@@ -265,15 +262,6 @@ export default function Terminal() {
             
             {/* Polymarket Cache Stats - Source of Truth */}
             <PolymarketCacheStats />
-            
-            {/* Polymarket NBA Availability */}
-            <PolymarketAvailability />
-            
-            {/* Polymarket Sidebar (cached general markets) */}
-            <div>
-              <h2 className="text-lg font-semibold mb-4">Polymarket (Cached)</h2>
-              <MarketsSidebar markets={markets} loading={marketsLoading} />
-            </div>
           </div>
         </div>
       </main>
