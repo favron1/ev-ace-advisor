@@ -394,17 +394,21 @@ export function useSignalStats() {
     setCheckingPending(true);
     try {
       const response = await supabase.functions.invoke('settle-bets', {
-        body: { force: true },
+        body: { force: true, recalculatePL: true },
       });
 
       if (response.error) throw response.error;
 
       const data = response.data;
       
-      if (data.settled > 0) {
+      const messages: string[] = [];
+      if (data.settled > 0) messages.push(`${data.settled} bet(s) settled`);
+      if (data.plFixed > 0) messages.push(`${data.plFixed} P/L values corrected`);
+      
+      if (messages.length > 0) {
         toast({
-          title: 'Bets settled',
-          description: `${data.settled} bet(s) have been settled`,
+          title: 'Bets updated',
+          description: messages.join(', '),
         });
         await fetchLogs();
       } else {
