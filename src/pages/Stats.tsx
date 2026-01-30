@@ -245,18 +245,16 @@ export default function Stats() {
             <Card>
               <CardHeader className="flex flex-row items-center justify-between p-3 md:p-6">
                 <CardTitle className="text-base md:text-lg">Bet History</CardTitle>
-                {actionableBetsCount > 0 && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={checkPendingBets}
-                    disabled={checkingPending}
-                    className="gap-1 md:gap-2 text-xs md:text-sm h-8"
-                  >
-                    <RefreshCw className={`h-3 w-3 md:h-4 md:w-4 ${checkingPending ? 'animate-spin' : ''}`} />
-                    {checkingPending ? 'Checking...' : `Check ${actionableBetsCount}`}
-                  </Button>
-                )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={checkPendingBets}
+                  disabled={checkingPending}
+                  className="gap-1 md:gap-2 text-xs md:text-sm h-8"
+                >
+                  <RefreshCw className={`h-3 w-3 md:h-4 md:w-4 ${checkingPending ? 'animate-spin' : ''}`} />
+                  {checkingPending ? 'Checking...' : actionableBetsCount > 0 ? `Check ${actionableBetsCount}` : 'Refresh'}
+                </Button>
               </CardHeader>
               <CardContent className="p-2 md:p-6 pt-0 md:pt-0">
                 {loading ? (
