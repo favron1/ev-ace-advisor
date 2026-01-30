@@ -34,6 +34,25 @@ export default function Stats() {
 
   const formatPercent = (value: number) => `${value.toFixed(1)}%`;
 
+  // Calculate unrealized P/L for in-play bets based on current price
+  const formatUnrealizedPL = (entryPrice: number, currentPrice: number, stake: number, side: string) => {
+    if (!stake) return '--';
+    // For YES bets: if current price > entry, we're in profit
+    // For NO bets: if current price < entry (meaning NO price went up), we're in profit
+    let unrealizedPL: number;
+    if (side === 'YES') {
+      // Current value of shares = stake / entryPrice * currentPrice
+      // P/L = current value - stake
+      unrealizedPL = (stake / entryPrice) * currentPrice - stake;
+    } else {
+      // NO bet: current NO price = 1 - currentPrice
+      const entryNoPrice = 1 - entryPrice;
+      const currentNoPrice = 1 - currentPrice;
+      unrealizedPL = (stake / entryNoPrice) * currentNoPrice - stake;
+    }
+    return formatCurrency(unrealizedPL);
+  };
+
   const handleRowClick = (log: SignalLogEntry) => {
     setSelectedBet(log);
     setEditDialogOpen(true);
@@ -229,19 +248,36 @@ export default function Stats() {
                               +{log.edge_at_signal.toFixed(1)}%
                             </TableCell>
                             <TableCell>
-                              <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                log.outcome === 'win' ? 'bg-green-500/20 text-green-500' :
-                                log.outcome === 'loss' ? 'bg-red-500/20 text-red-500' :
-                                log.outcome === 'void' ? 'bg-gray-500/20 text-gray-500' :
-                                'bg-yellow-500/20 text-yellow-500'
-                              }`}>
-                                {log.outcome || 'pending'}
-                              </span>
+                              {log.outcome === 'in_play' ? (
+                                <div className="flex items-center gap-2">
+                                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-500/20 text-blue-500 animate-pulse">
+                                    LIVE
+                                  </span>
+                                  {log.live_price != null && (
+                                    <span className="text-xs font-mono text-muted-foreground">
+                                      {(log.live_price * 100).toFixed(0)}¢
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                  log.outcome === 'win' ? 'bg-green-500/20 text-green-500' :
+                                  log.outcome === 'loss' ? 'bg-red-500/20 text-red-500' :
+                                  log.outcome === 'void' ? 'bg-gray-500/20 text-gray-500' :
+                                  'bg-yellow-500/20 text-yellow-500'
+                                }`}>
+                                  {log.outcome || 'pending'}
+                                </span>
+                              )}
                             </TableCell>
                             <TableCell className={`text-right font-mono font-medium ${
-                              (log.profit_loss || 0) >= 0 ? 'text-green-500' : 'text-red-500'
+                              log.outcome === 'in_play' 
+                                ? 'text-blue-500' 
+                                : (log.profit_loss || 0) >= 0 ? 'text-green-500' : 'text-red-500'
                             }`}>
-                              {log.profit_loss != null ? formatCurrency(log.profit_loss) : '--'}
+                              {log.outcome === 'in_play' && log.live_price != null
+                                ? formatUnrealizedPL(log.entry_price, log.live_price, log.stake_amount || 0, log.side)
+                                : log.profit_loss != null ? formatCurrency(log.profit_loss) : '--'}
                             </TableCell>
                           </TableRow>
                         ))}
