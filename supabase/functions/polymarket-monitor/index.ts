@@ -1353,6 +1353,23 @@ Deno.serve(async (req) => {
           }
           
           console.log(`[POLY-MONITOR] Edge calc for ${event.event_name}: YES_edge=${(yesEdge * 100).toFixed(1)}%, NO_edge=${(noEdge * 100).toFixed(1)}% -> ${betSide} ${(rawEdge * 100).toFixed(1)}%`);
+          
+          // ========== CRITICAL FIX: Parse home/away teams and align recommendation with bet side ==========
+          // In Polymarket H2H: "Team A vs Team B" → YES = Team A (home), NO = Team B (away)
+          const eventParts = event.event_name.match(/^(.+?)\s+vs\.?\s+(.+?)(?:\s*-\s*.*)?$/i);
+          const homeTeamFromEvent = eventParts?.[1]?.trim() || teamName;
+          const awayTeamFromEvent = eventParts?.[2]?.trim() || teamName;
+          
+          // CRITICAL: recommended_outcome must match betSide, not the matched team used for bookmaker lookup
+          // YES = bet on home team (first in title), NO = bet on away team (second in title)
+          const recommendedOutcome = betSide === 'YES' ? homeTeamFromEvent : awayTeamFromEvent;
+          
+          // CRITICAL: bookmaker_prob_fair should be for the RECOMMENDED team, not the matched team
+          // If betSide is YES, we want the YES-side fair prob (home team's win prob)
+          // If betSide is NO, we want the NO-side fair prob (away team's win prob = 1 - yesSideFairProb)
+          const recommendedFairProb = betSide === 'YES' ? yesSideFairProb : (1 - yesSideFairProb);
+          
+          console.log(`[POLY-MONITOR] Recommendation aligned: betSide=${betSide}, matched=${teamName}, recommended=${recommendedOutcome}, fairProb=${(recommendedFairProb * 100).toFixed(1)}%`);
           // ========== END BIDIRECTIONAL EDGE CALCULATION ==========
           
           if (rawEdge >= 0.02) {
@@ -1415,7 +1432,7 @@ Deno.serve(async (req) => {
               .from('signal_opportunities')
               .select('id, status')
               .eq('event_name', event.event_name)
-              .eq('recommended_outcome', teamName)
+              .eq('recommended_outcome', recommendedOutcome)
               .in('status', ['active', 'executed']);
 
             const existingSignal = existingSignals?.[0];
@@ -1431,7 +1448,7 @@ Deno.serve(async (req) => {
             const signalData = {
               polymarket_price: livePolyPrice,
               bookmaker_probability: bookmakerFairProb,
-              bookmaker_prob_fair: bookmakerFairProb,
+              bookmaker_prob_fair: recommendedFairProb,
               edge_percent: rawEdge * 100,
               confidence_score: Math.min(85, 50 + Math.floor(netEdge * 500)),
               urgency: eventStart.getTime() - now.getTime() < 3600000 ? 'critical' : 
@@ -1481,7 +1498,7 @@ Deno.serve(async (req) => {
               .update({ status: 'expired' })
               .eq('event_name', event.event_name)
               .eq('status', 'active')
-              .neq('recommended_outcome', teamName);
+              .neq('recommended_outcome', recommendedOutcome);
 
             if (existingSignal) {
               // UPDATE existing active signal with fresh data
@@ -1504,7 +1521,7 @@ Deno.serve(async (req) => {
                 .from('signal_opportunities')
                 .insert({
                   event_name: event.event_name,
-                  recommended_outcome: teamName,
+                  recommended_outcome: recommendedOutcome,
                   side: betSide, // NEW: Use calculated bet side
                   is_true_arbitrage: true,
                   status: 'active',
