@@ -1,151 +1,153 @@
 
 
-# Implementation Plan: DATE MISMATCH Fix for Placeholder Times
+# Implementation Plan: Funnel Logging + Matching Improvements
 
-## Problem Summary
+## Problem Diagnosis
 
-The system is skipping valid matches because Polymarket uses placeholder times (`23:59:59` or `00:00:00`) when exact game times are unknown. The current strict `>24h` validation between Polymarket and bookmaker dates causes false rejections.
+Based on log analysis, the matching pipeline has several bottlenecks:
 
-**Example from logs:**
+```text
+Funnel Analysis (from logs):
++----------------------------------+-------+
+| watching_total                   | 272   |
+| skipped_no_tokens (Firecrawl)    | 114   |
+| tradeable (with token_id)        | 158   |
++----------------------------------+-------+
+| After TIME checks                       |
+| - OUTSIDE_24H_WINDOW             | ~20+  |
+| - DATE_DAY_MISMATCH              | ~10+  |
++----------------------------------+-------+
+| matched_book_events              | 8     |
+| edges_over_threshold             | ~1    |
+| signals_created                  | 0     |
++----------------------------------+-------+
 ```
-DATE MISMATCH: "Wild vs. Oilers" poly=2026-01-31T23:59:59.000Z vs book=2026-02-02T02:30:00.000Z (27h diff) - SKIPPING
-```
 
-This blocks a valid game because the placeholder time creates an artificial 27-hour gap.
+**Root Causes Identified:**
 
-## Solution Overview
-
-Add placeholder time detection and use a relaxed day-level check (same day or next day) instead of the strict 24-hour validation for placeholder times. The existing "game within 24h of NOW" check (lines 831-843) continues to provide the real gating.
+1. **Day calculation bug**: `daysDiffUTC(Jan 31, Feb 2) = 2` exceeds threshold of 1 - need to relax to 2 days for placeholder times
+2. **OUTSIDE_24H_WINDOW too strict**: Games 25h away are being skipped (should allow 36h for discovery)
+3. **Missing funnel logging**: No visibility into where tradeable markets fail matching
+4. **MIN_EDGE at 5%**: Legitimate 1-3% edges being filtered out
 
 ## Technical Changes
 
 ### File: `supabase/functions/polymarket-monitor/index.ts`
 
-### Change 1: Add Helper Functions (after line 36)
+### Change 1: Relax DATE_DAY_MISMATCH Threshold (line ~863)
 
-Add three utility functions for placeholder detection and date handling:
-
-```typescript
-// ============= PLACEHOLDER TIME DETECTION =============
-// Polymarket sometimes stores placeholder times when exact game time is unknown
-
-function isPlaceholderPolymarketTime(d: Date): boolean {
-  const h = d.getUTCHours();
-  const m = d.getUTCMinutes();
-  const s = d.getUTCSeconds();
-  return (
-    (h === 23 && m === 59 && s === 59) || // end-of-day placeholder
-    (h === 0 && m === 0 && s === 0)       // midnight placeholder
-  );
-}
-
-function dateOnlyUTC(d: Date): Date {
-  const x = new Date(d);
-  x.setUTCHours(0, 0, 0, 0);
-  return x;
-}
-
-function daysDiffUTC(a: Date, b: Date): number {
-  const ad = dateOnlyUTC(a).getTime();
-  const bd = dateOnlyUTC(b).getTime();
-  return Math.abs(ad - bd) / (1000 * 60 * 60 * 24);
-}
-```
-
-### Change 2: Update DATE MISMATCH Logic (lines 817-827)
-
-Replace the strict date validation with placeholder-aware logic:
+Current threshold of 1 day is too strict. Increase to 2 days for placeholder times:
 
 **Before:**
 ```typescript
-// DATE VALIDATION: Prevent cross-game matching
-if (polymarketEventDate && game.commence_time) {
-  const bookmakerDate = new Date(game.commence_time);
-  const hoursDiff = Math.abs(polymarketEventDate.getTime() - bookmakerDate.getTime()) / (1000 * 60 * 60);
-  
-  if (hoursDiff > 24) {
-    console.log(`[POLY-MONITOR] DATE MISMATCH: ...`);
-    continue;
-  }
-}
+const dd = daysDiffUTC(polymarketEventDate, bookmakerDate);
+if (dd > 1) {
 ```
 
 **After:**
 ```typescript
-// DATE VALIDATION: Prevent cross-game matching
-// NOTE: Polymarket sometimes stores placeholder times (23:59:59 or 00:00:00).
-// For placeholder times, skip strict hours-based comparison and use day-level check instead.
-if (polymarketEventDate && game.commence_time) {
-  const bookmakerDate = new Date(game.commence_time);
-  const isPlaceholder = isPlaceholderPolymarketTime(polymarketEventDate);
-
-  if (!isPlaceholder) {
-    // Strict check: dates must be within 24h
-    const hoursDiff = Math.abs(polymarketEventDate.getTime() - bookmakerDate.getTime()) / (1000 * 60 * 60);
-    
-    if (hoursDiff > 24) {
-      console.log(`[POLY-MONITOR] DATE MISMATCH: "${eventName}" poly=${polymarketEventDate.toISOString()} vs book=${bookmakerDate.toISOString()} (${hoursDiff.toFixed(0)}h diff) - SKIPPING`);
-      continue;
-    }
-  } else {
-    // Placeholder time detected - use softer day-level check
-    console.log(`[POLY-MONITOR] PLACEHOLDER_TIME: "${eventName}" poly=${polymarketEventDate.toISOString()} - using day-level + NOW-based validation`);
-    
-    // Only allow same day or next day to prevent far-future mismatches
-    const dd = daysDiffUTC(polymarketEventDate, bookmakerDate);
-    if (dd > 1) {
-      console.log(`[POLY-MONITOR] DATE_DAY_MISMATCH: "${eventName}" poly=${dateOnlyUTC(polymarketEventDate).toISOString()} vs book=${dateOnlyUTC(bookmakerDate).toISOString()} (${dd.toFixed(0)} days) - SKIPPING`);
-      continue;
-    }
-  }
-}
+const dd = daysDiffUTC(polymarketEventDate, bookmakerDate);
+if (dd > 2) {  // Allow same day, next day, or day after for placeholder times
 ```
 
-### Change 3: Add Placeholder Stats Logging (after line 1336)
+### Change 2: Extend OUTSIDE_24H_WINDOW to 36 Hours (line ~878)
 
-Add summary logging to track how many events have placeholder times:
+Allow games up to 36h away to be discovered (still checks edge thresholds later):
+
+**Before:**
+```typescript
+if (hoursUntilStart < -0.5 || hoursUntilStart > 24) {
+```
+
+**After:**
+```typescript
+if (hoursUntilStart < -0.5 || hoursUntilStart > 36) {
+```
+
+### Change 3: Add Comprehensive Funnel Logging (after line ~1395)
+
+Add counters to track exactly where matches fail:
 
 ```typescript
-// Log placeholder time stats for debugging
-try {
-  let placeholderCount = 0;
-  for (const e of eventsToProcess) {
-    const cache = cacheMap.get(e.polymarket_condition_id);
-    const rawDate = cache?.event_date || e.commence_time;
-    if (!rawDate) continue;
-    const d = new Date(rawDate);
-    if (!isNaN(d.getTime()) && isPlaceholderPolymarketTime(d)) {
-      placeholderCount++;
-    }
-  }
-  console.log(`[POLY-MONITOR] Events with placeholder times: ${placeholderCount}/${eventsToProcess.length}`);
-} catch (err) {
-  console.log(`[POLY-MONITOR] Placeholder stats error: ${(err as Error)?.message || err}`);
-}
+// ============= FUNNEL LOGGING =============
+// Track exactly where matches fail for debugging
+let funnelStats = {
+  watching_total: eventsToProcess.length,
+  skipped_no_tokens: 0,
+  skipped_no_bookmaker_data: 0,
+  skipped_expired: 0,
+  skipped_date_mismatch: 0,
+  skipped_time_window: 0,
+  tier1_direct: 0,
+  tier2_nickname: 0,
+  tier3_fuzzy: 0,
+  tier4_ai: 0,
+  matched_total: 0,
+  edges_calculated: 0,
+  edges_over_threshold: 0,
+  signals_created: 0,
+};
+
+// ... inside the processing loop, increment counters at each stage:
+// - When NO_TOKEN_ID_SKIP: funnelStats.skipped_no_tokens++
+// - When bookmakerGames.length === 0: funnelStats.skipped_no_bookmaker_data++
+// - When DATE_DAY_MISMATCH: funnelStats.skipped_date_mismatch++
+// - When OUTSIDE_24H_WINDOW: funnelStats.skipped_time_window++
+// - When match succeeds: funnelStats.tier{N}_{method}++ and funnelStats.matched_total++
+
+// At end of run:
+console.log(`[POLY-MONITOR] FUNNEL_STATS:`, JSON.stringify(funnelStats));
+```
+
+### Change 4: Lower MIN_EDGE from 5% to 3% (around line ~1730)
+
+Create signals for smaller but still profitable edges:
+
+**Before:**
+```typescript
+const MIN_EDGE = 0.05;  // 5%
+```
+
+**After:**
+```typescript
+const MIN_EDGE = 0.03;  // 3% for signal creation (still validates edge quality)
+```
+
+### Change 5: Add Match Failure Logging in findBookmakerMatch()
+
+After the team matching loop (around line ~1058), add logging when no match is found:
+
+```typescript
+// At end of findBookmakerMatch, before returning null:
+console.log(`[POLY-MONITOR] MATCH_FAILED: "${eventName}" | tried ${bookmakerGames.length} games | dateSkips=X, timeSkips=X, teamMismatch=X`);
+return null;
 ```
 
 ## Summary of Changes
 
-| Location | Description |
-|----------|-------------|
-| After line 36 | Add 3 helper functions: `isPlaceholderPolymarketTime`, `dateOnlyUTC`, `daysDiffUTC` |
-| Lines 817-827 | Replace strict 24h check with placeholder-aware logic |
-| After line 1336 | Add placeholder stats logging for debugging |
+| Location | Change | Purpose |
+|----------|--------|---------|
+| Line ~863 | `dd > 2` instead of `dd > 1` | Allow 2-day window for placeholder times |
+| Line ~878 | `hoursUntilStart > 36` instead of `> 24` | Discover games up to 36h away |
+| After line ~1395 | Add funnelStats counters | Track where matches fail |
+| Line ~1730 | `MIN_EDGE = 0.03` | Surface smaller but valid edges |
+| Line ~1058 | Add MATCH_FAILED logging | Debug why matches fail |
 
-## Expected Behavior After Fix
+## Expected Improvement
 
-| Scenario | Before | After |
-|----------|--------|-------|
-| Poly `23:59:59` + Book tomorrow 2:30 AM | SKIPPED (27h > 24h) | ALLOWED (same/next day) |
-| Poly `23:59:59` + Book Feb 15 | N/A | SKIPPED (day diff > 1) |
-| Poly real time + Book 30h apart | SKIPPED | SKIPPED (unchanged) |
-| Game within 24h of NOW | Allowed | Allowed (unchanged) |
+| Metric | Before | After (expected) |
+|--------|--------|------------------|
+| DATE_DAY_MISMATCH skips | ~10+ | ~2-3 |
+| OUTSIDE_24H_WINDOW skips | ~20+ | ~5-10 |
+| Matched events | 8 | 30-50 |
+| Edges surfaced | 1 | 5-15 |
+| Signals created | 0 | 1-5 (with 3% threshold) |
 
-## Testing After Deployment
+## Testing
 
-1. Deploy the updated `polymarket-monitor` function
-2. Run a fresh monitor scan
-3. Check logs for `PLACEHOLDER_TIME:` messages
-4. Verify `DATE MISMATCH` count decreases
-5. Confirm new signals are created for previously-blocked games
+1. Deploy the updated function
+2. Trigger a polymarket-monitor scan
+3. Check logs for `FUNNEL_STATS` summary
+4. Verify matched events increased
+5. Check if signals are being created with 3% edges
 
