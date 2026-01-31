@@ -1492,16 +1492,34 @@ Deno.serve(async (req) => {
         let bestAsk: number | null = null;
         let spreadPct: number | null = null;
         
+        // PRICE SANITY BOUNDS: Reject obviously garbage CLOB prices
+        // For sports H2H markets, no team should be priced below 5% or above 95%
+        const MIN_SANE_PRICE = 0.05;  // 5 cents
+        const MAX_SANE_PRICE = 0.95;  // 95 cents
+        
         // Try CLOB batch prices first
         if (tokenIdYes && clobPrices.has(tokenIdYes)) {
           const prices = clobPrices.get(tokenIdYes)!;
           bestBid = prices.bid;
           bestAsk = prices.ask;
-          livePolyPrice = bestAsk > 0 ? bestAsk : livePolyPrice;
+          
+          // SANITY CHECK: Only use CLOB price if it's within reasonable bounds
+          if (bestAsk >= MIN_SANE_PRICE && bestAsk <= MAX_SANE_PRICE) {
+            livePolyPrice = bestAsk;
+          } else {
+            console.log(`[POLY-MONITOR] GARBAGE_CLOB_PRICE_REJECTED`, {
+              event: event.event_name,
+              clobAsk: bestAsk,
+              clobBid: bestBid,
+              fallbackPrice: livePolyPrice,
+              reason: bestAsk < MIN_SANE_PRICE ? 'too_low' : 'too_high'
+            });
+            // Keep the fallback livePolyPrice from cache
+          }
           
           if (clobSpreads.has(tokenIdYes)) {
             spreadPct = clobSpreads.get(tokenIdYes)!;
-          } else if (bestBid > 0 && bestAsk > 0) {
+          } else if (bestBid > 0 && bestAsk > 0 && bestAsk >= MIN_SANE_PRICE && bestAsk <= MAX_SANE_PRICE) {
             // Convert to percentage-of-mid for consistent units with calculateNetEdge()
             const mid = (bestAsk + bestBid) / 2;
             spreadPct = mid > 0 ? (bestAsk - bestBid) / mid : null;
