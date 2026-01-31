@@ -1129,8 +1129,13 @@ function calculateConsensusFairProbByName(
     // Calculate fair prob for the target team
     const fairProb = calculateFairProb(odds, targetIdx);
     
-    // OUTLIER PROTECTION: Reject extreme probabilities (>92% or <8%)
-    if (fairProb > 0.92 || fairProb < 0.08) {
+    // OUTLIER PROTECTION: Reject extreme probabilities (>96% or <4%)
+    // RAISED from 92%/8% to accommodate post-normalization H2H favorites
+    // NOTE: Sharp books confirming extreme prices will override this check
+    const OUTLIER_HIGH = 0.96;  // Up from 0.92
+    const OUTLIER_LOW = 0.04;   // Down from 0.08
+    
+    if (fairProb > OUTLIER_HIGH || fairProb < OUTLIER_LOW) {
       console.log(`[POLY-MONITOR] OUTLIER REJECTED: ${bookmaker.key} fairProb=${(fairProb * 100).toFixed(1)}% for ${targetTeamName}`);
       continue;
     }
@@ -1410,6 +1415,11 @@ Deno.serve(async (req) => {
     // Track exactly where matches fail for debugging
     const funnelStats = {
       watching_total: eventsToProcess.length,
+      // TOKENIZATION GATE (Phase 1 - Critical)
+      blocked_no_tokens: 0,
+      blocked_untradeable: 0,
+      tokenized_total: 0,
+      // Previous stats
       skipped_no_tokens: 0,
       skipped_no_bookmaker_data: 0,
       skipped_expired: 0,
@@ -1432,6 +1442,10 @@ Deno.serve(async (req) => {
       edges_calculated: 0,
       edges_over_threshold: 0,
       signals_created: 0,
+      // NEW: Price quality stats
+      priced_from_clob: 0,
+      priced_from_cache: 0,
+      rejected_garbage_price: 0,
     };
 
     // Log placeholder time stats for debugging
@@ -1469,6 +1483,36 @@ Deno.serve(async (req) => {
         const sport = cache?.extracted_league || 'Unknown';
         const marketType = cache?.market_type || 'h2h';
         const tokenIdYes = cache?.token_id_yes;
+        
+        // ============= HARD GATE: NO TOKENS = NO SIGNAL =============
+        // Phase 1 critical fix: Block all untokenized markets at pipeline entry
+        // This prevents garbage signals from placeholders and missing data
+        if (!tokenIdYes) {
+          // Update cache to mark as untradeable
+          if (event.polymarket_condition_id) {
+            await supabase
+              .from('polymarket_h2h_cache')
+              .update({
+                tradeable: false,
+                untradeable_reason: 'MISSING_TOKENS',
+              })
+              .eq('condition_id', event.polymarket_condition_id);
+          }
+          
+          console.log(`[POLY-MONITOR] HARD_GATE_BLOCKED: No token_id_yes for "${event.event_name}"`);
+          funnelStats.blocked_no_tokens++;
+          continue;
+        }
+        
+        // Check if market is explicitly marked untradeable
+        if (cache?.tradeable === false) {
+          console.log(`[POLY-MONITOR] HARD_GATE_BLOCKED: Market untradeable (${cache?.untradeable_reason}) for "${event.event_name}"`);
+          funnelStats.blocked_untradeable++;
+          continue;
+        }
+        
+        funnelStats.tokenized_total++;
+        // ============= END HARD GATE =============
         
         // SAFETY CHECK: Skip non-H2H markets (should be filtered at query level, but belt-and-suspenders)
         if (marketType !== 'h2h') {
@@ -2348,7 +2392,23 @@ Deno.serve(async (req) => {
     const duration = Date.now() - startTime;
     
     // ============= FUNNEL SUMMARY LOG =============
-    console.log(`[POLY-MONITOR] FUNNEL_STATS:`, JSON.stringify(funnelStats));
+    // Enhanced summary with tokenization gate stats
+    const funnelSummary = {
+      ...funnelStats,
+      // Calculate derived metrics
+      tokenization_rate: funnelStats.watching_total > 0 
+        ? Math.round((funnelStats.tokenized_total / funnelStats.watching_total) * 100) 
+        : 0,
+      match_rate: funnelStats.tokenized_total > 0 
+        ? Math.round((funnelStats.matched_total / funnelStats.tokenized_total) * 100) 
+        : 0,
+      signal_rate: funnelStats.edges_over_threshold > 0 
+        ? Math.round((funnelStats.signals_created / funnelStats.edges_over_threshold) * 100) 
+        : 0,
+    };
+    
+    console.log(`[POLY-MONITOR] FUNNEL_STATS:`, JSON.stringify(funnelSummary));
+    console.log(`[POLY-MONITOR] FUNNEL_PIPELINE: ${funnelStats.watching_total} watching → ${funnelStats.tokenized_total} tokenized (${funnelStats.blocked_no_tokens} blocked) → ${funnelStats.matched_total} matched → ${funnelStats.edges_over_threshold} edges → ${funnelStats.signals_created} signals`);
     console.log(`[POLY-MONITOR] Complete: ${eventsToProcess.length} polled, ${eventsMatched} matched, ${edgesFound} edges (${movementConfirmedCount} movement-confirmed), ${alertsSent} alerts in ${duration}ms`);
 
     return new Response(
