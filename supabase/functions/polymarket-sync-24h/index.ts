@@ -614,18 +614,25 @@ Deno.serve(async (req) => {
       }
     }
     
-    // Helper: Lookup volume from pre-fetched Gamma events (no API call)
+    // Helper: Lookup volume AND TOKEN IDs from pre-fetched Gamma events (no API call)
+    // FIXED: Now extracts token_id_yes and token_id_no from Gamma market metadata
     function lookupClobVolumeFromCache(
       team1Name: string,
       team2Name: string
-    ): { volume: number; liquidity: number; conditionId: string | null } {
+    ): { 
+      volume: number; 
+      liquidity: number; 
+      conditionId: string | null;
+      tokenIdYes: string | null;
+      tokenIdNo: string | null;
+    } {
       const searchTerms = [
         team1Name.split(' ').pop()?.toLowerCase() || '',
         team2Name.split(' ').pop()?.toLowerCase() || '',
       ].filter(t => t.length > 2);
       
       if (searchTerms.length < 2) {
-        return { volume: 0, liquidity: 0, conditionId: null };
+        return { volume: 0, liquidity: 0, conditionId: null, tokenIdYes: null, tokenIdNo: null };
       }
       
       for (const event of gammaEventsForVolume) {
@@ -643,14 +650,40 @@ Deno.serve(async (req) => {
             const liquidity = parseFloat(market.liquidity || event.liquidity || '0') || 0;
             const conditionId = market.conditionId || market.id || event.id;
             
+            // NEW: Extract token IDs from Gamma market metadata
+            let tokenIdYes: string | null = null;
+            let tokenIdNo: string | null = null;
+            
+            // Path 1: clobTokenIds array (most common)
+            if (market.clobTokenIds) {
+              let tokenIds = market.clobTokenIds;
+              if (typeof tokenIds === 'string') {
+                try { tokenIds = JSON.parse(tokenIds); } catch {}
+              }
+              if (Array.isArray(tokenIds) && tokenIds.length >= 2) {
+                tokenIdYes = tokenIds[0] || null;
+                tokenIdNo = tokenIds[1] || null;
+              }
+            }
+            // Path 2: tokens array with token_id field
+            if (!tokenIdYes && market.tokens && Array.isArray(market.tokens) && market.tokens.length >= 2) {
+              tokenIdYes = market.tokens[0]?.token_id || market.tokens[0] || null;
+              tokenIdNo = market.tokens[1]?.token_id || market.tokens[1] || null;
+            }
+            // Path 3: outcomes array with clobTokenId
+            if (!tokenIdYes && market.outcomes && Array.isArray(market.outcomes) && market.outcomes.length >= 2) {
+              tokenIdYes = market.outcomes[0]?.clobTokenId || market.outcomes[0]?.tokenId || null;
+              tokenIdNo = market.outcomes[1]?.clobTokenId || market.outcomes[1]?.tokenId || null;
+            }
+            
             if (volume > 0) {
-              return { volume, liquidity, conditionId };
+              return { volume, liquidity, conditionId, tokenIdYes, tokenIdNo };
             }
           }
         }
       }
       
-      return { volume: 0, liquidity: 0, conditionId: null };
+      return { volume: 0, liquidity: 0, conditionId: null, tokenIdYes: null, tokenIdNo: null };
     }
     
     // Process Firecrawl games in parallel batches
@@ -716,7 +749,9 @@ Deno.serve(async (req) => {
             status: 'active',
             monitoring_status: 'watching',
             source: 'firecrawl',
-            polymarket_slug: generatedSlug, // NEW: Generated slug for direct Polymarket URLs
+            polymarket_slug: generatedSlug,
+            token_id_yes: clobData.tokenIdYes,   // NEW: Token IDs from Gamma lookup
+            token_id_no: clobData.tokenIdNo,     // NEW: Token IDs from Gamma lookup
             last_price_update: now.toISOString(),
             last_bulk_sync: now.toISOString(),
           }, {
@@ -727,6 +762,39 @@ Deno.serve(async (req) => {
           firecrawlUpserted++;
         }
       }));
+    }
+    
+    // BACKFILL: Update existing Firecrawl/scrape-nba rows missing token IDs
+    // This runs after main processing to populate previously cached rows
+    const { data: missingTokenRows } = await supabase
+      .from('polymarket_h2h_cache')
+      .select('condition_id, team_home, team_away')
+      .is('token_id_yes', null)
+      .in('source', ['firecrawl', 'scrape-nba'])
+      .eq('status', 'active')
+      .limit(50);
+
+    let backfilled = 0;
+    if (missingTokenRows && missingTokenRows.length > 0) {
+      for (const row of missingTokenRows) {
+        if (!row.team_home || !row.team_away) continue;
+        
+        const clobData = lookupClobVolumeFromCache(row.team_home, row.team_away);
+        if (clobData.tokenIdYes && clobData.tokenIdNo) {
+          const { error: backfillError } = await supabase
+            .from('polymarket_h2h_cache')
+            .update({
+              token_id_yes: clobData.tokenIdYes,
+              token_id_no: clobData.tokenIdNo,
+            })
+            .eq('condition_id', row.condition_id);
+          
+          if (!backfillError) {
+            backfilled++;
+          }
+        }
+      }
+      console.log(`[POLY-SYNC-24H] Backfilled ${backfilled} rows with missing token IDs`);
     }
     
     console.log(`[POLY-SYNC-24H] Firecrawl games upserted: ${firecrawlUpserted} (${firecrawlVolumeEnriched} enriched with volume)`);
