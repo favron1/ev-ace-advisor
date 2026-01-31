@@ -795,7 +795,8 @@ function findBookmakerMatch(
   eventName: string,
   question: string,
   marketType: string,
-  bookmakerGames: any[]
+  bookmakerGames: any[],
+  polymarketEventDate?: Date | null  // NEW: Optional Polymarket event date for validation
 ): H2HMatchResult | null {
   const eventNorm = normalizeName(`${eventName} ${question}`);
   
@@ -812,6 +813,18 @@ function findBookmakerMatch(
   const noNickname = polyNoNorm.split(' ').pop() || '';
   
   for (const game of bookmakerGames) {
+    // DATE VALIDATION: Prevent cross-game matching (e.g., matching Feb 2 Polymarket market with Jan 31 bookmaker game)
+    if (polymarketEventDate && game.commence_time) {
+      const bookmakerDate = new Date(game.commence_time);
+      const hoursDiff = Math.abs(polymarketEventDate.getTime() - bookmakerDate.getTime()) / (1000 * 60 * 60);
+      
+      if (hoursDiff > 24) {
+        // Dates are too far apart - this is likely a different game (same teams, different date)
+        console.log(`[POLY-MONITOR] DATE MISMATCH: "${eventName}" poly=${polymarketEventDate.toISOString()} vs book=${bookmakerDate.toISOString()} (${hoursDiff.toFixed(0)}h diff) - SKIPPING`);
+        continue;
+      }
+    }
+    
     const homeNorm = normalizeName(game.home_team);
     const awayNorm = normalizeName(game.away_team);
     
@@ -1283,12 +1296,17 @@ Deno.serve(async (req) => {
         // ============= TIERED MATCHING STRATEGY =============
         // (sport already defined above from cache?.extracted_league)
         
+        // Get Polymarket event date for cross-game validation
+        const polyEventDate = cache?.event_date ? new Date(cache.event_date) : 
+                              event.commence_time ? new Date(event.commence_time) : null;
+        
         // TIER 1: Direct string matching (fastest)
         let match = findBookmakerMatch(
           event.event_name,
           event.polymarket_question || '',
           marketType,
-          bookmakerGames
+          bookmakerGames,
+          polyEventDate  // Pass date for cross-game validation
         );
         let matchMethod = 'direct';
 
@@ -1300,7 +1318,8 @@ Deno.serve(async (req) => {
               `${expanded.homeTeam} vs ${expanded.awayTeam}`,
               event.polymarket_question || '',
               marketType,
-              bookmakerGames
+              bookmakerGames,
+              polyEventDate  // Pass date for cross-game validation
             );
             if (match) {
               console.log(`[POLY-MONITOR] NICKNAME MATCH: "${event.event_name}" → ${expanded.homeTeam} vs ${expanded.awayTeam}`);
@@ -1317,7 +1336,8 @@ Deno.serve(async (req) => {
               `${fuzzyResult.homeTeam} vs ${fuzzyResult.awayTeam}`,
               event.polymarket_question || '',
               marketType,
-              bookmakerGames
+              bookmakerGames,
+              polyEventDate  // Pass date for cross-game validation
             );
             if (match) {
               matchMethod = 'fuzzy';
@@ -1334,7 +1354,8 @@ Deno.serve(async (req) => {
               `${resolved.homeTeam} vs ${resolved.awayTeam}`,
               event.polymarket_question || '',
               marketType,
-              bookmakerGames
+              bookmakerGames,
+              polyEventDate  // Pass date for cross-game validation
             );
             
             if (match) {
