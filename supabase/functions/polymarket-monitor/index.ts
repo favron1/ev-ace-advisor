@@ -858,9 +858,10 @@ function findBookmakerMatch(
         // Placeholder time detected - use softer day-level check
         console.log(`[POLY-MONITOR] PLACEHOLDER_TIME: "${eventName}" poly=${polymarketEventDate.toISOString()} - using day-level + NOW-based validation`);
         
-        // Only allow same day or next day to prevent far-future mismatches
+        // Allow same day, next day, or day after to prevent far-future mismatches
+        // Relaxed to 2 days because placeholder times can cross UTC date boundaries
         const dd = daysDiffUTC(polymarketEventDate, bookmakerDate);
-        if (dd > 1) {
+        if (dd > 2) {
           console.log(`[POLY-MONITOR] DATE_DAY_MISMATCH: "${eventName}" poly=${dateOnlyUTC(polymarketEventDate).toISOString()} vs book=${dateOnlyUTC(bookmakerDate).toISOString()} (${dd.toFixed(0)} days) - SKIPPING`);
           continue;
         }
@@ -874,11 +875,12 @@ function findBookmakerMatch(
       const gameStart = new Date(game.commence_time);
       const hoursUntilStart = (gameStart.getTime() - now.getTime()) / (1000 * 60 * 60);
       
-      // Skip if game already started (negative) or more than 24h away
-      if (hoursUntilStart < -0.5 || hoursUntilStart > 24) {
-        // Only log if it's a close miss (within 36h) to reduce noise
-        if (hoursUntilStart > 24 && hoursUntilStart < 36) {
-          console.log(`[POLY-MONITOR] OUTSIDE_24H_WINDOW: "${eventName}" starts in ${hoursUntilStart.toFixed(1)}h - SKIPPING`);
+      // Skip if game already started (negative) or more than 36h away
+      // Extended to 36h for discovery - edge thresholds still apply later
+      if (hoursUntilStart < -0.5 || hoursUntilStart > 36) {
+        // Only log if it's a close miss (within 48h) to reduce noise
+        if (hoursUntilStart > 36 && hoursUntilStart < 48) {
+          console.log(`[POLY-MONITOR] OUTSIDE_36H_WINDOW: "${eventName}" starts in ${hoursUntilStart.toFixed(1)}h - SKIPPING`);
         }
         continue;
       }
@@ -1057,6 +1059,8 @@ function findBookmakerMatch(
     };
   }
   
+  // No match found - log failure details for debugging
+  console.log(`[POLY-MONITOR] MATCH_FAILED: "${eventName}" | tried ${bookmakerGames.length} games | no teams matched or time windows failed`);
   return null;
 }
 
@@ -1375,6 +1379,25 @@ Deno.serve(async (req) => {
     let eventsExpired = 0;
     let eventsMatched = 0;
     let movementConfirmedCount = 0;
+    
+    // ============= FUNNEL LOGGING =============
+    // Track exactly where matches fail for debugging
+    const funnelStats = {
+      watching_total: eventsToProcess.length,
+      skipped_no_tokens: 0,
+      skipped_no_bookmaker_data: 0,
+      skipped_expired: 0,
+      skipped_date_mismatch: 0,
+      skipped_time_window: 0,
+      tier1_direct: 0,
+      tier2_nickname: 0,
+      tier3_fuzzy: 0,
+      tier4_ai: 0,
+      matched_total: 0,
+      edges_calculated: 0,
+      edges_over_threshold: 0,
+      signals_created: 0,
+    };
 
     // Log placeholder time stats for debugging
     try {
@@ -1414,6 +1437,11 @@ Deno.serve(async (req) => {
         
         // Get bookmaker data for this sport
         const bookmakerGames = allBookmakerData.get(sport) || [];
+        
+        // Track no bookmaker data
+        if (bookmakerGames.length === 0) {
+          funnelStats.skipped_no_bookmaker_data++;
+        }
 
         // Get price from CLOB batch results (preferred) or fallback to cache/event_watch_state
         // CRITICAL: Use cache.yes_price first (more frequently updated), then event_watch_state
@@ -1450,6 +1478,7 @@ Deno.serve(async (req) => {
               cachedPrice: event.polymarket_yes_price,
               cachedVolume: event.polymarket_volume,
             });
+            funnelStats.skipped_no_tokens++;
             continue;
           }
           
@@ -1502,6 +1531,7 @@ Deno.serve(async (req) => {
           polySlug        // Pass slug for secondary date validation
         );
         let matchMethod = 'direct';
+        if (match) funnelStats.tier1_direct++;
 
         // TIER 2: Local nickname expansion (fast, no API)
         // FIX: Always use original event.event_name to preserve Polymarket YES/NO order
@@ -1526,6 +1556,7 @@ Deno.serve(async (req) => {
             if (match) {
               console.log(`[POLY-MONITOR] NICKNAME MATCH: "${event.event_name}" → found via ${expanded.homeTeam} vs ${expanded.awayTeam}`);
               matchMethod = 'nickname';
+              funnelStats.tier2_nickname++;
             }
           }
         }
@@ -1546,6 +1577,7 @@ Deno.serve(async (req) => {
             if (match) {
               console.log(`[POLY-MONITOR] FUZZY MATCH SUCCESS: "${event.event_name}" found via ${fuzzyResult.homeTeam} vs ${fuzzyResult.awayTeam}`);
               matchMethod = 'fuzzy';
+              funnelStats.tier3_fuzzy++;
             }
           }
         }
@@ -1575,10 +1607,16 @@ Deno.serve(async (req) => {
             if (match) {
               console.log(`[POLY-MONITOR] AI MATCH: "${event.event_name}" found via ${resolved.homeTeam} vs ${resolved.awayTeam}`);
               matchMethod = 'ai';
+              funnelStats.tier4_ai++;
             }
           }
         }
         // ============= END TIERED MATCHING =============
+        
+        // Track matched total
+        if (match) {
+          funnelStats.matched_total++;
+        }
 
         // ========== NEW DIRECT H2H EDGE CALCULATION ==========
         // Calculate fair probabilities for BOTH YES and NO teams directly
@@ -1661,6 +1699,7 @@ Deno.serve(async (req) => {
 
         // Check for edge - now uses BOTH fair probs directly
         if (yesFairProb !== null && noFairProb !== null && liveVolume >= 5000) {
+          funnelStats.edges_calculated++;
           // SKIP if we can't determine the bet side
           if (!yesTeamName || !noTeamName) {
             console.log(`[POLY-MONITOR] SKIPPING signal for ${event.event_name} - team names could not be determined`);
@@ -1828,6 +1867,12 @@ Deno.serve(async (req) => {
           
           console.log(`[POLY-MONITOR] EDGE CALC: ${event.event_name} | YES=${yesTeamName}=${(yesEdge * 100).toFixed(1)}%, NO=${noTeamName}=${(noEdge * 100).toFixed(1)}% -> ${betSide} ${recommendedOutcome} (${(rawEdge * 100).toFixed(1)}% edge)`);
           // ========== END DIRECT EDGE CALCULATION ==========
+          
+          // Track edges over threshold (lowered to 3% for signal creation)
+          const MIN_EDGE = 0.03; // 3% for signal creation
+          if (rawEdge >= MIN_EDGE) {
+            funnelStats.edges_over_threshold++;
+          }
           
           if (rawEdge >= 0.02) {
             // CRITICAL FIX #3: Staleness & high-prob edge gating
@@ -2070,6 +2115,7 @@ Deno.serve(async (req) => {
               signal = data;
               signalError = error;
               console.log(`[POLY-MONITOR] Created new ${signalTier} ${betSide} signal for ${event.event_name}`);
+              funnelStats.signals_created++;
             }
 
             // Send SMS for ALL new signals added to the feed (user request)
@@ -2092,11 +2138,14 @@ Deno.serve(async (req) => {
           }
         }
       } catch (eventError) {
-        console.error(`[POLY-MONITOR] Error processing ${event.event_key}:`, eventError);
+      console.error(`[POLY-MONITOR] Error processing ${event.event_key}:`, eventError);
       }
     }
 
     const duration = Date.now() - startTime;
+    
+    // ============= FUNNEL SUMMARY LOG =============
+    console.log(`[POLY-MONITOR] FUNNEL_STATS:`, JSON.stringify(funnelStats));
     console.log(`[POLY-MONITOR] Complete: ${eventsToProcess.length} polled, ${eventsMatched} matched, ${edgesFound} edges (${movementConfirmedCount} movement-confirmed), ${alertsSent} alerts in ${duration}ms`);
 
     return new Response(
