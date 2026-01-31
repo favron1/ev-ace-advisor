@@ -1,93 +1,77 @@
 
-# Fix: Align Recommended Outcome with Bet Direction
 
-## Problem Confirmed
+# Simplify Signal Display: "BET ON [TEAM] TO WIN"
 
-The system is showing "BUY NO" with `recommended_outcome` set to the matched team name, which creates confusion. When `side = 'NO'`, the user should bet on the **away team** (second in "A vs B"), but the signal might be showing the home team as the recommendation.
+## What You Want
 
-## Root Cause
+Show which team sharp books favor and recommend betting on them - period. No mention of "YES shares", "NO shares", "BUY YES", or "BUY NO". The system still calculates edges for both sides, but the display is purely team-centric.
 
-Line 1507 in `polymarket-monitor/index.ts`:
-```typescript
-recommended_outcome: teamName,  // <-- Always uses matched team, not bet direction
+## Changes Required
+
+### 1. SignalCard.tsx - Main Display
+
+**Current (lines 453-468):**
+```tsx
+<Badge>BET: {teamToBetOn} TO WIN</Badge>
+<Badge>{signal.side === 'YES' ? 'YES shares' : 'NO shares'}</Badge>
 ```
 
-The `teamName` variable stores whichever team was found during bookmaker matching (could be home OR away), but the `betSide` determines which team to actually bet on.
-
-## The Fix
-
-### Step 1: Parse Home/Away Teams from Event Name
-
-After determining `betSide`, parse the event title to get both team names:
-
-```typescript
-// Parse "Team A vs Team B" to get home (YES) and away (NO) teams
-const eventParts = event.event_name.match(/^(.+?)\s+vs\.?\s+(.+?)(?:\s*-\s*.*)?$/i);
-const homeTeamFromEvent = eventParts?.[1]?.trim() || teamName;
-const awayTeamFromEvent = eventParts?.[2]?.trim() || teamName;
+**After:**
+```tsx
+<Badge>BET ON {signal.recommended_outcome} TO WIN</Badge>
+// Remove the YES/NO shares badge entirely
 ```
 
-### Step 2: Set Recommended Outcome Based on Bet Side
+The `recommended_outcome` field already contains the correct team (we fixed that in the previous update). We just need to:
+1. Use it directly instead of re-parsing the event name
+2. Remove the "YES shares" / "NO shares" badge completely
 
-```typescript
-// CRITICAL: recommended_outcome must match betSide
-// YES = home team (first), NO = away team (second)
-const recommendedOutcome = betSide === 'YES' ? homeTeamFromEvent : awayTeamFromEvent;
+### 2. SMS Alert Formatting (polymarket-monitor/index.ts)
+
+**Current (lines 692-705):**
+```
+🎯 STRONG: Utah vs Carolina
+BUY YES: Utah
+Poly YES: 45¢ ($50K)
 ```
 
-### Step 3: Set Correct Fair Probability
-
-The `bookmaker_prob_fair` field should reflect the probability of the **recommended team**, not the matched team:
-
-```typescript
-// Fair prob for the team we're recommending to bet on
-const recommendedFairProb = betSide === 'YES' 
-  ? yesSideFairProb 
-  : (1 - yesSideFairProb);
+**After:**
+```
+🎯 STRONG: Utah vs Carolina
+BET ON Utah TO WIN
+Poly: 45¢ ($50K)
 ```
 
-### Step 4: Update Signal Creation
+Remove `BUY YES`/`BUY NO` labeling and `Poly YES`/`Poly NO` - just show "BET ON [team]" and "Poly: [price]".
 
-Replace line 1507:
-```typescript
-// OLD:
-recommended_outcome: teamName,
+### 3. FiltersBar.tsx - Remove BUY YES Filter
 
-// NEW:
-recommended_outcome: recommendedOutcome,
-```
+Since all signals will now just show "BET ON [team]", the "BUY YES Only" filter becomes meaningless. We'll either:
+- Remove it entirely, OR
+- Rename it to "Shortening Only" (sharps moving price up = higher confidence edge)
 
-And update `signalData` at line 1434:
-```typescript
-// OLD:
-bookmaker_prob_fair: bookmakerFairProb,
+I'll remove it for simplicity since the user hasn't expressed interest in filtering by technical side.
 
-// NEW:
-bookmaker_prob_fair: recommendedFairProb,
-```
+### 4. Terminal.tsx + useSignals.ts - Remove Filter Logic
 
-## File Changes
+Remove the `showBuyYesOnly` / `buyYesOnly` state and filter logic.
 
-| File | Changes |
-|------|---------|
-| `supabase/functions/polymarket-monitor/index.ts` | Add event parsing after `betSide` determination (~line 1355), update signal creation to use `recommendedOutcome` and `recommendedFairProb` |
+## Summary of Files to Update
 
-## After This Fix
+| File | Change |
+|------|--------|
+| `src/components/terminal/SignalCard.tsx` | Remove "YES/NO shares" badge, simplify bet display to use `recommended_outcome` directly |
+| `supabase/functions/polymarket-monitor/index.ts` | Change SMS from "BUY YES: [team]" to "BET ON [team] TO WIN" |
+| `src/components/terminal/FiltersBar.tsx` | Remove the "BUY YES Only" filter toggle |
+| `src/pages/Terminal.tsx` | Remove `showBuyYesOnly` state |
+| `src/hooks/useSignals.ts` | Remove `buyYesOnly` filter logic |
 
-For "Seattle Seahawks vs New England Patriots" where sharp books have Patriots at 33%:
+## After This Change
 
-**Before (BROKEN)**:
-- `recommended_outcome`: "New England Patriots"
-- `bookmaker_prob_fair`: 0.33
-- `side`: "YES"
-- Display: "BET: Patriots" with 33% fair prob ← Confusing!
+Every signal will display:
+- **Badge:** "BET ON Utah TO WIN" (always green, team-centric)
+- **Explanation:** "Sharp books value Utah at 67% to win"
+- **No technical jargon:** No YES/NO/shares anywhere visible
 
-**After (FIXED)**:
-- `recommended_outcome`: "Seattle Seahawks" (home team = YES side)
-- `bookmaker_prob_fair`: 0.67 (Seahawks' fair probability)
-- `side`: "YES"
-- Display: "BET: Seattle Seahawks TO WIN" with 67% fair prob ← Clear!
+The system still knows internally which Polymarket token to buy, but that's an implementation detail hidden from you.
 
-## Immediate Cleanup
-
-The current Patriots signal needs to be dismissed since it was created with the wrong `recommended_outcome`. After deploying the fix, a fresh scan will create the correct signal.
