@@ -164,6 +164,25 @@ export function SignalCard({
   const polyYesPrice = (signal as any).polymarket_yes_price || signal.polymarket_price;
   const polyConditionId = (signal as any).polymarket_condition_id;
   
+  // Helper: Extract team names for smarter search queries
+  const extractTeamNames = (eventName: string): { full: string; short: string } | null => {
+    // Match "Team A vs Team B" or "Team A vs. Team B"
+    const vsMatch = eventName.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
+    if (!vsMatch) return null;
+    
+    const team1 = vsMatch[1].trim();
+    const team2 = vsMatch[2].trim();
+    
+    // Extract last word (nickname) from each team: "Michigan Wolverines" → "Wolverines"
+    const team1Short = team1.split(' ').pop() || team1;
+    const team2Short = team2.split(' ').pop() || team2;
+    
+    return {
+      full: `${team1} vs ${team2}`,
+      short: `${team1Short} vs ${team2Short}`
+    };
+  };
+
   // Generate Polymarket direct URL using slug from backend (FIXED)
   const getPolymarketDirectUrl = (): string | null => {
     // Priority 1: Use slug from backend (most reliable)
@@ -181,8 +200,15 @@ export function SignalCard({
     return null; // Fall through to search
   };
   
-  // Fallback search URL
+  // Enhanced fallback search URL with smarter query construction
   const getPolymarketSearchUrl = () => {
+    // Extract just the team names for better search results
+    const teams = extractTeamNames(signal.event_name);
+    if (teams) {
+      // Search for "Wolverines vs Spartans" instead of "Michigan Wolverines vs Michigan State Spartans"
+      return `https://polymarket.com/search?query=${encodeURIComponent(teams.short)}`;
+    }
+    // Fallback to recommended_outcome (team name) for single-team search
     const searchTerm = signal.recommended_outcome || signal.event_name;
     return `https://polymarket.com/search?query=${encodeURIComponent(searchTerm)}`;
   };
