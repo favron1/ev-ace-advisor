@@ -677,6 +677,22 @@ async function sendSmsAlert(
   betSide: 'YES' | 'NO',
   movementDirection: 'shortening' | 'drifting' | null
 ): Promise<boolean> {
+  // CRITICAL GATE: Check if event has already started (prevents alerts for finished games)
+  const eventDate = new Date(event.commence_time);
+  const now = new Date();
+  
+  if (eventDate <= now) {
+    console.log(`[POLY-MONITOR] SMS BLOCKED: ${event.event_name} has already started (${eventDate.toISOString()} <= ${now.toISOString()})`);
+    return false;
+  }
+  
+  // Also block if event is more than 24h away (bad timestamp)
+  const hoursUntil = (eventDate.getTime() - now.getTime()) / (1000 * 60 * 60);
+  if (hoursUntil > 24) {
+    console.log(`[POLY-MONITOR] SMS BLOCKED: ${event.event_name} is ${hoursUntil.toFixed(1)}h away (>24h window)`);
+    return false;
+  }
+  
   // Send SMS for ALL new signals that make it to the signal feed
   console.log(`[POLY-MONITOR] Sending SMS: tier=${signalTier}, edge=${(rawEdge * 100).toFixed(1)}%`);
   
