@@ -826,19 +826,20 @@ function findBookmakerMatch(
       }
     }
     
-    // SECONDARY SLUG DATE VALIDATION: Parse slug date and cross-check with bookmaker date
-    // This catches cases where event_date in cache was incorrectly set via Odds API fallback
-    if (polymarketSlug) {
-      const slugDateMatch = polymarketSlug.match(/(\d{4}-\d{2}-\d{2})$/);
-      if (slugDateMatch && game.commence_time) {
-        const slugDate = new Date(slugDateMatch[1] + 'T00:00:00Z');
-        const bookmakerDate = new Date(game.commence_time);
-        const daysDiff = Math.abs(slugDate.getTime() - bookmakerDate.getTime()) / (1000 * 60 * 60 * 24);
-        
-        if (daysDiff > 1) {
-          console.log(`[POLY-MONITOR] SLUG DATE MISMATCH: "${eventName}" slug=${slugDateMatch[1]}, book=${bookmakerDate.toISOString().split('T')[0]} (${daysDiff.toFixed(1)}d diff) - SKIPPING`);
-          continue;
+    // SIMPLIFIED TIME CHECK: Is this game starting within 24 hours from NOW?
+    // This is what the user actually cares about - not date string matching
+    if (game.commence_time) {
+      const now = new Date();
+      const gameStart = new Date(game.commence_time);
+      const hoursUntilStart = (gameStart.getTime() - now.getTime()) / (1000 * 60 * 60);
+      
+      // Skip if game already started (negative) or more than 24h away
+      if (hoursUntilStart < -0.5 || hoursUntilStart > 24) {
+        // Only log if it's a close miss (within 36h) to reduce noise
+        if (hoursUntilStart > 24 && hoursUntilStart < 36) {
+          console.log(`[POLY-MONITOR] OUTSIDE_24H_WINDOW: "${eventName}" starts in ${hoursUntilStart.toFixed(1)}h - SKIPPING`);
         }
+        continue;
       }
     }
     
