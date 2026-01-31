@@ -1,270 +1,170 @@
 
+# Fix Plan: Fuzzy Match Team Ordering Bug
 
-# Fix Plan: Restore Signal Generation
+## Problem Summary
 
-## Problem Diagnosis Summary
+The backend is mapping the wrong team to YES/NO when the fuzzy match fallback is used. The bug occurs because:
 
-Based on database queries and edge function logs, there are **two critical blockers** preventing signal generation:
+1. Polymarket title says "Canadiens vs. Sabres" → YES=Canadiens, NO=Sabres
+2. Fuzzy match finds the bookmaker game "Buffalo Sabres vs Montréal Canadiens" (home/away order)
+3. The code **reconstructs** the event name using bookmaker's home/away order
+4. `findBookmakerMatch` then parses "Buffalo Sabres vs Montréal Canadiens" and sets YES=Sabres, NO=Canadiens
+5. Result: Completely inverted mapping
 
-### Blocker A: Bookmaker Data is Broken (401 Errors)
-
-The `ingest-odds` function is failing with **401 Unauthorized** errors on all H2H API calls:
-
+### Evidence from logs:
 ```
-Failed to fetch basketball_nba: 401
-Failed to fetch basketball_ncaab: 401
-Failed to fetch americanfootball_nfl: 401
-Failed to fetch icehockey_nhl: 401
-→ Generated 0 total signals
-```
-
-This means no fresh H2H bookmaker data is being ingested, so `polymarket-monitor` has nothing to compare against for edge calculation.
-
-**Root Cause**: The `ODDS_API_KEY` is either expired, invalid, or has exceeded its quota. The Odds API free tier allows 500 requests/month.
-
-### Blocker B: Token IDs Missing for 121/518 H2H Markets
-
-The cache breakdown by source shows:
-| Source | Total | Missing Token IDs |
-|--------|-------|------------------|
-| `firecrawl` | 88 | **88 (100%)** |
-| `scrape-nba` | 31 | **30 (97%)** |
-| `api` | 268 | 3 (1%) |
-| `gamma-api` | 131 | 0 (0%) |
-
-The `lookupClobVolumeFromCache` function extracts volume/liquidity/conditionId but **never extracts token IDs** from the matched Gamma event. This causes `NO_TOKEN_ID_SKIP` in `polymarket-monitor`:
-
-```text
-Current return: { volume, liquidity, conditionId }
-Missing: tokenIdYes, tokenIdNo
+MATCH: failed for "Canadiens vs. Sabres" → YES="Canadiens", NO="Sabres" (yesIdx=-1, noIdx=-1)
+FUZZY MATCH: "Canadiens vs. Sabres" → Buffalo Sabres vs Montréal Canadiens (100% sim)
+MATCH: exact for "Buffalo Sabres vs Montréal Canadiens" → YES=Buffalo Sabres(idx0), NO=Montréal Canadiens(idx1)
 ```
 
----
+## The Fix
 
-## Technical Fix Plan
+The fuzzy match result should **only provide the matched bookmaker game** - not determine team order. The YES/NO assignment must ALWAYS come from the original Polymarket title.
 
-### Fix 1: Update ODDS_API_KEY (User Action Required)
+### Technical Changes
 
-The current API key is returning 401 errors. You need to:
+**File**: `supabase/functions/polymarket-monitor/index.ts`
 
-1. Go to [The Odds API Dashboard](https://the-odds-api.com/)
-2. Check if your API key is still valid and has remaining quota
-3. If expired/exceeded, generate a new key
-4. Update the secret using the Lovable secrets management
+#### Change 1: Pass Original Event Name to `findBookmakerMatch`
 
-### Fix 2: Extract Token IDs in `lookupClobVolumeFromCache`
+Update the fuzzy match code path (lines 1447-1461) to pass the **original** Polymarket event name, not the reconstructed bookmaker order:
 
-**File**: `supabase/functions/polymarket-sync-24h/index.ts`
-
-**Current code** (lines 617-654):
+**Current (buggy)**:
 ```typescript
-function lookupClobVolumeFromCache(
-  team1Name: string,
-  team2Name: string
-): { volume: number; liquidity: number; conditionId: string | null } {
-  // ... matching logic ...
-  if (matchesTeam1 && matchesTeam2) {
-    const market = event.markets?.[0];
-    if (market) {
-      const volume = parseFloat(market.volume || event.volume || '0') || 0;
-      const liquidity = parseFloat(market.liquidity || event.liquidity || '0') || 0;
-      const conditionId = market.conditionId || market.id || event.id;
-      
-      if (volume > 0) {
-        return { volume, liquidity, conditionId };  // ❌ Missing token IDs!
-      }
-    }
-  }
-  return { volume: 0, liquidity: 0, conditionId: null };
+if (fuzzyResult) {
+  match = findBookmakerMatch(
+    `${fuzzyResult.homeTeam} vs ${fuzzyResult.awayTeam}`,  // ← Uses bookmaker order!
+    event.polymarket_question || '',
+    ...
+  );
 }
 ```
 
-**Updated code** - extract token IDs from Gamma market metadata:
+**Fixed**:
 ```typescript
-function lookupClobVolumeFromCache(
-  team1Name: string,
-  team2Name: string
-): { 
-  volume: number; 
-  liquidity: number; 
-  conditionId: string | null;
-  tokenIdYes: string | null;  // NEW
-  tokenIdNo: string | null;   // NEW
-} {
-  // ... same matching logic ...
-  if (matchesTeam1 && matchesTeam2) {
-    const market = event.markets?.[0];
-    if (market) {
-      const volume = parseFloat(market.volume || event.volume || '0') || 0;
-      const liquidity = parseFloat(market.liquidity || event.liquidity || '0') || 0;
-      const conditionId = market.conditionId || market.id || event.id;
-      
-      // NEW: Extract token IDs from Gamma market metadata
-      let tokenIdYes: string | null = null;
-      let tokenIdNo: string | null = null;
-      
-      // Path 1: clobTokenIds array
-      if (market.clobTokenIds) {
-        let tokenIds = market.clobTokenIds;
-        if (typeof tokenIds === 'string') {
-          try { tokenIds = JSON.parse(tokenIds); } catch {}
-        }
-        if (Array.isArray(tokenIds) && tokenIds.length >= 2) {
-          tokenIdYes = tokenIds[0] || null;
-          tokenIdNo = tokenIds[1] || null;
-        }
-      }
-      // Path 2: tokens array
-      if (!tokenIdYes && market.tokens && Array.isArray(market.tokens)) {
-        tokenIdYes = market.tokens[0]?.token_id || market.tokens[0] || null;
-        tokenIdNo = market.tokens[1]?.token_id || market.tokens[1] || null;
-      }
-      // Path 3: outcomes array
-      if (!tokenIdYes && market.outcomes && Array.isArray(market.outcomes)) {
-        tokenIdYes = market.outcomes[0]?.clobTokenId || null;
-        tokenIdNo = market.outcomes[1]?.clobTokenId || null;
-      }
-      
-      if (volume > 0) {
-        return { volume, liquidity, conditionId, tokenIdYes, tokenIdNo };
-      }
-    }
+if (fuzzyResult) {
+  match = findBookmakerMatch(
+    event.event_name,  // ← Always use original Polymarket title
+    event.polymarket_question || '',
+    marketType,
+    [fuzzyResult.game],  // ← Pass only the matched game
+    polyEventDate,
+    polySlug
+  );
+  if (match) {
+    matchMethod = 'fuzzy';
   }
-  return { volume: 0, liquidity: 0, conditionId: null, tokenIdYes: null, tokenIdNo: null };
 }
 ```
 
-### Fix 3: Use Extracted Token IDs in Firecrawl Upsert
+#### Change 2: Apply Same Fix to AI Resolution Path (lines 1468-1482)
 
-**File**: `supabase/functions/polymarket-sync-24h/index.ts` (lines 660-730)
+**Current (buggy)**:
+```typescript
+match = findBookmakerMatch(
+  `${resolved.homeTeam} vs ${resolved.awayTeam}`,  // ← Uses AI-resolved order!
+  ...
+);
+```
 
-Update the Firecrawl game processing to include token IDs:
+**Fixed**:
+```typescript
+// AI resolution should just find which game - not determine order
+match = findBookmakerMatch(
+  event.event_name,  // ← Always use original Polymarket title
+  event.polymarket_question || '',
+  marketType,
+  bookmakerGames.filter(g => 
+    normalizeName(`${g.home_team} ${g.away_team}`).includes(normalizeName(resolved.homeTeam)) ||
+    normalizeName(`${g.home_team} ${g.away_team}`).includes(normalizeName(resolved.awayTeam))
+  ),
+  polyEventDate,
+  polySlug
+);
+```
+
+#### Change 3: Apply Same Fix to Nickname Expansion Path (lines 1430-1443)
+
+**Current (buggy)**:
+```typescript
+match = findBookmakerMatch(
+  `${expanded.homeTeam} vs ${expanded.awayTeam}`,  // ← Uses expanded order!
+  ...
+);
+```
+
+**Fixed**:
+```typescript
+match = findBookmakerMatch(
+  event.event_name,  // ← Always use original Polymarket title
+  event.polymarket_question || '',
+  marketType,
+  bookmakerGames,
+  polyEventDate,
+  polySlug
+);
+```
+
+#### Change 4: Improve `findBookmakerMatch` Team Matching
+
+The token-overlap matching at lines 885-920 needs to handle partial names (like "Canadiens" matching "Montréal Canadiens"). Update the token overlap to also check substring containment:
 
 ```typescript
-const clobData = lookupClobVolumeFromCache(game.team1Name, game.team2Name);
-if (clobData.volume > 0) {
-  volume = clobData.volume;
-  liquidity = clobData.liquidity;
-  firecrawlVolumeEnriched++;
+// TIER 2: Token overlap OR substring containment
+if (yesOutcomeIndex === -1 || noOutcomeIndex === -1) {
+  // First try substring matching (handles "Canadiens" in "Montréal Canadiens")
+  const substringMatch = (needle: string, haystack: string) => {
+    const n = norm(needle);
+    return market.outcomes.findIndex((o: any) => {
+      const h = norm(o.name);
+      return h.includes(n) || n.includes(h);
+    });
+  };
   
-  if (clobData.conditionId) {
-    conditionId = clobData.conditionId;
+  if (yesOutcomeIndex === -1) {
+    yesOutcomeIndex = substringMatch(polyYesTeam, '');
+    if (yesOutcomeIndex !== -1) matchMethod = 'substring';
   }
-}
-
-// Update upsert to include token IDs from Gamma lookup
-const { error: fcError } = await supabase
-  .from('polymarket_h2h_cache')
-  .upsert({
-    condition_id: conditionId,
-    // ... existing fields ...
-    token_id_yes: clobData.tokenIdYes,  // NEW
-    token_id_no: clobData.tokenIdNo,    // NEW
-  }, {
-    onConflict: 'condition_id',
-  });
-```
-
-### Fix 4: Add Diagnostic Logging to `ingest-odds`
-
-**File**: `supabase/functions/ingest-odds/index.ts`
-
-Add a hard check at the start to catch API key issues immediately:
-
-```typescript
-// At line 142, after checking for oddsApiKey:
-if (!oddsApiKey) {
-  return new Response(
-    JSON.stringify({ error: 'ODDS_API_KEY not configured' }),
-    { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-  );
-}
-
-// NEW: Test API key validity with a lightweight call
-const testUrl = `https://api.the-odds-api.com/v4/sports/?apiKey=${oddsApiKey}`;
-const testResponse = await fetch(testUrl);
-if (!testResponse.ok) {
-  console.error(`[INGEST-ODDS] API_KEY_INVALID: Status ${testResponse.status}`);
-  return new Response(
-    JSON.stringify({ 
-      error: 'ODDS_API_KEY invalid or quota exceeded',
-      status: testResponse.status,
-      remaining_requests: testResponse.headers.get('x-requests-remaining'),
-    }),
-    { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-  );
-}
-console.log(`[INGEST-ODDS] API key valid. Remaining requests: ${testResponse.headers.get('x-requests-remaining')}`);
-```
-
-### Fix 5: Backfill Token IDs for Existing Cache Rows
-
-Create a one-off backfill that updates existing Firecrawl/scrape-nba rows with token IDs from Gamma:
-
-```typescript
-// Add to end of polymarket-sync-24h after main processing:
-// BACKFILL: Update rows missing token IDs
-const { data: missingTokenRows } = await supabase
-  .from('polymarket_h2h_cache')
-  .select('condition_id, team_home, team_away')
-  .is('token_id_yes', null)
-  .in('source', ['firecrawl', 'scrape-nba'])
-  .limit(50);
-
-let backfilled = 0;
-if (missingTokenRows) {
-  for (const row of missingTokenRows) {
-    const clobData = lookupClobVolumeFromCache(row.team_home, row.team_away);
-    if (clobData.tokenIdYes && clobData.tokenIdNo) {
-      await supabase
-        .from('polymarket_h2h_cache')
-        .update({
-          token_id_yes: clobData.tokenIdYes,
-          token_id_no: clobData.tokenIdNo,
-        })
-        .eq('condition_id', row.condition_id);
-      backfilled++;
+  if (noOutcomeIndex === -1) {
+    noOutcomeIndex = substringMatch(polyNoTeam, '');
+    // Ensure not same as YES match
+    if (noOutcomeIndex === yesOutcomeIndex) {
+      noOutcomeIndex = market.outcomes.findIndex((o: any, i: number) => 
+        i !== yesOutcomeIndex && norm(o.name).includes(norm(polyNoTeam))
+      );
     }
+    if (noOutcomeIndex !== -1 && matchMethod !== 'substring') matchMethod = 'substring';
   }
+  
+  // Fall back to token overlap if substring didn't work
+  // ... existing token overlap code ...
 }
-console.log(`[POLY-SYNC-24H] Backfilled ${backfilled} rows with missing token IDs`);
 ```
-
----
 
 ## Summary of Changes
 
-| Priority | File | Change |
-|----------|------|--------|
-| **CRITICAL** | User Action | Update `ODDS_API_KEY` - current key returns 401 |
-| High | `polymarket-sync-24h/index.ts` | Modify `lookupClobVolumeFromCache` to extract token IDs |
-| High | `polymarket-sync-24h/index.ts` | Include token IDs in Firecrawl/scrape-nba upserts |
-| Medium | `ingest-odds/index.ts` | Add API key validation with quota logging |
-| Medium | `polymarket-sync-24h/index.ts` | Add backfill logic for existing rows missing token IDs |
+| Location | Change |
+|----------|--------|
+| Line 1451 | Use `event.event_name` instead of `fuzzyResult.homeTeam vs fuzzyResult.awayTeam` |
+| Line 1469-1470 | Use `event.event_name` instead of `resolved.homeTeam vs resolved.awayTeam` |
+| Line 1439-1440 | Use `event.event_name` instead of `expanded.homeTeam vs expanded.awayTeam` |
+| Lines 885-920 | Add substring containment as intermediate tier before token overlap |
 
----
+## Expected Results
 
-## Expected Results After Fix
+After this fix:
+- "Canadiens vs. Sabres" will always parse as YES=Canadiens, NO=Sabres
+- Fuzzy/AI/Nickname matching will find the right **game** but preserve Polymarket **order**
+- The signal will correctly show "Bet on Canadiens" when YES side has edge
+- No more inverted mappings
 
-1. `ingest-odds` will either work (if API key is renewed) or fail fast with clear error
-2. `polymarket-sync-24h` will populate token IDs for all sources
-3. `polymarket-monitor` will stop hitting `NO_TOKEN_ID_SKIP`
-4. Signals will start generating again
+## Database Cleanup
 
----
+After deployment, run this query to expire the incorrectly-mapped signals:
 
-## Verification Steps
-
-After deployment:
-1. Check `ingest-odds` logs for successful H2H data fetch
-2. Run query to confirm token ID coverage:
-   ```sql
-   SELECT source, count(*), 
-     sum(case when token_id_yes is null then 1 else 0 end) as missing
-   FROM polymarket_h2h_cache 
-   WHERE market_type = 'h2h' 
-   GROUP BY source;
-   ```
-3. Trigger `polymarket-monitor` and check for new signals
-4. Verify logs show matches instead of `0 matched`
-
+```sql
+UPDATE signal_opportunities 
+SET status = 'expired' 
+WHERE event_name ILIKE '%canadiens%' AND status = 'active'
+```
