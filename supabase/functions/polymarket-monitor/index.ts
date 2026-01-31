@@ -1309,9 +1309,10 @@ Deno.serve(async (req) => {
         // Get bookmaker data for this sport
         const bookmakerGames = allBookmakerData.get(sport) || [];
 
-        // Get price from CLOB batch results (preferred) or fallback to single fetch
-        let livePolyPrice = event.polymarket_yes_price || 0.5;
-        let liveVolume = event.polymarket_volume || 0;
+        // Get price from CLOB batch results (preferred) or fallback to cache/event_watch_state
+        // CRITICAL: Use cache.yes_price first (more frequently updated), then event_watch_state
+        let livePolyPrice = cache?.yes_price || event.polymarket_yes_price || 0.5;
+        let liveVolume = cache?.volume || event.polymarket_volume || 0;
         let bestBid: number | null = null;
         let bestAsk: number | null = null;
         let spreadPct: number | null = null;
