@@ -1626,9 +1626,12 @@ Deno.serve(async (req) => {
           const yesEdge = yesFairProb - livePolyPrice;
           const noEdge = noFairProb - (1 - livePolyPrice);
           
-          // ========== SAFETY RAIL #2: DUAL-MAPPING EV GATE ==========
+          // ========== SAFETY RAIL #2: DUAL-MAPPING EV GATE (RELAXED) ==========
           // Prevents inverted signals by computing EV under both possible mappings
-          // If swapped mapping looks better, our team mapping is likely wrong
+          // Only blocks when:
+          // 1. Current mapping has NO positive edge (bestA <= 0), AND
+          // 2. Swapped mapping has a substantial edge (bestB > 5%)
+          // This prevents blocking legitimate small edges while catching inversions
           const yesEdge_A = yesEdge;  // Current mapping
           const noEdge_A = noEdge;
           
@@ -1639,25 +1642,37 @@ Deno.serve(async (req) => {
           const bestA = Math.max(yesEdge_A, noEdge_A);
           const bestB = Math.max(yesEdge_B, noEdge_B);
           
-          const MAPPING_MARGIN = 0.02; // 2% edge margin
-          if (bestB > bestA + MAPPING_MARGIN) {
-            console.log(`[POLY-MONITOR] MAPPING_INVERSION_DETECTED`, {
+          // RELAXED GATE: Only block if current mapping is negative/marginal AND swap is much better
+          // This allows small positive edges to pass through
+          const SWAP_THRESHOLD = 0.05; // Swapped mapping must show >5% edge to trigger block
+          const shouldBlock = bestA < 0.01 && bestB > SWAP_THRESHOLD;
+          
+          if (shouldBlock) {
+            console.log(`[POLY-MONITOR] MAPPING_INVERSION_BLOCKED`, {
               event: event.event_name,
               polyPrice: livePolyPrice,
               yesFairProb,
               noFairProb,
               bestA,
               bestB,
-              margin: MAPPING_MARGIN,
+              reason: 'Current mapping weak (<1%) but swapped shows >5% edge',
               tokenIdYes,
               yesTeamName,
               noTeamName,
               spreadPct,
               volume: liveVolume,
-              bestBid,
-              bestAsk,
             });
             continue;
+          }
+          
+          // Log when we're allowing a signal through despite swap looking better (for monitoring)
+          if (bestB > bestA + 0.02) {
+            console.log(`[POLY-MONITOR] MAPPING_ALLOWED_DESPITE_SWAP`, {
+              event: event.event_name,
+              bestA: (bestA * 100).toFixed(1) + '%',
+              bestB: (bestB * 100).toFixed(1) + '%',
+              reason: 'Current mapping has positive edge, proceeding',
+            });
           }
           // ========== END DUAL-MAPPING EV GATE ==========
           
