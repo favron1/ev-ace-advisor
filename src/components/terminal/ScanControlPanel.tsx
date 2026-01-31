@@ -52,6 +52,9 @@ interface ScanControlPanelProps {
   spikeCountdown?: string;
   cooldownActive?: boolean;
   cooldownCountdown?: string;
+  // Sync Polymarket
+  onSyncPolymarket?: () => void;
+  syncing?: boolean;
 }
 
 export function ScanControlPanel({
@@ -73,6 +76,9 @@ export function ScanControlPanel({
   spikeCountdown = '--:--',
   cooldownActive = false,
   cooldownCountdown = '--:--',
+  // Sync Polymarket
+  onSyncPolymarket,
+  syncing = false,
 }: ScanControlPanelProps) {
   const dailyUsagePercent = (status.dailyRequestsUsed / status.dailyRequestsLimit) * 100;
   const monthlyUsagePercent = (status.monthlyRequestsUsed / status.monthlyRequestsLimit) * 100;
@@ -162,13 +168,27 @@ export function ScanControlPanel({
           </TooltipProvider>
         )}
 
+        {/* Sync Polymarket Button */}
+        {onSyncPolymarket && (
+          <Button 
+            onClick={onSyncPolymarket}
+            disabled={syncing || scanning || watchPolling}
+            variant="outline"
+            className="w-full gap-2 bg-purple-500/10 border-purple-500/30 text-purple-400 hover:bg-purple-500/20"
+            size="sm"
+          >
+            <RefreshCw className={`h-4 w-4 ${syncing ? 'animate-spin' : ''}`} />
+            {syncing ? 'Syncing Polymarket...' : 'Sync Polymarket'}
+          </Button>
+        )}
+
         {/* Two-tier polling buttons */}
         {(onWatchModePoll || onActiveModePoll) && (
           <div className="flex gap-2">
             {onWatchModePoll && (
               <Button 
                 onClick={onWatchModePoll}
-                disabled={watchPolling || scanning}
+                disabled={watchPolling || scanning || syncing}
                 variant="outline"
                 className="flex-1 gap-2"
                 size="sm"
@@ -181,7 +201,7 @@ export function ScanControlPanel({
             {onActiveModePoll && (
               <Button 
                 onClick={onActiveModePoll}
-                disabled={watchPolling || scanning || activeCount === 0}
+                disabled={watchPolling || scanning || syncing || activeCount === 0}
                 variant={activeCount > 0 ? 'default' : 'outline'}
                 className="flex-1 gap-2"
                 size="sm"

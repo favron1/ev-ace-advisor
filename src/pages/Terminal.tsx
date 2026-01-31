@@ -15,6 +15,7 @@ import { useAutoPolling } from '@/hooks/useAutoPolling';
 import { useNotifications } from '@/hooks/useNotifications';
 import { useOvernightStats } from '@/hooks/useOvernightStats';
 import { arbitrageApi } from '@/lib/api/arbitrage';
+import { toast } from '@/hooks/use-toast';
 import type { SignalLog } from '@/types/arbitrage';
 import type { EventWatchState } from '@/types/scan-config';
 
@@ -22,6 +23,7 @@ export default function Terminal() {
   const navigate = useNavigate();
   const [user, setUser] = useState<any>(null);
   const [logs, setLogs] = useState<SignalLog[]>([]);
+  const [syncing, setSyncing] = useState(false);
   
   // Filters state
   const [minEdge, setMinEdge] = useState(0);
@@ -158,6 +160,31 @@ export default function Terminal() {
     await fetchSignals();
   };
 
+  // Handle Polymarket sync - updates slugs and kickoff times
+  const handleSyncPolymarket = useCallback(async () => {
+    setSyncing(true);
+    try {
+      const result = await supabase.functions.invoke('polymarket-sync-24h');
+      if (result.error) throw result.error;
+      
+      toast({
+        title: 'Polymarket Synced',
+        description: `${result.data?.qualifying_events || 0} markets updated`,
+      });
+      
+      await fetchSignals(); // Refresh signals to get new slugs
+    } catch (err) {
+      console.error('Polymarket sync failed:', err);
+      toast({ 
+        title: 'Sync failed', 
+        description: 'Could not sync Polymarket markets',
+        variant: 'destructive' 
+      });
+    } finally {
+      setSyncing(false);
+    }
+  }, [fetchSignals]);
+
   const filteredSignals = getFilteredSignals({
     minEdge: minEdge > 0 ? minEdge : undefined,
     minConfidence: minConfidence > 0 ? minConfidence : undefined,
@@ -254,6 +281,9 @@ export default function Terminal() {
               spikeCountdown={spikeCountdown}
               cooldownActive={cooldownActive}
               cooldownCountdown={cooldownCountdown}
+              // Polymarket sync
+              onSyncPolymarket={handleSyncPolymarket}
+              syncing={syncing}
             />
             
             {/* Market Watch Dashboard - Full Visibility */}
