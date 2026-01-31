@@ -1,114 +1,181 @@
 
 
-# Fix: Incorrect Event Date Causing Cross-Game Odds Contamination
+# Implementing Anti-Inversion Safety Rails
 
-## Problem Summary
+## Analysis Summary
 
-The Red Wings vs. Avalanche signal shows 41.8% fair probability for Detroit, but this is data from **today's game (Jan 31)** being applied to a **future Polymarket market (Feb 2)**. This creates phantom signals with invalid edges.
+The external review correctly identified 3 critical inversion vectors in the current code:
 
-## Root Cause Chain
+### Issue #1: `tokens[0]` Not Guaranteed to be YES Token
 
-```text
-Polymarket Market: "Red Wings vs. Avalanche" (slug: nhl-det-col-2026-02-02)
-                            |
-                            v
-Gamma API returns bad/missing startDate/endDate
-                            |
-                            v
-isWithin24HourWindow() falls back to Odds API matching
-                            |
-                            v
-Finds "Avalanche" + "Red Wings" in title, matches TODAY's game
-(Colorado @ Detroit on Jan 31) instead of Feb 2's game
-                            |
-                            v
-Cache stores event_date: 2026-01-31 (WRONG - should be Feb 2)
-                            |
-                            v
-polymarket-monitor uses cached date for validation
-                            |
-                            v
-TODAY's bookmaker odds (Detroit 41.8% at HOME) applied to Feb 2 market
-                            |
-                            v
-Signal created with wrong fair probability
-```
-
-## Solution: Parse Date from Polymarket Slug
-
-The Polymarket slug (`nhl-det-col-2026-02-02`) contains the **authoritative game date**. We should:
-
-1. **Parse the date from the slug** before falling back to Odds API matching
-2. **Use slug date as priority source** when available (most reliable for sports events)
-3. **Skip Odds API cross-reference** if slug date is outside 24h window
-
-### Technical Implementation
-
-**File: `supabase/functions/polymarket-sync-24h/index.ts`**
-
-Add slug date extraction to `isWithin24HourWindow()`:
+**Location**: `polymarket-monitor/index.ts` lines 1341-1343
 
 ```typescript
-// Add before Odds API fallback (line ~384):
-// 3.5. NEW: Parse date from event slug (e.g., "nhl-det-col-2026-02-02")
-const eventSlug = event.slug || '';
-const slugDateMatch = eventSlug.match(/(\d{4}-\d{2}-\d{2})$/);
-if (slugDateMatch) {
-  const slugDate = new Date(slugDateMatch[1] + 'T23:59:59Z');
-  if (!isNaN(slugDate.getTime())) {
-    // If slug date is within 24h window, use it
-    if (slugDate >= now && slugDate <= in24Hours) {
-      return { inWindow: true, dateSource: 'slug', resolvedDate: slugDate };
+// CURRENT (DANGEROUS):
+livePolyPrice = parseFloat(marketData.tokens?.[0]?.price || livePolyPrice);
+```
+
+**Problem**: When the CLOB batch fetch fails and we fallback to a single market fetch, we blindly assume `tokens[0]` is the YES token. Polymarket doesn't guarantee token ordering.
+
+**Evidence from DB**: We correctly store `token_id_yes` in the cache, but the fallback code ignores it.
+
+---
+
+### Issue #2: Title-Based YES/NO Team Assignment
+
+**Location**: `polymarket-monitor/index.ts` lines 806-808
+
+```typescript
+// CURRENT:
+const titleParts = eventName.match(/^(.+?)\s+vs\.?\s+(.+?)(?:\s*-\s*.*)?$/i);
+const polyYesTeam = titleParts?.[1]?.trim() || '';  // Assumed YES
+const polyNoTeam = titleParts?.[2]?.trim() || '';   // Assumed NO
+```
+
+**Problem**: We assume "first team in title = YES token". But Polymarket's YES token might actually correspond to the second team or a different outcome entirely. We should validate this against the actual outcome labels in the CLOB response.
+
+---
+
+### Issue #3: Movement Override Can Force Wrong Side
+
+**Location**: `polymarket-monitor/index.ts` lines 1551-1564
+
+```typescript
+if (movement.direction === 'shortening' && yesEdge > 0.01) {
+  betSide = 'YES';  // Can force wrong side if mapping inverted
+  ...
+}
+```
+
+**Problem**: If our YES/NO mapping is already inverted, `yesEdge > 0.01` could be a false positive based on wrong data.
+
+---
+
+## Proposed Solution: 3 Safety Rails
+
+### Safety Rail #1: Use `tokenIdYes` for Fallback Price Lookup
+
+Replace the dangerous `tokens[0]` fallback with explicit token ID matching:
+
+```typescript
+// SAFE:
+if (event.polymarket_condition_id) {
+  try {
+    const clobUrl = `${CLOB_API_BASE}/markets/${event.polymarket_condition_id}`;
+    const clobResponse = await fetch(clobUrl);
+    
+    if (clobResponse.ok) {
+      const marketData = await clobResponse.json();
+      
+      // Find YES token explicitly using stored token ID
+      if (tokenIdYes) {
+        const yesToken = marketData.tokens?.find((t: any) => t.token_id === tokenIdYes);
+        if (yesToken?.price) {
+          livePolyPrice = parseFloat(yesToken.price);
+        }
+      } else {
+        // No token ID = untradeable, skip
+        console.log(`[POLY-MONITOR] No tokenIdYes for ${event.event_name} - SKIPPING`);
+        continue;
+      }
     }
-    // If slug date is OUTSIDE 24h window, reject early
-    // This prevents matching to wrong game via Odds API
-    return { inWindow: false, dateSource: 'slug-outside', resolvedDate: null };
+  } catch {
+    // Use cached price
   }
 }
 ```
 
-### Why This Fixes the Bug
+---
 
-| Before | After |
-|--------|-------|
-| Slug date ignored | Slug date checked first |
-| Falls back to Odds API matching | Slug date outside 24h = reject immediately |
-| Matches wrong game with same teams | No cross-contamination possible |
-| Creates phantom signals | Only creates signals for games in 24h window |
+### Safety Rail #2: Dual-Mapping EV Gate
 
-### Additional Safety: Strengthen polymarket-monitor Date Check
-
-**File: `supabase/functions/polymarket-monitor/index.ts`**
-
-Add secondary validation using the slug date:
+This is the "cannot possibly fire wrong side" upgrade. Before creating any signal, compute EV under both possible mappings and reject if the swapped mapping looks better:
 
 ```typescript
-// Before matching, verify slug date matches bookmaker date (if slug available)
-const cache = cacheMap.get(event.polymarket_condition_id);
-const slugDate = cache?.polymarket_slug?.match(/(\d{4}-\d{2}-\d{2})$/)?.[1];
+// After calculating edges with current mapping:
+const yesEdge_A = yesFairProb - livePolyPrice;
+const noEdge_A  = noFairProb  - (1 - livePolyPrice);
 
-if (slugDate) {
-  const slugDateObj = new Date(slugDate);
-  const bookmakerDate = new Date(game.commence_time);
-  const daysDiff = Math.abs(slugDateObj.getTime() - bookmakerDate.getTime()) / (1000 * 60 * 60 * 24);
-  
-  if (daysDiff > 1) {
-    console.log(`[POLY-MONITOR] SLUG DATE MISMATCH: slug=${slugDate}, book=${bookmakerDate.toISOString().split('T')[0]} - SKIPPING`);
-    continue;
-  }
+// Compute with SWAPPED mapping (assume livePolyPrice belongs to NO team)
+const yesEdge_B = yesFairProb - (1 - livePolyPrice);
+const noEdge_B  = noFairProb  - livePolyPrice;
+
+// Best edge under each mapping
+const bestA = Math.max(yesEdge_A, noEdge_A);
+const bestB = Math.max(yesEdge_B, noEdge_B);
+
+// Require current mapping to win clearly
+const MAPPING_MARGIN = 0.02; // 2% edge margin
+if (bestB > bestA + MAPPING_MARGIN) {
+  console.log(`[POLY-MONITOR] MAPPING_INVERSION_DETECTED: bestA=${(bestA*100).toFixed(1)}%, bestB=${(bestB*100).toFixed(1)}% - SKIPPING`);
+  continue;
 }
 ```
 
-### Immediate Actions
+**How This Works**: If we accidentally attached the YES price to the wrong team, the swapped mapping will produce dramatically better EV. We skip the trade instead of firing an inverted signal.
 
-1. **Expire the bad signal**: Update signal `0928b81a...` to status='expired'
-2. **Fix the cache entry**: Update `event_date` for condition `0x9119...` to Feb 2
-3. **Deploy the slug-based date parsing fix**
+---
 
-### Test Cases
+### Safety Rail #3: Tighten Movement Override Threshold
 
-After deployment, verify:
-1. Markets with slug dates outside 24h are NOT synced
-2. Markets with slug dates INSIDE 24h use the correct slug date
-3. No cross-game contamination for teams playing multiple times (like Red Wings vs Avalanche)
+Movement can only override side selection if there's a substantial edge, not just 1%:
+
+```typescript
+// CURRENT:
+if (movement.direction === 'shortening' && yesEdge > 0.01) { ... }
+
+// PROPOSED:
+if (movement.direction === 'shortening' && yesEdge > 0.03) { ... }
+```
+
+Raising to 3% ensures movement only overrides when there's meaningful edge that's less likely to be an artifact of inversion.
+
+---
+
+## Technical Implementation
+
+### File to Modify
+
+**`supabase/functions/polymarket-monitor/index.ts`**
+
+### Changes
+
+| Line | Current | Proposed |
+|------|---------|----------|
+| 1334-1349 | `tokens[0]` fallback | Use `tokenIdYes` to find correct token |
+| ~1520 | After edge calculation | Add dual-mapping EV gate |
+| 1552, 1558 | `> 0.01` threshold | `> 0.03` threshold |
+
+---
+
+## Why These 3 Rails Work Together
+
+| Rail | Protects Against |
+|------|------------------|
+| Token ID lookup | Array ordering issues in CLOB response |
+| Dual-mapping gate | All title→team mapping mistakes |
+| Higher movement threshold | Movement forcing wrong side on marginal edges |
+
+The dual-mapping gate is the **critical** safety rail. Even if rails #1 and #3 fail, the dual-mapping gate mathematically prevents firing inverted signals.
+
+---
+
+## Expected Outcome
+
+After implementing these changes:
+
+1. **Zero inverted signals** from token array ordering
+2. **Automatic rejection** of signals where mapping looks wrong
+3. **Logging visibility** into `MAPPING_INVERSION_DETECTED` events for debugging
+4. **Movement overrides** only on confident 3%+ edges
+
+---
+
+## Testing Plan
+
+1. Deploy changes
+2. Run `polymarket-monitor` and check logs for:
+   - `MAPPING_INVERSION_DETECTED` entries (signals correctly blocked)
+   - Normal `EDGE CALC` entries (signals correctly passed)
+3. Verify no signals appear with suspicious favorite/underdog flips
 
