@@ -911,13 +911,14 @@ Deno.serve(async (req) => {
     }
 
     const now = new Date();
+    const in24Hours = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
     // Load markets marked for monitoring - filter to sports with bookmaker coverage
     // This is the "Scan Once, Monitor Continuously" architecture
     // CRITICAL FIX: Include ALL market types (H2H, Totals, Spreads), not just those with extracted_league
     const supportedSports = Object.keys(SPORT_ENDPOINTS); // ['NHL', 'NBA', 'NCAA', 'NFL']
     
-    // First, load API-sourced markets with volume filter
+    // First, load API-sourced markets with volume filter + 24h window
     const { data: apiMarkets, error: apiLoadError } = await supabase
       .from('polymarket_h2h_cache')
       .select('*')
@@ -926,10 +927,12 @@ Deno.serve(async (req) => {
       .in('extracted_league', supportedSports)
       .or('source.is.null,source.eq.api')
       .gte('volume', 5000) // Volume filter only for API-sourced markets
+      .gte('event_date', now.toISOString()) // Only future events
+      .lte('event_date', in24Hours.toISOString()) // Within 24 hours
       .order('event_date', { ascending: true })
       .limit(150);
 
-    // Second, load Firecrawl-sourced markets WITHOUT volume filter (scraped data has no volume)
+    // Second, load Firecrawl-sourced markets WITHOUT volume filter + 24h window
     const { data: firecrawlMarkets, error: fcLoadError } = await supabase
       .from('polymarket_h2h_cache')
       .select('*')
@@ -937,6 +940,8 @@ Deno.serve(async (req) => {
       .eq('status', 'active')
       .eq('source', 'firecrawl')
       .in('extracted_league', supportedSports)
+      .gte('event_date', now.toISOString()) // Only future events
+      .lte('event_date', in24Hours.toISOString()) // Within 24 hours
       .order('event_date', { ascending: true })
       .limit(100);
 
