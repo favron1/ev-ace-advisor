@@ -3,7 +3,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import type { EnrichedSignal } from '@/types/arbitrage';
-import { Activity, RefreshCw } from 'lucide-react';
+import { Activity, RefreshCw, Filter } from 'lucide-react';
 
 interface SignalFeedProps {
   signals: EnrichedSignal[];
@@ -12,9 +12,11 @@ interface SignalFeedProps {
   onDismiss: (id: string) => void;
   onExecute: (id: string, price: number) => void;
   onRefresh?: () => void;
+  totalSignals?: number;
+  onClearFilters?: () => void;
 }
 
-export function SignalFeed({ signals, loading, refreshing, onDismiss, onExecute, onRefresh }: SignalFeedProps) {
+export function SignalFeed({ signals, loading, refreshing, onDismiss, onExecute, onRefresh, totalSignals, onClearFilters }: SignalFeedProps) {
   // Sort by soonest to start first (expires_at = event start time)
   const sortedSignals = [...signals].sort((a, b) => {
     const aTime = a.expires_at ? new Date(a.expires_at).getTime() : Infinity;
@@ -36,6 +38,27 @@ export function SignalFeed({ signals, loading, refreshing, onDismiss, onExecute,
     }
 
     if (signals.length === 0) {
+      // Check if signals are being hidden by filters
+      const hiddenByFilters = totalSignals !== undefined && totalSignals > 0;
+      
+      if (hiddenByFilters) {
+        return (
+          <div className="flex flex-col items-center justify-center py-16 text-center">
+            <Filter className="h-12 w-12 text-muted-foreground/30 mb-4" />
+            <h3 className="font-medium text-lg mb-2">No signals match your filters</h3>
+            <p className="text-muted-foreground text-sm max-w-md mb-4">
+              {totalSignals} signal{totalSignals !== 1 ? 's' : ''} available but hidden by current filters. 
+              Try turning off "Movement-Confirmed Only" or lowering thresholds.
+            </p>
+            {onClearFilters && (
+              <Button variant="outline" size="sm" onClick={onClearFilters}>
+                Show all signals
+              </Button>
+            )}
+          </div>
+        );
+      }
+      
       return (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <Activity className="h-12 w-12 text-muted-foreground/30 mb-4" />
