@@ -1,153 +1,164 @@
 
 
-# Implementation Plan: Funnel Logging + Matching Improvements
+# Implementation Plan: Fix CLOB Price Parsing Bug
 
-## Problem Diagnosis
+## Problem Summary
 
-Based on log analysis, the matching pipeline has several bottlenecks:
+The system displays incorrect Polymarket prices (e.g., 71¢ instead of the actual 50¢) because of a data parsing mismatch between the CLOB API response format and how it's consumed.
 
-```text
-Funnel Analysis (from logs):
-+----------------------------------+-------+
-| watching_total                   | 272   |
-| skipped_no_tokens (Firecrawl)    | 114   |
-| tradeable (with token_id)        | 158   |
-+----------------------------------+-------+
-| After TIME checks                       |
-| - OUTSIDE_24H_WINDOW             | ~20+  |
-| - DATE_DAY_MISMATCH              | ~10+  |
-+----------------------------------+-------+
-| matched_book_events              | 8     |
-| edges_over_threshold             | ~1    |
-| signals_created                  | 0     |
-+----------------------------------+-------+
+**Root Cause**: The CLOB `/prices` API returns price data in an object format:
+```json
+{ "token_id": { "BUY": "0.50" } }
 ```
 
-**Root Causes Identified:**
+But two edge functions incorrectly expect a simple string:
+```typescript
+parseFloat(clobPrices[tokenId])  // Returns NaN when tokenId value is an object!
+```
 
-1. **Day calculation bug**: `daysDiffUTC(Jan 31, Feb 2) = 2` exceeds threshold of 1 - need to relax to 2 days for placeholder times
-2. **OUTSIDE_24H_WINDOW too strict**: Games 25h away are being skipped (should allow 36h for discovery)
-3. **Missing funnel logging**: No visibility into where tradeable markets fail matching
-4. **MIN_EDGE at 5%**: Legitimate 1-3% edges being filtered out
+## Identified Bugs
+
+### Bug 1: `refresh-signals/index.ts` - Lines 417-427
+
+**Current (Broken):**
+```typescript
+if (tokenId && clobPrices[tokenId]) {
+  livePrice = parseFloat(clobPrices[tokenId]);  // NaN - it's an object!
+}
+```
+
+**Expected API Response:**
+```json
+{ "22027783...": { "BUY": "0.50" } }
+```
+
+### Bug 2: `polymarket-monitor/index.ts` - Lines 1338-1339
+
+When refreshing existing signals, always stores YES price regardless of signal side:
+```typescript
+polymarket_yes_price: freshPrice,
+polymarket_price: freshPrice,  // BUG: Should be (1 - freshPrice) for NO-side signals
+```
 
 ## Technical Changes
 
-### File: `supabase/functions/polymarket-monitor/index.ts`
+### File 1: `supabase/functions/refresh-signals/index.ts`
 
-### Change 1: Relax DATE_DAY_MISMATCH Threshold (line ~863)
-
-Current threshold of 1 day is too strict. Increase to 2 days for placeholder times:
-
-**Before:**
-```typescript
-const dd = daysDiffUTC(polymarketEventDate, bookmakerDate);
-if (dd > 1) {
-```
-
-**After:**
-```typescript
-const dd = daysDiffUTC(polymarketEventDate, bookmakerDate);
-if (dd > 2) {  // Allow same day, next day, or day after for placeholder times
-```
-
-### Change 2: Extend OUTSIDE_24H_WINDOW to 36 Hours (line ~878)
-
-Allow games up to 36h away to be discovered (still checks edge thresholds later):
-
-**Before:**
-```typescript
-if (hoursUntilStart < -0.5 || hoursUntilStart > 24) {
-```
-
-**After:**
-```typescript
-if (hoursUntilStart < -0.5 || hoursUntilStart > 36) {
-```
-
-### Change 3: Add Comprehensive Funnel Logging (after line ~1395)
-
-Add counters to track exactly where matches fail:
+#### Change 1: Update Interface (line 50-52)
 
 ```typescript
-// ============= FUNNEL LOGGING =============
-// Track exactly where matches fail for debugging
-let funnelStats = {
-  watching_total: eventsToProcess.length,
-  skipped_no_tokens: 0,
-  skipped_no_bookmaker_data: 0,
-  skipped_expired: 0,
-  skipped_date_mismatch: 0,
-  skipped_time_window: 0,
-  tier1_direct: 0,
-  tier2_nickname: 0,
-  tier3_fuzzy: 0,
-  tier4_ai: 0,
-  matched_total: 0,
-  edges_calculated: 0,
-  edges_over_threshold: 0,
-  signals_created: 0,
-};
+// BEFORE
+interface ClobPriceResponse {
+  [tokenId: string]: string;
+}
 
-// ... inside the processing loop, increment counters at each stage:
-// - When NO_TOKEN_ID_SKIP: funnelStats.skipped_no_tokens++
-// - When bookmakerGames.length === 0: funnelStats.skipped_no_bookmaker_data++
-// - When DATE_DAY_MISMATCH: funnelStats.skipped_date_mismatch++
-// - When OUTSIDE_24H_WINDOW: funnelStats.skipped_time_window++
-// - When match succeeds: funnelStats.tier{N}_{method}++ and funnelStats.matched_total++
-
-// At end of run:
-console.log(`[POLY-MONITOR] FUNNEL_STATS:`, JSON.stringify(funnelStats));
+// AFTER
+interface ClobPriceResponse {
+  [tokenId: string]: { BUY?: string; SELL?: string } | string;
+}
 ```
 
-### Change 4: Lower MIN_EDGE from 5% to 3% (around line ~1730)
-
-Create signals for smaller but still profitable edges:
-
-**Before:**
-```typescript
-const MIN_EDGE = 0.05;  // 5%
-```
-
-**After:**
-```typescript
-const MIN_EDGE = 0.03;  // 3% for signal creation (still validates edge quality)
-```
-
-### Change 5: Add Match Failure Logging in findBookmakerMatch()
-
-After the team matching loop (around line ~1058), add logging when no match is found:
+#### Change 2: Fix Price Extraction (lines 417-430)
 
 ```typescript
-// At end of findBookmakerMatch, before returning null:
-console.log(`[POLY-MONITOR] MATCH_FAILED: "${eventName}" | tried ${bookmakerGames.length} games | dateSkips=X, timeSkips=X, teamMismatch=X`);
-return null;
+// BEFORE
+if (tokenId && clobPrices[tokenId]) {
+  livePrice = parseFloat(clobPrices[tokenId]);
+}
+
+// AFTER
+if (tokenId && clobPrices[tokenId]) {
+  const priceData = clobPrices[tokenId];
+  if (typeof priceData === 'object' && priceData !== null) {
+    // CLOB returns { BUY: "0.50", SELL: "0.48" }
+    livePrice = parseFloat(priceData.BUY || priceData.SELL || '0');
+  } else if (typeof priceData === 'string') {
+    livePrice = parseFloat(priceData);
+  }
+}
+
+// Same fix for opposite price:
+if (oppositeTokenId && clobPrices[oppositeTokenId]) {
+  const priceData = clobPrices[oppositeTokenId];
+  if (typeof priceData === 'object' && priceData !== null) {
+    oppositePrice = parseFloat(priceData.BUY || priceData.SELL || '0');
+  } else if (typeof priceData === 'string') {
+    oppositePrice = parseFloat(priceData);
+  }
+}
 ```
+
+### File 2: `supabase/functions/polymarket-monitor/index.ts`
+
+#### Change 1: Fix Signal Update Price Logic (lines 1335-1343)
+
+When refreshing prices for existing active signals, respect the signal's `side`:
+
+```typescript
+// BEFORE
+await supabase
+  .from('signal_opportunities')
+  .update({
+    polymarket_yes_price: freshPrice,
+    polymarket_price: freshPrice,  // BUG: Always YES price
+    polymarket_volume: cache.volume || 0,
+    polymarket_updated_at: now.toISOString(),
+  })
+  .eq('id', signal.id);
+
+// AFTER
+// Fetch signal's side to determine correct price
+const { data: signalData } = await supabase
+  .from('signal_opportunities')
+  .select('side')
+  .eq('id', signal.id)
+  .single();
+
+const signalSide = signalData?.side || 'YES';
+const signalPrice = signalSide === 'YES' ? freshPrice : (1 - freshPrice);
+
+await supabase
+  .from('signal_opportunities')
+  .update({
+    polymarket_yes_price: freshPrice,
+    polymarket_price: signalPrice,  // FIX: Side-adjusted price
+    polymarket_volume: cache.volume || 0,
+    polymarket_updated_at: now.toISOString(),
+  })
+  .eq('id', signal.id);
+```
+
+**Optimization**: Instead of fetching each signal's side in the loop, modify the query at line 1311 to include `side`:
+
+```typescript
+const { data: activeSignals } = await supabase
+  .from('signal_opportunities')
+  .select('id, polymarket_condition_id, side')  // Add side
+  .eq('status', 'active');
+```
+
+Then use `signal.side` directly.
 
 ## Summary of Changes
 
-| Location | Change | Purpose |
-|----------|--------|---------|
-| Line ~863 | `dd > 2` instead of `dd > 1` | Allow 2-day window for placeholder times |
-| Line ~878 | `hoursUntilStart > 36` instead of `> 24` | Discover games up to 36h away |
-| After line ~1395 | Add funnelStats counters | Track where matches fail |
-| Line ~1730 | `MIN_EDGE = 0.03` | Surface smaller but valid edges |
-| Line ~1058 | Add MATCH_FAILED logging | Debug why matches fail |
+| File | Location | Change |
+|------|----------|--------|
+| `refresh-signals/index.ts` | Lines 50-52 | Update interface to handle object response |
+| `refresh-signals/index.ts` | Lines 417-430 | Parse CLOB response as object, extract `BUY` price |
+| `polymarket-monitor/index.ts` | Line 1313 | Include `side` in active signals query |
+| `polymarket-monitor/index.ts` | Lines 1335-1343 | Use signal's side to set correct `polymarket_price` |
 
-## Expected Improvement
+## Expected Result
 
-| Metric | Before | After (expected) |
-|--------|--------|------------------|
-| DATE_DAY_MISMATCH skips | ~10+ | ~2-3 |
-| OUTSIDE_24H_WINDOW skips | ~20+ | ~5-10 |
-| Matched events | 8 | 30-50 |
-| Edges surfaced | 1 | 5-15 |
-| Signals created | 0 | 1-5 (with 3% threshold) |
+After fix:
+- `polymarket_yes_price`: Always stores the YES token price (e.g., 50¢)
+- `polymarket_price`: Stores the side-adjusted price (YES=50¢, NO=50¢)
+- UI displays correct cents: "29¢ share" for NO-side bets on 71¢ YES markets → "50¢ share" for accurate pricing
 
 ## Testing
 
-1. Deploy the updated function
-2. Trigger a polymarket-monitor scan
-3. Check logs for `FUNNEL_STATS` summary
-4. Verify matched events increased
-5. Check if signals are being created with 3% edges
+1. Deploy updated functions
+2. Run `refresh-signals` and verify logs show correct prices (not NaN)
+3. Check signal database for accurate price values
+4. Verify UI displays correct cent prices
 
