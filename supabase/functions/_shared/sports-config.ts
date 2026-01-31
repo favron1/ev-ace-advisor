@@ -47,7 +47,8 @@ export const SPORTS_CONFIG: Record<string, SportConfig> = {
     },
     detectionPatterns: [
       /\bnhl\b/i,
-      /blackhawks|maple leafs|canadiens|habs|bruins|rangers|islanders|devils|flyers|penguins|capitals|caps|hurricanes|canes|panthers|lightning|bolts|red wings|senators|sens|sabres|blue jackets|blues|wild|avalanche|avs|stars|predators|preds|jets|flames|oilers|canucks|kraken|golden knights|knights|coyotes|sharks|ducks|kings/i,
+      // Use multi-word patterns to prevent false positives (e.g., "Rangers" matching QPR)
+      /blackhawks|maple leafs|canadiens|habs|bruins|new york rangers|ny rangers|nyr|islanders|devils|flyers|penguins|capitals|caps|hurricanes|canes|florida panthers|lightning|bolts|red wings|senators|sens|sabres|blue jackets|blues|wild|avalanche|avs|dallas stars|predators|preds|winnipeg jets|flames|oilers|canucks|kraken|golden knights|vegas knights|coyotes|sharks|ducks|la kings|los angeles kings/i,
     ],
   },
 
