@@ -230,14 +230,10 @@ export function useSignals() {
     trueEdgesOnly?: boolean;
     bettableOnly?: boolean;
     movementConfirmedOnly?: boolean;
-    buyYesOnly?: boolean; // NEW: Filter for BUY YES only signals
   }) => {
     return enrichedSignals.filter(s => {
       // Filter by true edges only (matched to Polymarket)
       if (filters.trueEdgesOnly && s.is_true_arbitrage !== true) return false;
-      
-      // NEW: Filter by BUY YES only (shortening movement)
-      if (filters.buyYesOnly && s.side !== 'YES') return false;
       
       // Filter by movement-confirmed only (elite or strong tier)
       if (filters.movementConfirmedOnly) {
