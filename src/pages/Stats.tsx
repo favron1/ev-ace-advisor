@@ -9,6 +9,7 @@ import { useSignalStats, SignalLogEntry } from '@/hooks/useSignalStats';
 import { StatsCharts } from '@/components/stats/StatsCharts';
 import { EditBetDialog } from '@/components/stats/EditBetDialog';
 import { AdvisorPanel } from '@/components/advisor/AdvisorPanel';
+import { PredictiveReportDownload } from '@/components/stats/PredictiveReportDownload';
 import { format } from 'date-fns';
 
 export default function Stats() {
@@ -244,6 +245,9 @@ export default function Stats() {
 
         {/* AI Advisor Panel */}
         <AdvisorPanel />
+
+        {/* Predictive Report Download */}
+        <PredictiveReportDownload overallStats={overallStats} />
 
         {/* Tabs */}
         <Tabs defaultValue="logs" className="space-y-3 md:space-y-4">
