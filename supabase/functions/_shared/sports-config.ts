@@ -103,6 +103,112 @@ export const SPORTS_CONFIG: Record<string, SportConfig> = {
     ],
   },
 
+  // EPL - English Premier League
+  epl: {
+    name: 'EPL',
+    polymarketUrl: 'https://polymarket.com/sports/soccer/epl/games',
+    oddsApiSport: 'soccer_epl',
+    oddsApiMarkets: 'h2h',
+    oddsApiOutright: 'soccer_epl_winner',
+    teamMap: {
+      'ars': 'Arsenal', 'avl': 'Aston Villa', 'bou': 'Bournemouth', 'bre': 'Brentford',
+      'bha': 'Brighton', 'che': 'Chelsea', 'cry': 'Crystal Palace', 'eve': 'Everton',
+      'ful': 'Fulham', 'ips': 'Ipswich', 'lei': 'Leicester', 'liv': 'Liverpool',
+      'mci': 'Man City', 'mun': 'Man United', 'new': 'Newcastle', 'nfo': 'Nottm Forest',
+      'sou': 'Southampton', 'tot': 'Tottenham', 'whu': 'West Ham', 'wol': 'Wolves',
+    },
+    detectionPatterns: [
+      /\bepl\b/i,
+      /\bpremier league\b/i,
+      /arsenal|aston villa|bournemouth|brentford|brighton|chelsea|crystal palace|everton|fulham|ipswich|leicester|liverpool|man city|manchester city|man united|manchester united|newcastle|nottingham forest|southampton|tottenham|spurs|west ham|wolves/i,
+    ],
+  },
+
+  // La Liga
+  laliga: {
+    name: 'La Liga',
+    polymarketUrl: 'https://polymarket.com/sports/soccer/laliga/games',
+    oddsApiSport: 'soccer_spain_la_liga',
+    oddsApiMarkets: 'h2h',
+    oddsApiOutright: 'soccer_spain_la_liga_winner',
+    teamMap: {
+      'rma': 'Real Madrid', 'bar': 'Barcelona', 'atm': 'Atletico Madrid',
+      'sev': 'Sevilla', 'vil': 'Villarreal', 'bet': 'Real Betis', 'soc': 'Real Sociedad',
+      'ath': 'Athletic Bilbao', 'val': 'Valencia', 'get': 'Getafe', 'osa': 'Osasuna',
+      'cel': 'Celta Vigo', 'ray': 'Rayo Vallecano', 'mal': 'Mallorca', 'ala': 'Alaves',
+      'las': 'Las Palmas', 'gir': 'Girona', 'esp': 'Espanyol', 'leg': 'Leganes', 'vld': 'Valladolid',
+    },
+    detectionPatterns: [
+      /\bla liga\b/i,
+      /\blaliga\b/i,
+      /real madrid|barcelona|barca|atletico madrid|sevilla|villarreal|real betis|real sociedad|athletic bilbao|valencia|getafe|osasuna|celta vigo|rayo vallecano|mallorca|alaves|las palmas|girona|espanyol|leganes|valladolid/i,
+    ],
+  },
+
+  // Serie A
+  seriea: {
+    name: 'Serie A',
+    polymarketUrl: 'https://polymarket.com/sports/soccer/serie-a/games',
+    oddsApiSport: 'soccer_italy_serie_a',
+    oddsApiMarkets: 'h2h',
+    oddsApiOutright: 'soccer_italy_serie_a_winner',
+    teamMap: {
+      'juv': 'Juventus', 'int': 'Inter Milan', 'mil': 'AC Milan', 'nap': 'Napoli',
+      'rom': 'Roma', 'laz': 'Lazio', 'fio': 'Fiorentina', 'ata': 'Atalanta',
+      'bol': 'Bologna', 'tor': 'Torino', 'udi': 'Udinese', 'sas': 'Sassuolo',
+      'emp': 'Empoli', 'ver': 'Verona', 'lec': 'Lecce', 'mon': 'Monza',
+      'gen': 'Genoa', 'cal': 'Cagliari', 'com': 'Como', 'par': 'Parma', 'ven': 'Venezia',
+    },
+    detectionPatterns: [
+      /\bserie a\b/i,
+      /\bseriea\b/i,
+      /juventus|juve|inter milan|ac milan|napoli|roma|lazio|fiorentina|atalanta|bologna|torino|udinese|sassuolo|empoli|verona|lecce|monza|genoa|cagliari|como|parma|venezia/i,
+    ],
+  },
+
+  // Bundesliga
+  bundesliga: {
+    name: 'Bundesliga',
+    polymarketUrl: 'https://polymarket.com/sports/soccer/bundesliga/games',
+    oddsApiSport: 'soccer_germany_bundesliga',
+    oddsApiMarkets: 'h2h',
+    oddsApiOutright: 'soccer_germany_bundesliga_winner',
+    teamMap: {
+      'bay': 'Bayern Munich', 'bvb': 'Dortmund', 'rbl': 'RB Leipzig', 'lev': 'Leverkusen',
+      'fra': 'Frankfurt', 'wob': 'Wolfsburg', 'bmg': 'Gladbach', 'fre': 'Freiburg',
+      'hof': 'Hoffenheim', 'mai': 'Mainz', 'aug': 'Augsburg', 'uni': 'Union Berlin',
+      'koe': 'Koln', 'wer': 'Werder Bremen', 'boc': 'Bochum', 'hei': 'Heidenheim',
+      'stg': 'Stuttgart', 'hol': 'Holstein Kiel', 'stm': 'St. Pauli',
+    },
+    detectionPatterns: [
+      /\bbundesliga\b/i,
+      /bayern munich|bayern|dortmund|rb leipzig|leverkusen|bayer leverkusen|frankfurt|eintracht|wolfsburg|gladbach|monchengladbach|freiburg|hoffenheim|mainz|augsburg|union berlin|koln|cologne|werder bremen|bremen|bochum|heidenheim|stuttgart|holstein kiel|st pauli/i,
+    ],
+  },
+
+  // UCL - UEFA Champions League
+  ucl: {
+    name: 'UCL',
+    polymarketUrl: 'https://polymarket.com/sports/soccer/ucl/games',
+    oddsApiSport: 'soccer_uefa_champs_league',
+    oddsApiMarkets: 'h2h',
+    oddsApiOutright: 'soccer_uefa_champs_league_winner',
+    teamMap: {
+      'rma': 'Real Madrid', 'bar': 'Barcelona', 'bay': 'Bayern Munich', 'mci': 'Man City',
+      'liv': 'Liverpool', 'che': 'Chelsea', 'psg': 'PSG', 'juv': 'Juventus',
+      'int': 'Inter Milan', 'mil': 'AC Milan', 'bvb': 'Dortmund', 'ars': 'Arsenal',
+      'atm': 'Atletico Madrid', 'ben': 'Benfica', 'por': 'Porto', 'aja': 'Ajax',
+      'cel': 'Celtic', 'spo': 'Sporting CP', 'nap': 'Napoli', 'lev': 'Leverkusen',
+      'ata': 'Atalanta', 'fey': 'Feyenoord', 'psv': 'PSV', 'gal': 'Galatasaray',
+      'fen': 'Fenerbahce', 'bru': 'Club Brugge', 'sal': 'RB Salzburg', 'sha': 'Shakhtar',
+    },
+    detectionPatterns: [
+      /\bucl\b/i,
+      /\bchampions league\b/i,
+      /\buefa champions\b/i,
+    ],
+  },
+
   // NCAA CBB - EXPANDED with Firecrawl abbreviations
   cbb: {
     name: 'NCAA',
