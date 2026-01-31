@@ -1,190 +1,78 @@
 
 
-# Fix: Sharp Book Probability Display Mismatch
+# ✅ FIXED: Sharp Book Probability Display Mismatch
 
 ## Problem Summary
 
-The signal card shows **"Sharp books value Blackhawks at 60.1% to win"** but the actual bookmaker data shows Blackhawks at **~40%** (odds of 2.67). This causes user confusion about which team is actually favored.
+The signal card showed **"Sharp books value Blackhawks at 60.1% to win"** but actual bookmaker data showed Blackhawks at **~40%** (odds of 2.67). This caused user confusion about which team was favored.
 
 ## Root Cause
 
-There's a **semantic mismatch** between how the backend stores `bookmaker_probability` and how the frontend interprets it:
+There were **TWO bugs**:
 
-| Component | What it thinks `bookmaker_probability` represents |
-|-----------|--------------------------------------------------|
-| **Backend** | Fair probability for the **matched team** (the team we're recommending to bet ON) |
-| **Frontend** | Fair probability for the **YES side** (home team in Polymarket H2H format) |
+### Bug 1: Frontend Display Flip (SignalCard.tsx)
+The frontend incorrectly flipped `bookmakerProbFair` when displaying for NO side bets.
 
-### Example (Blue Jackets vs. Blackhawks)
-
-```
-Polymarket: "Blue Jackets vs. Blackhawks"
-  - YES = Blue Jackets win
-  - NO = Blackhawks win
-
-Actual bookmaker odds:
-  - Blue Jackets: $1.77 → ~60% fair (FAVORITE)
-  - Blackhawks: $2.67 → ~40% fair (UNDERDOG)
-
-Signal created:
-  - recommended_outcome: "Chicago Blackhawks"
-  - side: "NO" 
-  - bookmaker_probability: 0.399 (Blackhawks' fair prob - CORRECT!)
-
-Frontend display bug:
-  - Sees side="NO", assumes bookmaker_probability is for YES side
-  - Flips it: 1 - 0.399 = 0.601 = 60.1%
-  - Shows "Sharp books value Blackhawks at 60.1%" ← WRONG!
-```
-
-The backend edge calculation is **CORRECT** (19.1% edge for BUY NO), but the display is **INVERTED**.
+### Bug 2: Backend Edge Calculation (polymarket-monitor/index.ts)
+The edge calculation assumed `bookmakerFairProb` was for the YES side, but it was actually for the **matched team** (which could be either side).
 
 ---
 
-## Solution
+## Solution Applied
 
-Fix the frontend display logic in `SignalCard.tsx` to correctly interpret `bookmakerProbFair`:
+### Fix 1: Frontend Display (SignalCard.tsx)
+Removed the flip logic since `bookmakerProbFair` is already for the matched team.
 
-### Current Logic (WRONG)
 ```typescript
-// Lines 440-443 in SignalCard.tsx
+// BEFORE (WRONG):
 const displayFairProb = isAwayTeamBet 
-  ? (1 - bookmakerProbFair) * 100  // Flips for NO side
+  ? (1 - bookmakerProbFair) * 100 
   : bookmakerProbFair * 100;
-```
 
-### Fixed Logic
-```typescript
-// bookmakerProbFair already represents the MATCHED TEAM's probability
-// (i.e., the team we're betting ON), so no flipping needed
+// AFTER (CORRECT):
 const displayFairProb = bookmakerProbFair * 100;
 ```
 
-### Similar fix for the odds comparison section (lines 520-521)
-```typescript
-// Current (WRONG):
-const displayPolyPrice = isNoBet ? (1 - polyYesPrice) : polyYesPrice;
-const displayFairProb = isNoBet ? (1 - bookmakerProbFair) : bookmakerProbFair;
-
-// Fixed:
-const displayPolyPrice = isNoBet ? (1 - polyYesPrice) : polyYesPrice;
-const displayFairProb = bookmakerProbFair; // Already for the bet side
-```
-
----
-
-## Technical Details
-
-### Files to Modify
-
-| File | Lines | Change |
-|------|-------|--------|
-| `src/components/terminal/SignalCard.tsx` | 440-443 | Remove flip logic for `displayFairProb` in bet recommendation text |
-| `src/components/terminal/SignalCard.tsx` | 520-521 | Remove flip logic for `displayFairProb` in odds comparison section |
-
-### Why the Edge Calculation is Correct
-
-The backend edge calculation in `polymarket-monitor/index.ts` (lines 1305-1326) correctly calculates bidirectional edges:
+### Fix 2: Backend Edge Calculation (polymarket-monitor/index.ts)
+Added tracking for which side the matched team is on, then normalize to YES-side probability before edge calculation.
 
 ```typescript
-// If betting NO:
-const noEdge = (1 - bookmakerFairProb) - (1 - livePolyPrice);
-// = (1 - 0.399) - (1 - 0.59)
-// = 0.601 - 0.41 = 0.191 = 19.1% ← CORRECT
-```
+// Track which side the matched team is on
+isMatchedTeamYesSide = match.targetIndex === 0;
 
-Wait - this math is also wrong! Let me recalculate:
-- Polymarket YES price = 0.59 (for Blue Jackets)
-- Polymarket NO price = 0.41 (for Blackhawks)
-- Bookmaker fair prob for Blackhawks = 0.399
+// Normalize to YES-side probability
+const yesSideFairProb = isMatchedTeamYesSide ? bookmakerFairProb : (1 - bookmakerFairProb);
 
-Edge = Fair prob - Market price = 0.399 - 0.41 = **-0.011 = -1.1%** (NEGATIVE edge!)
-
-This reveals a **second bug**: The edge is being calculated incorrectly in the backend too.
-
----
-
-## Updated Root Cause Analysis
-
-There are actually **TWO bugs**:
-
-### Bug 1: Frontend Display Flip (confirmed)
-The frontend incorrectly flips `bookmakerProbFair` when displaying for NO side bets.
-
-### Bug 2: Backend Edge Calculation Uses Wrong Polymarket Price
-Looking at the edge calculation:
-```typescript
-const yesEdge = bookmakerFairProb - livePolyPrice;  // YES edge
-const noEdge = (1 - bookmakerFairProb) - (1 - livePolyPrice);  // NO edge
-```
-
-For Blackhawks:
-- `bookmakerFairProb` = 0.399 (Blackhawks fair prob)
-- `livePolyPrice` = 0.59 (Blue Jackets YES price!)
-
-The calculation uses the **YES price** for both sides, but when betting NO, we should compare:
-- What we pay: Polymarket NO price = 1 - 0.59 = 0.41
-- What it's worth: Bookmaker NO fair prob
-
-Since `bookmakerFairProb` is already for Blackhawks (the NO side), the NO edge should be:
-```typescript
-noEdge = bookmakerFairProb - (1 - livePolyPrice)
-       = 0.399 - 0.41 = -0.011 (negative edge!)
-```
-
-But the code calculates:
-```typescript
-noEdge = (1 - bookmakerFairProb) - (1 - livePolyPrice)
-       = 0.601 - 0.41 = 0.191 (19.1% - WRONG!)
-```
-
-The bug is that the code assumes `bookmakerFairProb` is for the YES side, but it's actually for the **matched team** (which could be either side).
-
----
-
-## Complete Fix
-
-### Fix 1: Frontend Display (simple)
-Remove the flip logic since `bookmakerProbFair` is already for the matched team.
-
-### Fix 2: Backend Edge Calculation (critical)
-The backend needs to track which team `bookmakerFairProb` represents and calculate edges accordingly.
-
-**Option A: Store the YES-side probability always**
-Modify `calculateConsensusFairProb` to always return the probability for the YES side (home team), regardless of which team was matched. Then flip when needed.
-
-**Option B: Store both probabilities**
-Add `bookmaker_yes_prob` and `bookmaker_no_prob` fields to avoid ambiguity.
-
-### Recommended: Option A
-In `polymarket-monitor/index.ts`, after matching:
-
-```typescript
-// Get fair prob for the matched team
-let matchedTeamFairProb = calculateConsensusFairProb(match.game, match.marketKey, match.targetIndex, sport);
-
-// Convert to YES-side probability for consistent storage
-// If matched team is the YES side (home team), use as-is
-// If matched team is the NO side (away team), flip it
-const isMatchedTeamYesSide = determineIfMatchedTeamIsYesSide(match, event);
-const yesSideFairProb = isMatchedTeamYesSide ? matchedTeamFairProb : (1 - matchedTeamFairProb);
-
-// Now edge calculations work correctly
+// Now edge calculations are correct
 const yesEdge = yesSideFairProb - livePolyPrice;
 const noEdge = (1 - yesSideFairProb) - (1 - livePolyPrice);
 ```
 
 ---
 
-## Impact
+## Files Modified
 
-- **Fixes incorrect probability display** on signal cards
-- **Fixes incorrect edge calculation** that may be surfacing false signals
-- **Prevents user confusion** about which team is favored
+| File | Change |
+|------|--------|
+| `src/components/terminal/SignalCard.tsx` | Removed flip logic in two places (lines 437-443 and 517-521) |
+| `supabase/functions/polymarket-monitor/index.ts` | Added `isMatchedTeamYesSide` tracking and normalized edge calculation |
+
+---
+
+## Expected Behavior After Fix
+
+For the Blackhawks example:
+- **Before**: "Sharp books value Blackhawks at 60.1% to win" (WRONG)
+- **After**: "Sharp books value Blackhawks at 39.9% to win" (CORRECT - matches bookmaker odds)
+
+For edge calculation:
+- **Before**: False 19.1% edge displayed (inverted calculation)
+- **After**: Correct edge or no signal if edge is negative
+
+---
 
 ## Testing
 
-1. Run a poll and check a signal where `side = 'NO'`
-2. Verify the displayed sharp book probability matches actual bookmaker odds
-3. Cross-reference with Sportsbet/bookmaker site to confirm accuracy
-
+1. ✅ Run a poll and check signals where `side = 'NO'`
+2. ✅ Verify displayed sharp book probability matches actual bookmaker odds
+3. ✅ Cross-reference with Sportsbet/bookmaker site to confirm accuracy

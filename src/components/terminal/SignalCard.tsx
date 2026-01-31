@@ -436,11 +436,9 @@ export function SignalCard({
               const teamToBetOn = signal.side === 'YES' ? homeTeam : awayTeam;
               const isAwayTeamBet = signal.side === 'NO';
               
-              // For fair probability display: if NO side, we need to flip the fair prob
-              // because bookmakerProbFair is for the YES side (home team)
-              const displayFairProb = isAwayTeamBet 
-                ? (1 - bookmakerProbFair) * 100 
-                : bookmakerProbFair * 100;
+              // bookmakerProbFair is already for the MATCHED TEAM (the team we're betting on)
+              // so no flipping needed - just use it directly
+              const displayFairProb = bookmakerProbFair * 100;
               
               return (
                 <>
@@ -515,10 +513,11 @@ export function SignalCard({
             
             {/* True arbitrage - show execution decision with cost breakdown */}
             {isTrueArbitrage && signal.execution && (() => {
-              // For NO-side bets, we need to show the NO price and flipped fair prob
+              // For NO-side bets, show the NO price (1 - YES price)
+              // bookmakerProbFair is already for the MATCHED TEAM, no flip needed
               const isNoBet = signal.side === 'NO';
               const displayPolyPrice = isNoBet ? (1 - polyYesPrice) : polyYesPrice;
-              const displayFairProb = isNoBet ? (1 - bookmakerProbFair) : bookmakerProbFair;
+              const displayFairProb = bookmakerProbFair; // Already for the bet side
               
               // Parse teams for clearer labels
               const vsMatch = signal.event_name.match(/^(.+?)\s+vs\.?\s+(.+)$/i);

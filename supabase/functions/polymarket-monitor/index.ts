@@ -1233,11 +1233,18 @@ Deno.serve(async (req) => {
 
         let bookmakerFairProb: number | null = null;
         let teamName: string | null = null;
+        let isMatchedTeamYesSide: boolean = true; // Track which side the matched team is on
         
         if (match) {
           // Pass sport to handle NHL 3-way to 2-way conversion
+          // bookmakerFairProb here is for the MATCHED TEAM
           bookmakerFairProb = calculateConsensusFairProb(match.game, match.marketKey, match.targetIndex, sport);
           teamName = match.teamName;
+          
+          // Determine if matched team is the YES side (home) or NO side (away)
+          // In Polymarket H2H, YES = home team = first team in "Team A vs. Team B"
+          // match.targetIndex: 0 = first outcome (typically home), 1 = second outcome (typically away)
+          isMatchedTeamYesSide = match.targetIndex === 0;
           
           // CRITICAL FIX #1: Team participant validation
           // Validate that matched team is actually in the Polymarket event name
@@ -1303,9 +1310,16 @@ Deno.serve(async (req) => {
           const movement = await detectSharpMovement(supabase, eventKey, teamName);
           
           // ========== BIDIRECTIONAL EDGE CALCULATION (CRITICAL FIX #2) ==========
-          // Calculate edge for BOTH sides without requiring movement confirmation
-          const yesEdge = bookmakerFairProb - livePolyPrice;  // Edge if buying YES
-          const noEdge = (1 - bookmakerFairProb) - (1 - livePolyPrice);  // Edge if buying NO = livePolyPrice - bookmakerFairProb
+          // bookmakerFairProb is for the MATCHED TEAM. We need to normalize to YES side for correct edge calculation.
+          // In Polymarket H2H: YES = home team (first in "Team A vs Team B")
+          // If matched team is away (NO side), we need to flip to get YES-side probability
+          const yesSideFairProb = isMatchedTeamYesSide ? bookmakerFairProb : (1 - bookmakerFairProb);
+          
+          // Now calculate edges correctly
+          // yesEdge = what YES is worth (fair prob) - what we pay (Poly YES price)
+          // noEdge = what NO is worth (1 - yesSideFairProb) - what we pay (1 - Poly YES price)
+          const yesEdge = yesSideFairProb - livePolyPrice;  // Edge if buying YES
+          const noEdge = (1 - yesSideFairProb) - (1 - livePolyPrice);  // Edge if buying NO
           
           // Pick the side with the positive edge
           let betSide: 'YES' | 'NO';
@@ -1321,7 +1335,7 @@ Deno.serve(async (req) => {
             rawEdge = noEdge;
           } else {
             // No positive edge on either side - skip
-            console.log(`[POLY-MONITOR] No edge on either side for ${event.event_name}: YES=${(yesEdge * 100).toFixed(1)}%, NO=${(noEdge * 100).toFixed(1)}%`);
+            console.log(`[POLY-MONITOR] No edge on either side for ${event.event_name}: YES=${(yesEdge * 100).toFixed(1)}%, NO=${(noEdge * 100).toFixed(1)}% (matched=${isMatchedTeamYesSide ? 'YES' : 'NO'})`);
             continue;
           }
           
