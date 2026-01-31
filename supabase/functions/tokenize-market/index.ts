@@ -362,7 +362,9 @@ async function extractFromClobSearch(
       return { success: false, tradeable: false, untradeableReason: 'CLOB_SEARCH_FAILED', extractorLog: log };
     }
     
-    const markets = await response.json();
+    const responseData = await response.json();
+    // CLOB API returns { data: [...] } or just [...] 
+    const markets = Array.isArray(responseData) ? responseData : (responseData.data || responseData.markets || []);
     log.push(`Got ${markets.length} markets from CLOB`);
     
     const normalizeTeam = (name: string): string => 
