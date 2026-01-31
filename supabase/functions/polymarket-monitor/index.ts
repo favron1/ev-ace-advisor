@@ -1514,7 +1514,9 @@ Deno.serve(async (req) => {
               signalError = error;
               console.log(`[POLY-MONITOR] Updated ${signalTier} ${betSide} signal for ${event.event_name}`);
             } else {
-              // INSERT new signal
+              // INSERT new signal - include slug from cache for direct Polymarket URLs
+              const polymarketSlug = cache?.polymarket_slug || null;
+              
               const { data, error } = await supabase
                 .from('signal_opportunities')
                 .insert({
@@ -1524,6 +1526,7 @@ Deno.serve(async (req) => {
                   is_true_arbitrage: true,
                   status: 'active',
                   polymarket_condition_id: event.polymarket_condition_id,
+                  polymarket_slug: polymarketSlug, // NEW: Copy slug for direct URLs
                   ...signalData,
                 })
                 .select()

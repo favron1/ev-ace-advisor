@@ -28,93 +28,7 @@ interface SignalCardProps {
   samplesRequired?: number;
 }
 
-// Team name to Polymarket URL code mapping
-const TEAM_CODES: Record<string, string> = {
-  // NHL
-  'Utah Hockey Club': 'utah', 'Utah': 'utah',
-  'Carolina Hurricanes': 'car', 'Hurricanes': 'car',
-  'Edmonton Oilers': 'edm', 'Oilers': 'edm',
-  'San Jose Sharks': 'sj', 'Sharks': 'sj',
-  'Tampa Bay Lightning': 'tb', 'Lightning': 'tb',
-  'Winnipeg Jets': 'wpg', 'Jets': 'wpg',
-  'New York Rangers': 'nyr', 'Rangers': 'nyr',
-  'New York Islanders': 'nyi', 'Islanders': 'nyi',
-  'Los Angeles Kings': 'la', 'Kings': 'la',
-  'Buffalo Sabres': 'buf', 'Sabres': 'buf',
-  'Pittsburgh Penguins': 'pit', 'Penguins': 'pit',
-  'Chicago Blackhawks': 'chi', 'Blackhawks': 'chi',
-  'Boston Bruins': 'bos', 'Bruins': 'bos',
-  'Toronto Maple Leafs': 'tor', 'Maple Leafs': 'tor',
-  'Montreal Canadiens': 'mtl', 'Canadiens': 'mtl',
-  'Detroit Red Wings': 'det', 'Red Wings': 'det',
-  'Florida Panthers': 'fla', 'Panthers': 'fla',
-  'Nashville Predators': 'nsh', 'Predators': 'nsh',
-  'Dallas Stars': 'dal', 'Stars': 'dal',
-  'Colorado Avalanche': 'col', 'Avalanche': 'col',
-  'Vegas Golden Knights': 'vgk', 'Golden Knights': 'vgk',
-  'Seattle Kraken': 'sea', 'Kraken': 'sea',
-  'Vancouver Canucks': 'van', 'Canucks': 'van',
-  'Calgary Flames': 'cgy', 'Flames': 'cgy',
-  'Ottawa Senators': 'ott', 'Senators': 'ott',
-  'Philadelphia Flyers': 'phi', 'Flyers': 'phi',
-  'Washington Capitals': 'wsh', 'Capitals': 'wsh',
-  'New Jersey Devils': 'nj', 'Devils': 'nj',
-  'Columbus Blue Jackets': 'cbj', 'Blue Jackets': 'cbj',
-  'Minnesota Wild': 'min', 'Wild': 'min',
-  'St. Louis Blues': 'stl', 'Blues': 'stl',
-  'Anaheim Ducks': 'ana', 'Ducks': 'ana',
-  // NBA
-  'Atlanta Hawks': 'atl', 'Hawks': 'atl',
-  'Boston Celtics': 'bos', 'Celtics': 'bos',
-  'Brooklyn Nets': 'bkn', 'Nets': 'bkn',
-  'Charlotte Hornets': 'cha', 'Hornets': 'cha',
-  'Chicago Bulls': 'chi', 'Bulls': 'chi',
-  'Cleveland Cavaliers': 'cle', 'Cavaliers': 'cle',
-  'Dallas Mavericks': 'dal', 'Mavericks': 'dal',
-  'Denver Nuggets': 'den', 'Nuggets': 'den',
-  'Detroit Pistons': 'det', 'Pistons': 'det',
-  'Golden State Warriors': 'gsw', 'Warriors': 'gsw',
-  'Houston Rockets': 'hou', 'Rockets': 'hou',
-  'Indiana Pacers': 'ind', 'Pacers': 'ind',
-  'Los Angeles Clippers': 'lac', 'Clippers': 'lac',
-  'Los Angeles Lakers': 'lal', 'Lakers': 'lal',
-  'Memphis Grizzlies': 'mem', 'Grizzlies': 'mem',
-  'Miami Heat': 'mia', 'Heat': 'mia',
-  'Milwaukee Bucks': 'mil', 'Bucks': 'mil',
-  'Minnesota Timberwolves': 'min', 'Timberwolves': 'min',
-  'New Orleans Pelicans': 'nop', 'Pelicans': 'nop',
-  'New York Knicks': 'nyk', 'Knicks': 'nyk',
-  'Oklahoma City Thunder': 'okc', 'Thunder': 'okc',
-  'Orlando Magic': 'orl', 'Magic': 'orl',
-  'Philadelphia 76ers': 'phi', '76ers': 'phi',
-  'Phoenix Suns': 'phx', 'Suns': 'phx',
-  'Portland Trail Blazers': 'por', 'Trail Blazers': 'por',
-  'Sacramento Kings': 'sac',
-  'San Antonio Spurs': 'sas', 'Spurs': 'sas',
-  'Toronto Raptors': 'tor', 'Raptors': 'tor',
-  'Utah Jazz': 'uta', 'Jazz': 'uta',
-  'Washington Wizards': 'was', 'Wizards': 'was',
-};
-
-// Get team code from team name
-function getTeamCode(teamName: string): string | null {
-  return TEAM_CODES[teamName] || null;
-}
-
-// Calculate NHL/NBA week number from date
-function getWeekNumber(date: Date, sport: string): number {
-  // NHL season starts around Oct 10, NBA around Oct 22
-  const seasonStart = sport === 'NHL' 
-    ? new Date(date.getFullYear(), 9, 10) // Oct 10
-    : new Date(date.getFullYear(), 9, 22); // Oct 22
-  
-  if (date < seasonStart) {
-    seasonStart.setFullYear(seasonStart.getFullYear() - 1);
-  }
-  
-  const diffDays = Math.floor((date.getTime() - seasonStart.getTime()) / (1000 * 60 * 60 * 24));
-  return Math.floor(diffDays / 7) + 1;
-}
+// No longer needed - using slug-based URLs from backend
 
 // Format volume for display
 function formatVolume(volume: number | null | undefined): string {
@@ -238,27 +152,21 @@ export function SignalCard({
   const polyYesPrice = (signal as any).polymarket_yes_price || signal.polymarket_price;
   const polyConditionId = (signal as any).polymarket_condition_id;
   
-  // Generate Polymarket direct URL for sports markets
+  // Generate Polymarket direct URL using slug from backend (FIXED)
   const getPolymarketDirectUrl = (): string | null => {
-    const sport = signalFactors?.sport?.toUpperCase();
-    if (!sport || (sport !== 'NHL' && sport !== 'NBA')) return null;
+    // Priority 1: Use slug from backend (most reliable)
+    const slug = (signal as any).polymarket_slug;
+    if (slug) {
+      return `https://polymarket.com/event/${slug}`;
+    }
     
-    // Parse teams from event_name (e.g., "Utah vs. Hurricanes" or "Sharks vs. Oilers")
-    const match = signal.event_name.match(/^(.+?)\s+vs\.\s+(.+)$/i);
-    if (!match) return null;
+    // Priority 2: Use condition_id for direct market access (if it's a hex hash)
+    const conditionId = (signal as any).polymarket_condition_id;
+    if (conditionId && conditionId.startsWith('0x')) {
+      return `https://polymarket.com/markets?conditionId=${conditionId}`;
+    }
     
-    const [, awayTeam, homeTeam] = match;
-    const awayCode = getTeamCode(awayTeam.trim());
-    const homeCode = getTeamCode(homeTeam.trim());
-    
-    if (!awayCode || !homeCode) return null;
-    
-    // Get event date from polymarket_updated_at or use today
-    const eventDate = polyUpdatedAt ? new Date(polyUpdatedAt) : new Date();
-    const dateStr = eventDate.toISOString().split('T')[0]; // YYYY-MM-DD
-    const week = getWeekNumber(eventDate, sport);
-    
-    return `https://polymarket.com/sports/${sport.toLowerCase()}/games/week/${week}/${sport.toLowerCase()}-${awayCode}-${homeCode}-${dateStr}`;
+    return null; // Fall through to search
   };
   
   // Fallback search URL
