@@ -1,130 +1,399 @@
 
+# 3-Step Fix Plan: Polymarket Tokenization Pipeline
 
-# Implementation Plan: Fix Market Type Mismatch Bug
+## Executive Summary
 
-## Problem Identified
+The system has **two critical data failures** that create garbage signals:
 
-The system is generating false signals (like the 33.9% edge for Sharks vs. Flames) because it's **mixing market types**:
+| Problem | Current State | Impact |
+|---------|---------------|--------|
+| **Missing Token IDs** | NBA/CBB from Firecrawl/scrape-nba: 0-5% token coverage | Markets fallback to 0.50 prices, unusable |
+| **Fair Probability Outlier Bug** | 92% threshold blocks valid sharp data | Creates false 32% edges on heavy favorites |
+| **Low Match Rate** | 11% of events match to bookmaker data | 89% of potential opportunities missed |
 
-| What's Happening | Expected |
-|------------------|----------|
-| Loading SPREAD market (Sharks -1.5, 17¢) | Load H2H market (Sharks, 50¢) |
-| Comparing to H2H bookmaker odds (51% fair) | Compare to H2H bookmaker odds |
-| Calculating edge: 51% - 17% = 34% | Calculating edge: 51% - 50% = 1% |
+**Root Cause:** Firecrawl/scrape-nba extract **visible prices** (e.g., "lal76¢") from markdown, but **never extract token IDs**. Without token IDs, the system cannot:
+1. Fetch real-time CLOB executable prices
+2. Validate price accuracy
+3. Determine which contract is YES vs NO
 
-**Result**: False 34% edge shown to user when actual edge is ~1%
+## Database Evidence
 
-## Root Cause
-
-In `polymarket-monitor/index.ts` line 1186:
-```typescript
-// CRITICAL FIX: Include ALL market types (H2H, Totals, Spreads), not just those with extracted_league
+```text
+Source          | Total | Has Tokens | Token %
+----------------|-------|------------|--------
+api (Gamma)     | 1,279 |      1,279 | 100%
+gamma-api       |    81 |         81 | 100%
+firecrawl       |    51 |          0 | 0%      ← BROKEN
+scrape-nba      |    37 |          2 | 5%      ← BROKEN
 ```
 
-This comment is misleading - loading all market types is correct for discovery, but the processing logic MUST filter by market type since we only fetch H2H bookmaker odds.
+---
 
-## Technical Fix
+## Step 1: Build Tokenization Service (UI Repair Path)
 
-### File: `supabase/functions/polymarket-monitor/index.ts`
+**Goal:** Every discovered market ends in one of two states: `TOKENIZED` or `UNTRADEABLE`
 
-#### Change 1: Add H2H filter to market loading queries (lines 1190-1201)
+### 1.1 Create New Edge Function: `tokenize-market`
 
-Add `.eq('market_type', 'h2h')` to both API and Firecrawl market queries:
+A dedicated service to resolve token IDs from any market reference.
 
-```typescript
-// First, load API-sourced H2H markets only
-const { data: apiMarkets, error: apiLoadError } = await supabase
-  .from('polymarket_h2h_cache')
-  .select('*')
-  .in('monitoring_status', ['watching', 'triggered'])
-  .eq('status', 'active')
-  .eq('market_type', 'h2h')  // NEW: Only H2H markets
-  .in('extracted_league', supportedSports)
-  .or('source.is.null,source.eq.api')
-  .gte('volume', 5000)
-  .gte('event_date', now.toISOString())
-  .lte('event_date', in24Hours.toISOString())
-  .order('event_date', { ascending: true })
-  .limit(150);
+```text
+INPUT:
+  - market_url OR slug OR condition_id OR team names
 
-// Second, load Firecrawl-sourced H2H markets only
-const { data: firecrawlMarkets, error: fcLoadError } = await supabase
-  .from('polymarket_h2h_cache')
-  .select('*')
-  .in('monitoring_status', ['watching', 'triggered'])
-  .eq('status', 'active')
-  .eq('market_type', 'h2h')  // NEW: Only H2H markets
-  .eq('source', 'firecrawl')
-  .in('extracted_league', supportedSports)
-  .gte('event_date', now.toISOString())
-  .lte('event_date', in24Hours.toISOString())
-  .order('event_date', { ascending: true })
-  .limit(100);
+OUTPUT:
+  - condition_id
+  - token_id_yes
+  - token_id_no
+  - token_source: 'clob' | 'gamma' | 'ui_network' | 'ui_dom'
+  - confidence: 0-100
+  - OR: { tradeable: false, untradeable_reason: 'MISSING_TOKENS' }
 ```
 
-#### Change 2: Add market type validation in processing loop (around line 1465)
+### 1.2 Extraction Priority Order
 
-Add a safety check before edge calculation:
+The function will try multiple extractors in order:
+
+```text
+Priority 1: CLOB API Direct
+  └─ GET https://clob.polymarket.com/markets/{condition_id}
+  └─ Returns: { tokens: [{ token_id, outcome }] }
+  └─ Confidence: 100%
+
+Priority 2: Gamma API Lookup (by team names)
+  └─ GET https://gamma-api.polymarket.com/events?tag_slug=nba
+  └─ Search for matching event, extract clobTokenIds
+  └─ Confidence: 95%
+
+Priority 3: Firecrawl HTML + __NEXT_DATA__ Extraction
+  └─ Scrape market page with Firecrawl (formats: ['html'])
+  └─ Parse <script id="__NEXT_DATA__">
+  └─ Extract conditionId, clobTokenIds from JSON
+  └─ Confidence: 80%
+
+Priority 4: CLOB Search (batch)
+  └─ GET https://clob.polymarket.com/markets?limit=500
+  └─ Search by team nicknames in question/description
+  └─ Confidence: 75%
+
+FALLBACK: Mark untradeable
+  └─ { tradeable: false, untradeable_reason: 'MISSING_TOKENS' }
+```
+
+### 1.3 Database Schema Addition
+
+Add new fields to `polymarket_h2h_cache`:
+
+```sql
+ALTER TABLE polymarket_h2h_cache 
+ADD COLUMN IF NOT EXISTS tradeable boolean DEFAULT true,
+ADD COLUMN IF NOT EXISTS untradeable_reason text,
+ADD COLUMN IF NOT EXISTS token_source text,
+ADD COLUMN IF NOT EXISTS token_confidence numeric,
+ADD COLUMN IF NOT EXISTS last_token_repair_at timestamptz;
+```
+
+### 1.4 Hard Rule Enforcement
+
+**No tokens = No price = No signal**
+
+At the earliest point in `polymarket-monitor`, before any price calculation:
 
 ```typescript
-const cache = cacheMap.get(event.polymarket_condition_id);
-const sport = cache?.extracted_league || 'Unknown';
-const marketType = cache?.market_type || 'h2h';
+// HARD GATE: Cannot trade without token IDs
+if (!cache?.token_id_yes) {
+  await supabase.from('polymarket_h2h_cache').update({
+    tradeable: false,
+    untradeable_reason: 'MISSING_TOKENS'
+  }).eq('condition_id', conditionId);
+  
+  funnelStats.blocked_no_tokens++;
+  continue; // Skip to next market
+}
+```
+
+---
+
+## Step 2: Kill Garbage Signals + Add Funnel Visibility
+
+**Goal:** Eliminate 0.50/0.999 placeholders and make failures measurable
+
+### 2.1 Remove All Placeholder Price Logic
+
+Currently in multiple files, the system falls back to `0.5` when data is missing:
+
+**scrape-polymarket-prices (line 179):**
+```typescript
+// REMOVE: Placeholder fallback
+yes_price: game.team1Price,  // This is from markdown, not CLOB
+```
+
+**polymarket-monitor (line 1489):**
+```typescript
+// REMOVE: Placeholder fallback
+let livePolyPrice = cache?.yes_price || event.polymarket_yes_price || 0.5;
+```
+
+Replace with strict token-gated logic:
+```typescript
+// STRICT: No token = skip entirely (already handled by gate above)
 const tokenIdYes = cache?.token_id_yes;
+if (!tokenIdYes || !clobPrices.has(tokenIdYes)) {
+  console.log('[FUNNEL] SKIP: No executable price for', event.event_name);
+  funnelStats.no_executable_price++;
+  continue;
+}
+const livePolyPrice = clobPrices.get(tokenIdYes)!.ask;
+```
 
-// NEW: Skip non-H2H markets (should be filtered at query level, but safety check)
-if (marketType !== 'h2h') {
-  console.log(`[POLY-MONITOR] Skipping non-H2H market: ${event.event_name} (type=${marketType})`);
+### 2.2 Implement Funnel Counters
+
+Add comprehensive tracking to `polymarket-monitor`:
+
+```typescript
+interface FunnelStats {
+  // Discovery
+  discovered_markets: number;
+  
+  // Tokenization Gate
+  tokenized: number;
+  blocked_no_tokens: number;
+  
+  // Matching
+  matched_to_bookmaker: number;
+  match_tier1_canonical: number;
+  match_tier2_nickname: number;
+  match_tier3_fuzzy: number;
+  skipped_no_bookmaker: number;
+  
+  // Pricing
+  priced_from_clob: number;
+  rejected_garbage_price: number;
+  
+  // Sanity
+  passed_sanity: number;
+  failed_sanity_outlier: number;
+  
+  // Signal
+  positive_ev: number;
+  signaled: number;
+}
+```
+
+**Summary Log Output:**
+```text
+[POLY-MONITOR] FUNNEL_SUMMARY
+  NBA:  64 discovered → 62 tokenized → 40 matched → 33 priced → 28 sane → 6 +EV → 2 signaled
+  NHL: 142 discovered → 142 tokenized → 130 matched → 125 priced → 118 sane → 8 +EV → 3 signaled
+```
+
+### 2.3 Update Firecrawl Scrapers
+
+Modify `scrape-polymarket-prices` and `scrape-polymarket-nba` to:
+
+1. **Request HTML format** (not just markdown) to access `__NEXT_DATA__`
+2. **Call tokenization service** before upserting
+3. **Mark untradeable** if tokens cannot be resolved
+
+```typescript
+// NEW FLOW in scrape-polymarket-prices
+const firecrawlData = await fetch('...', {
+  body: JSON.stringify({
+    url: sportUrl,
+    formats: ['markdown', 'html'],  // ADD HTML
+    waitFor: 5000,
+  })
+});
+
+const html = firecrawlData.data?.html || '';
+
+// Extract token IDs from __NEXT_DATA__
+const tokenData = extractTokensFromNextData(html);
+
+// Only upsert if we have tokens
+if (tokenData.tokenIdYes) {
+  await supabase.from('polymarket_h2h_cache').upsert({
+    // ... existing fields
+    token_id_yes: tokenData.tokenIdYes,
+    token_id_no: tokenData.tokenIdNo,
+    token_source: 'ui_network',
+    tradeable: true,
+  });
+} else {
+  // Mark as needing repair
+  await supabase.from('polymarket_h2h_cache').upsert({
+    // ... existing fields
+    tradeable: false,
+    untradeable_reason: 'TOKENS_NOT_FOUND_IN_HTML',
+  });
+}
+```
+
+---
+
+## Step 3: Fix Accuracy Bugs
+
+**Goal:** Stop false edges and stop blocking real edges
+
+### 3.1 Fair Probability Outlier Bug
+
+**Problem:** After converting 3-way markets (H2H + Draw) to 2-way, favorites can legitimately reach 95%+. The 92% threshold blocks valid sharp data.
+
+**Current Code (polymarket-monitor, line 1132):**
+```typescript
+if (fairProb > 0.92 || fairProb < 0.08) {
+  // BLOCKS: Carolina at 92.7% (legitimate heavy favorite)
   continue;
 }
 ```
 
-#### Change 3: Update the comment at line 1186
-
-Change the misleading comment to reflect reality:
+**Fix:** Raise thresholds and add minimum sharp count:
 
 ```typescript
-// Load only H2H markets since we're comparing against H2H bookmaker odds
-// Future: Add separate processing for spreads/totals with corresponding bookmaker data
+// UPDATED: Raised for post-normalization H2H markets
+const OUTLIER_HIGH = 0.96;  // Up from 0.92
+const OUTLIER_LOW = 0.04;   // Down from 0.08
+const MIN_SHARP_COUNT = 2;  // Require 2+ sharp books before outlier rejection
+
+// Count how many sharp books agree
+const sharpCount = bookmakers.filter(b => 
+  SHARP_BOOKS.includes(b.key) && 
+  fairProb >= OUTLIER_LOW && 
+  fairProb <= OUTLIER_HIGH
+).length;
+
+if (fairProb > OUTLIER_HIGH || fairProb < OUTLIER_LOW) {
+  if (sharpCount >= MIN_SHARP_COUNT) {
+    // Trust the sharps even if it looks extreme
+    console.log('[FAIR_PROB] Extreme but sharp-confirmed:', fairProb);
+  } else {
+    console.log('[FAIR_PROB] OUTLIER_REJECTED:', bookmaker.key, fairProb);
+    continue;
+  }
+}
 ```
 
-#### Change 4: Expire any invalid signals currently in the database
+### 3.2 Low Match Rate (Team Name Resolution)
 
-After deploying, run a cleanup to expire signals created from non-H2H markets:
+**Problem:** Only 11% of events match. Missing aliases cause canonical matching to fail.
+
+**Current Aliases (sync-polymarket-h2h, line 56-122):**
+- Has: `'washington capitals': ['capitals', 'caps']`
+- Missing: `'wsh'`, `'wash'`, `'washington'`
+
+**Fix:** Expand alias tables in `_shared/canonicalize.ts`:
+
+```typescript
+const NHL_ALIASES = {
+  'carolina hurricanes': ['hurricanes', 'canes', 'car', 'carolina'],
+  'washington capitals': ['capitals', 'caps', 'wsh', 'wash', 'washington'],
+  'san jose sharks': ['sharks', 'sjs', 'san jose', 'sj sharks'],
+  'calgary flames': ['flames', 'cgy', 'calgary'],
+  // ... etc
+};
+
+const NBA_ALIASES = {
+  'los angeles lakers': ['lakers', 'lal', 'la lakers', 'los angeles'],
+  'boston celtics': ['celtics', 'bos', 'boston'],
+  // ... etc
+};
+```
+
+**Add Match Failure Logging:**
+```typescript
+if (!matchedGame) {
+  console.log('[MATCH_FAIL]', {
+    polyEvent: event.event_name,
+    searchTerms: [homeNorm, awayNorm],
+    topCandidates: bookmakerGames.slice(0, 3).map(g => g.home_team + ' vs ' + g.away_team),
+    reason: 'no_alias_match'
+  });
+}
+```
+
+---
+
+## Implementation Order
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│ PHASE 1: Stop the Bleeding (Day 1)                              │
+│                                                                 │
+│ ✓ Add database columns: tradeable, untradeable_reason,         │
+│   token_source, token_confidence                                │
+│ ✓ Add hard gate in polymarket-monitor: no tokens = skip        │
+│ ✓ Remove all 0.50 placeholder fallback logic                   │
+│ ✓ Expire existing garbage signals                               │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ PHASE 2: Build Tokenization Pipeline (Day 2-3)                  │
+│                                                                 │
+│ ✓ Create tokenize-market edge function                          │
+│ ✓ Implement multi-extractor priority chain                     │
+│ ✓ Update scrape-polymarket-nba to extract HTML + tokens        │
+│ ✓ Add funnel counters and summary logging                      │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ PHASE 3: Fix Accuracy Bugs (Day 4)                              │
+│                                                                 │
+│ ✓ Raise outlier threshold to 96%/4%                            │
+│ ✓ Add minimum sharp count requirement                          │
+│ ✓ Expand team alias tables                                      │
+│ ✓ Add match failure logging                                     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Expected Outcomes
+
+| Metric | Current | After Phase 1 | After Phase 3 |
+|--------|---------|---------------|---------------|
+| NBA token coverage | 5% | 0% (marked untradeable) | 80%+ |
+| Garbage signals | Many | 0 | 0 |
+| Match rate | 11% | 11% | 50%+ |
+| False positive edges | High | 0 | 0 |
+| False negative edges | High | Same | Near 0 |
+
+---
+
+## Cleanup SQL (Run After Phase 1)
 
 ```sql
--- Run via Cloud View > Run SQL (Test environment)
+-- Expire all signals from untokenized markets
 UPDATE signal_opportunities
-SET status = 'expired', 
-    signal_factors = signal_factors || '{"expired_reason": "market_type_mismatch"}'::jsonb
-WHERE id IN (
-  SELECT so.id 
-  FROM signal_opportunities so
-  LEFT JOIN polymarket_h2h_cache c ON so.polymarket_condition_id = c.condition_id
-  WHERE c.market_type != 'h2h' 
-    AND so.status = 'active'
-);
+SET status = 'expired',
+    signal_factors = COALESCE(signal_factors, '{}'::jsonb) || 
+      '{"expired_reason": "untokenized_market"}'::jsonb
+WHERE polymarket_condition_id IN (
+  SELECT condition_id 
+  FROM polymarket_h2h_cache 
+  WHERE token_id_yes IS NULL
+)
+AND status = 'active';
+
+-- Mark all untokenized firecrawl/scrape-nba markets as untradeable
+UPDATE polymarket_h2h_cache
+SET tradeable = false,
+    untradeable_reason = 'MISSING_TOKENS'
+WHERE token_id_yes IS NULL
+  AND source IN ('firecrawl', 'scrape-nba');
 ```
 
-## Summary of Changes
+---
 
-| File | Change | Impact |
-|------|--------|--------|
-| `polymarket-monitor/index.ts` | Add `.eq('market_type', 'h2h')` to both queries | Only loads H2H markets |
-| `polymarket-monitor/index.ts` | Add safety check before processing | Skips any non-H2H that slip through |
-| `polymarket-monitor/index.ts` | Update comment | Clarifies design intent |
-| Database | Expire invalid signals | Cleans up false signals |
+## Technical Files to Modify
 
-## Expected Outcome
-
-- **Before**: False 33.9% edge for Sharks vs Flames (spread market compared to H2H odds)
-- **After**: Correct ~1-3% edge (H2H market compared to H2H odds), or no signal if edge < threshold
-
-## Future Enhancement (Not in Scope)
-
-To properly support spreads and totals markets, we would need to:
-1. Fetch bookmaker spreads data from Odds API (`markets=spreads`)
-2. Fetch bookmaker totals data from Odds API (`markets=totals`)
-3. Add separate edge calculation logic for each market type
-4. This is a larger effort and should be a separate implementation
+| File | Changes |
+|------|---------|
+| `supabase/functions/tokenize-market/index.ts` | **NEW** - Multi-extractor tokenization service |
+| `supabase/functions/polymarket-monitor/index.ts` | Add hard gate, funnel counters, fix outlier threshold |
+| `supabase/functions/scrape-polymarket-nba/index.ts` | Add HTML extraction, call tokenizer |
+| `supabase/functions/scrape-polymarket-prices/index.ts` | Add HTML extraction, call tokenizer |
+| `supabase/functions/_shared/canonicalize.ts` | Expand team aliases |
+| Database migration | Add new columns to `polymarket_h2h_cache` |
 
