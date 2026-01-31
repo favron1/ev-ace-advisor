@@ -1,154 +1,113 @@
 
-# Implementing Enhanced Logging + Movement Tier-Only Upgrade
+
+# Patching Remaining Safety Issues in polymarket-monitor
 
 ## Overview
 
-Two targeted refinements to eliminate the last inversion vector and make debugging instant:
+Three targeted fixes to close the remaining inversion/accuracy gaps:
 
-1. **Enhanced Logging** - Full context on every blocked/skipped signal
-2. **Movement Logic Refactor** - Movement upgrades tier, never overrides side
+1. **Cached Price Fallback → Skip** - If CLOB fallback can't find `tokenIdYes`, skip the market instead of using stale cached price
+2. **Spread Calculation Consistency** - Convert absolute spread to percentage-of-mid for accurate `netEdge` calculation
+3. **Movement Detection for Both Teams** - Detect movement on both YES and NO teams, then use the one matching the chosen side
 
 ---
 
-## Change #1: Enhanced Logging for MAPPING_INVERSION_DETECTED
+## Fix #1: Fallback CLOB Missing Token → Skip (Not Cached Price)
 
 **File:** `supabase/functions/polymarket-monitor/index.ts`
-**Location:** Lines 1556-1558
+**Location:** Lines 1360-1362
+
+### Problem
+If the fallback CLOB fetch succeeds but doesn't contain the `tokenIdYes`, the code falls back to cached price. This reintroduces inversion risk if the cached price was stored under an inverted assumption.
 
 ### Current Code
 ```typescript
-if (bestB > bestA + MAPPING_MARGIN) {
-  console.log(`[POLY-MONITOR] MAPPING_INVERSION_DETECTED: "${event.event_name}" | bestA=${...} - SKIPPING`);
-  continue;
+} else {
+  console.log(`[POLY-MONITOR] Fallback CLOB: Could not find token_id=${tokenIdYes} in response for "${event.event_name}" - using cached price`);
 }
 ```
 
 ### New Code
 ```typescript
-if (bestB > bestA + MAPPING_MARGIN) {
-  console.log(`[POLY-MONITOR] MAPPING_INVERSION_DETECTED`, {
-    event: event.event_name,
-    polyPrice: livePolyPrice,
-    yesFairProb,
-    noFairProb,
-    bestA,
-    bestB,
-    margin: MAPPING_MARGIN,
-    tokenIdYes,
-    yesTeamName,
-    noTeamName,
-    spreadPct,
-    volume: liveVolume,
-    bestBid,
-    bestAsk,
-  });
-  continue;
-}
-```
-
----
-
-## Change #2: Enhanced Logging for No TokenIdYes Skip
-
-**File:** `supabase/functions/polymarket-monitor/index.ts`
-**Location:** Lines 1336-1339
-
-### Current Code
-```typescript
-if (!tokenIdYes) {
-  console.log(`[POLY-MONITOR] No tokenIdYes for "${event.event_name}" - SKIPPING`);
-  continue;
-}
-```
-
-### New Code
-```typescript
-if (!tokenIdYes) {
-  console.log(`[POLY-MONITOR] NO_TOKEN_ID_SKIP`, {
+} else {
+  console.log(`[POLY-MONITOR] FALLBACK_TOKEN_MISSING`, {
     event: event.event_name,
     conditionId: event.polymarket_condition_id,
-    cachedPrice: event.polymarket_yes_price,
-    cachedVolume: event.polymarket_volume,
+    tokenIdYes,
+    tokensInResponse: marketData.tokens?.map((t: any) => t.token_id) || [],
   });
-  continue;
+  continue; // Cannot safely price trade without confirmed YES token
 }
 ```
 
 ---
 
-## Change #3: Movement Never Overrides Side - Only Upgrades Tier
+## Fix #2: Spread Calculation Consistency (Absolute → Percentage of Mid)
 
 **File:** `supabase/functions/polymarket-monitor/index.ts`
-**Location:** Lines 1586-1603
+**Location:** Lines 1328-1330
 
-### Current Code (Dangerous - can force wrong side)
-```typescript
-// Movement direction can OVERRIDE if strong directional signal
-if (movement.triggered) {
-  if (movement.direction === 'shortening' && yesEdge > 0.03) {
-    betSide = 'YES';
-    rawEdge = yesEdge;
-    recommendedOutcome = yesTeamName;
-    recommendedFairProb = yesFairProb;
-  } else if (movement.direction === 'drifting' && noEdge > 0.03) {
-    betSide = 'NO';
-    rawEdge = noEdge;
-    recommendedOutcome = noTeamName;
-    recommendedFairProb = noFairProb;
-  }
-}
-```
-
-### New Code (Safe - tier boost only)
-```typescript
-// SAFETY RAIL #3: Movement NEVER overrides side selection
-// It only boosts tier/confidence when there's already meaningful edge on chosen side
-let movementBoost = 0;
-
-if (movement.triggered) {
-  // Only boost if there's already meaningful edge on the chosen side
-  if (rawEdge >= 0.05) {
-    movementBoost = 2;
-  } else if (rawEdge >= 0.03) {
-    movementBoost = 1;
-  }
-  
-  console.log(`[POLY-MONITOR] MOVEMENT_CONFIRMED`, {
-    event: event.event_name,
-    direction: movement.direction,
-    chosenSide: betSide,
-    rawEdge,
-    movementBoost,
-    booksConfirming: movement.booksConfirming,
-  });
-}
-```
-
----
-
-## Change #4: Apply Movement Boost to Tier Calculation
-
-**File:** `supabase/functions/polymarket-monitor/index.ts`
-**Location:** Lines 1644-1645
+### Problem
+Currently `spreadPct` is calculated as `bestAsk - bestBid` (absolute price gap), but the name and `calculateNetEdge()` logic treat it as a percentage. This unit mismatch affects `netEdge` and tier calculations.
 
 ### Current Code
 ```typescript
-const signalTier = calculateSignalTier(movementTriggered, netEdge);
+} else if (bestBid > 0 && bestAsk > 0) {
+  spreadPct = bestAsk - bestBid;
+}
 ```
 
 ### New Code
 ```typescript
-// Calculate base tier, then apply movement boost
-let signalTier = calculateSignalTier(movementTriggered, netEdge);
-
-// Movement boost can upgrade tier: STATIC -> STRONG -> ELITE
-if (movementBoost >= 2 && signalTier === 'static') {
-  signalTier = 'strong';
-} else if (movementBoost >= 2 && signalTier === 'strong') {
-  signalTier = 'elite';
-} else if (movementBoost >= 1 && signalTier === 'static') {
-  signalTier = 'strong';
+} else if (bestBid > 0 && bestAsk > 0) {
+  // Convert to percentage-of-mid for consistent units with calculateNetEdge()
+  const mid = (bestAsk + bestBid) / 2;
+  spreadPct = mid > 0 ? (bestAsk - bestBid) / mid : null;
 }
+```
+
+**Technical Detail:** This ensures that when `spreadPct` is passed to `calculateNetEdge()`, it represents a proportional cost (e.g., 0.03 = 3% of price), not an absolute gap (e.g., 0.03 = 3 cent difference).
+
+---
+
+## Fix #3: Movement Detection for Both Teams
+
+**File:** `supabase/functions/polymarket-monitor/index.ts`
+**Location:** Lines 1535-1539
+
+### Problem
+Movement detection only runs for the YES team (`yesTeamName`). This means:
+- If the edge is on the NO side, movement confirmation may be missed entirely
+- Movement could be attributed to the wrong outcome record
+
+### Current Code
+```typescript
+// Generate event key for movement detection (use YES team)
+const eventKey = generateEventKey(event.event_name, yesTeamName);
+
+// ========== MOVEMENT DETECTION GATE ==========
+const movement = await detectSharpMovement(supabase, eventKey, yesTeamName);
+```
+
+### New Code
+```typescript
+// ========== MOVEMENT DETECTION FOR BOTH TEAMS ==========
+// Generate keys for both outcomes to ensure movement is captured regardless of final side
+const eventKeyYes = generateEventKey(event.event_name, yesTeamName);
+const eventKeyNo = generateEventKey(event.event_name, noTeamName);
+
+// Run movement detection in parallel for both teams
+const [moveYes, moveNo] = await Promise.all([
+  detectSharpMovement(supabase, eventKeyYes, yesTeamName),
+  detectSharpMovement(supabase, eventKeyNo, noTeamName),
+]);
+```
+
+**Additional Change (Lines ~1620-1630):** After side selection, use the correct movement:
+```typescript
+// Use movement from the side we're actually betting on
+const movement = betSide === 'YES' ? moveYes : moveNo;
+const movementTriggered = movement.triggered;
 ```
 
 ---
@@ -157,25 +116,44 @@ if (movementBoost >= 2 && signalTier === 'static') {
 
 | Location | Change | Purpose |
 |----------|--------|---------|
-| Lines 1336-1339 | Enhanced NO_TOKEN_ID_SKIP log | Debugging oracle for missing tokens |
-| Lines 1556-1558 | Enhanced MAPPING_INVERSION_DETECTED log | Full context on every blocked inversion |
-| Lines 1586-1603 | Remove side override, add movementBoost | Eliminate last "force wrong side" risk |
-| Lines 1644-1645 | Apply movementBoost to tier | Movement upgrades tier instead of overriding side |
+| Lines 1360-1362 | Skip if fallback can't find token | Prevent stale/inverted cached prices |
+| Lines 1328-1330 | Convert spread to %-of-mid | Accurate netEdge calculation |
+| Lines 1535-1539 | Detect movement for both teams | Correct movement attribution for NO-side bets |
+| Lines ~1620-1630 | Select movement based on betSide | Use movement data from the actual recommended side |
+
+---
+
+## Optional Polish: Confidence Score Enhancement
+
+**Current (Lines 1730):**
+```typescript
+confidence_score: Math.min(85, 50 + Math.floor(netEdge * 500)),
+```
+
+**Enhanced:**
+```typescript
+// Allow ELITE signals with movement boost to reach higher confidence
+const baseConfidence = 50 + Math.floor(netEdge * 500) + (movementBoost * 10);
+confidence_score: Math.min(95, baseConfidence),
+```
+
+This allows movement-confirmed signals to express higher confidence (up to 95 instead of capped at 85).
 
 ---
 
 ## Why This Matters
 
-- **Logging**: Every skipped signal becomes self-explaining in one log line
-- **Movement Safety**: Side selection is now purely based on edge calculation, making it mathematically impossible for movement to force an inverted signal
-- **Tier Upgrade**: Movement still matters - it boosts confidence/tier, just doesn't touch side selection
+- **Fix #1**: Eliminates the last path for stale/inverted cached prices to generate signals
+- **Fix #2**: Ensures cost calculations are accurate across all market conditions
+- **Fix #3**: Makes movement confirmation consistent regardless of which side has edge
 
 ---
 
 ## Testing Plan
 
 After deployment:
-1. Run `polymarket-monitor` 
-2. Check logs for structured JSON output on `MAPPING_INVERSION_DETECTED` and `NO_TOKEN_ID_SKIP`
-3. Verify `MOVEMENT_CONFIRMED` logs show boost without side changes
-4. Confirm no inverted signals appear in `signal_opportunities`
+1. Run `polymarket-monitor`
+2. Check logs for `FALLBACK_TOKEN_MISSING` to verify skip behavior
+3. Verify `spreadPct` values in cache are reasonable percentages (0.01-0.10 range, not 0.30+)
+4. Confirm `MOVEMENT_CONFIRMED` logs show correct `chosenSide` matching the signal's `betSide`
+
