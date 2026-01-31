@@ -1335,7 +1335,12 @@ Deno.serve(async (req) => {
         if (!clobPrices.has(tokenIdYes || '')) {
           if (!tokenIdYes) {
             // No token ID = cannot safely determine YES price, skip this market
-            console.log(`[POLY-MONITOR] No tokenIdYes for "${event.event_name}" - SKIPPING (untradeable without token ID)`);
+            console.log(`[POLY-MONITOR] NO_TOKEN_ID_SKIP`, {
+              event: event.event_name,
+              conditionId: event.polymarket_condition_id,
+              cachedPrice: event.polymarket_yes_price,
+              cachedVolume: event.polymarket_volume,
+            });
             continue;
           }
           
@@ -1554,7 +1559,22 @@ Deno.serve(async (req) => {
           
           const MAPPING_MARGIN = 0.02; // 2% edge margin
           if (bestB > bestA + MAPPING_MARGIN) {
-            console.log(`[POLY-MONITOR] MAPPING_INVERSION_DETECTED: "${event.event_name}" | bestA=${(bestA * 100).toFixed(1)}%, bestB=${(bestB * 100).toFixed(1)}% (swapped wins by ${((bestB - bestA) * 100).toFixed(1)}%) - SKIPPING to prevent wrong-side bet`);
+            console.log(`[POLY-MONITOR] MAPPING_INVERSION_DETECTED`, {
+              event: event.event_name,
+              polyPrice: livePolyPrice,
+              yesFairProb,
+              noFairProb,
+              bestA,
+              bestB,
+              margin: MAPPING_MARGIN,
+              tokenIdYes,
+              yesTeamName,
+              noTeamName,
+              spreadPct,
+              volume: liveVolume,
+              bestBid,
+              bestAsk,
+            });
             continue;
           }
           // ========== END DUAL-MAPPING EV GATE ==========
@@ -1583,23 +1603,26 @@ Deno.serve(async (req) => {
             continue;
           }
           
-          // Movement direction can OVERRIDE if strong directional signal
-          // SAFETY RAIL #3: Require 3% edge (not 1%) for movement to override side selection
-          // This prevents movement from forcing wrong side on marginal/inverted edges
+          // SAFETY RAIL #3: Movement NEVER overrides side selection
+          // It only boosts tier/confidence when there's already meaningful edge on chosen side
+          let movementBoost = 0;
+
           if (movement.triggered) {
-            if (movement.direction === 'shortening' && yesEdge > 0.03) {
-              // Bookies shortened (prob UP) + there's a meaningful YES edge - prefer BUY YES
-              betSide = 'YES';
-              rawEdge = yesEdge;
-              recommendedOutcome = yesTeamName;
-              recommendedFairProb = yesFairProb;
-            } else if (movement.direction === 'drifting' && noEdge > 0.03) {
-              // Bookies drifted (prob DOWN) + there's a meaningful NO edge - prefer BUY NO
-              betSide = 'NO';
-              rawEdge = noEdge;
-              recommendedOutcome = noTeamName;
-              recommendedFairProb = noFairProb;
+            // Only boost if there's already meaningful edge on the chosen side
+            if (rawEdge >= 0.05) {
+              movementBoost = 2;
+            } else if (rawEdge >= 0.03) {
+              movementBoost = 1;
             }
+            
+            console.log(`[POLY-MONITOR] MOVEMENT_CONFIRMED`, {
+              event: event.event_name,
+              direction: movement.direction,
+              chosenSide: betSide,
+              rawEdge,
+              movementBoost,
+              booksConfirming: movement.booksConfirming,
+            });
           }
           
           console.log(`[POLY-MONITOR] EDGE CALC: ${event.event_name} | YES=${yesTeamName}=${(yesEdge * 100).toFixed(1)}%, NO=${noTeamName}=${(noEdge * 100).toFixed(1)}% -> ${betSide} ${recommendedOutcome} (${(rawEdge * 100).toFixed(1)}% edge)`);
@@ -1641,8 +1664,17 @@ Deno.serve(async (req) => {
               triggerReason = 'movement';
             }
             
-            // Calculate signal tier - ELITE/STRONG require movement confirmation
-            const signalTier = calculateSignalTier(movementTriggered, netEdge);
+            // Calculate base tier, then apply movement boost
+            let signalTier = calculateSignalTier(movementTriggered, netEdge);
+            
+            // Movement boost can upgrade tier: STATIC -> STRONG -> ELITE
+            if (movementBoost >= 2 && signalTier === 'static') {
+              signalTier = 'strong';
+            } else if (movementBoost >= 2 && signalTier === 'strong') {
+              signalTier = 'elite';
+            } else if (movementBoost >= 1 && signalTier === 'static') {
+              signalTier = 'strong';
+            }
             
             if (movementTriggered) {
               movementConfirmedCount++;
