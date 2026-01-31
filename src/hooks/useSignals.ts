@@ -242,11 +242,15 @@ export function useSignals() {
     movementConfirmedOnly?: boolean;
   }) => {
     return enrichedSignals.filter(s => {
+      // Check if event has already started (LIVE) - these always pass movement filter
+      const hasStarted = s.expires_at ? new Date(s.expires_at).getTime() <= Date.now() : false;
+      
       // Filter by true edges only (matched to Polymarket)
       if (filters.trueEdgesOnly && s.is_true_arbitrage !== true) return false;
       
       // Filter by movement-confirmed only (elite or strong tier)
-      if (filters.movementConfirmedOnly) {
+      // EXCEPTION: Always show started/LIVE events regardless of movement status
+      if (filters.movementConfirmedOnly && !hasStarted) {
         const tier = s.signal_tier || 'static';
         if (tier === 'static' && !s.movement_confirmed) return false;
       }

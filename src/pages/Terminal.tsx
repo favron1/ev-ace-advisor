@@ -201,6 +201,16 @@ export default function Terminal() {
     movementConfirmedOnly: showMovementConfirmedOnly,
   });
 
+  // Clear all filters handler
+  const handleClearFilters = useCallback(() => {
+    setShowMovementConfirmedOnly(false);
+    setShowBettableOnly(false);
+    setShowTrueEdgesOnly(false);
+    setMinEdge(0);
+    setMinConfidence(0);
+    setSelectedUrgency([]);
+  }, []);
+
   if (!user) {
     return null;
   }
@@ -246,6 +256,8 @@ export default function Terminal() {
               onDismiss={dismissSignal}
               onExecute={executeSignal}
               onRefresh={refreshSignals}
+              totalSignals={signals.length}
+              onClearFilters={handleClearFilters}
             />
           </div>
 
