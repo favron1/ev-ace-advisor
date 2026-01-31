@@ -1616,6 +1616,27 @@ Deno.serve(async (req) => {
             console.log(`[POLY-MONITOR] No edge on either side for ${event.event_name}: YES=${yesTeamName}=${(yesEdge * 100).toFixed(1)}%, NO=${noTeamName}=${(noEdge * 100).toFixed(1)}%`);
             continue;
           }
+
+           // SAFETY RAIL: outcome-side consistency guard
+           // If team mapping/matching produced a mismatch, force betSide to align with recommendedOutcome.
+           // This prevents storing e.g. recommended_outcome=Sabres but side=YES (which would show wrong price).
+           const expectedSide: 'YES' | 'NO' = recommendedOutcome === yesTeamName ? 'YES' : 'NO';
+           if (expectedSide !== betSide) {
+             console.log(`[POLY-MONITOR] SIDE_MISMATCH_GUARD: forcing side to match outcome`, {
+               event: event.event_name,
+               betSide,
+               expectedSide,
+               yesTeamName,
+               noTeamName,
+               recommendedOutcome,
+               yesEdge,
+               noEdge,
+             });
+
+             betSide = expectedSide;
+             rawEdge = expectedSide === 'YES' ? yesEdge : noEdge;
+             recommendedFairProb = expectedSide === 'YES' ? yesFairProb : noFairProb;
+           }
           
           // SAFETY RAIL #3: Movement NEVER overrides side selection
           // Use movement from the side we're actually betting on
