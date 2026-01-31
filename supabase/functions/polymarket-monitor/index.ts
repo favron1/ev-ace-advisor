@@ -1738,8 +1738,14 @@ Deno.serve(async (req) => {
             let signal: any = null;
             let signalError: any = null;
 
+            // FIX: Store the price of the side we're actually betting on
+            // YES = livePolyPrice, NO = 1 - livePolyPrice
+            const signalPolyPrice = betSide === 'YES' ? livePolyPrice : (1 - livePolyPrice);
+            
+            console.log(`[POLY-MONITOR] SIGNAL CREATE: ${betSide} ${recommendedOutcome} @ ${(signalPolyPrice * 100).toFixed(1)}c (raw YES price=${(livePolyPrice * 100).toFixed(1)}c)`);
+
             const signalData = {
-              polymarket_price: livePolyPrice,
+              polymarket_price: signalPolyPrice, // FIX: Use side-adjusted price
               bookmaker_probability: recommendedFairProb, // Use recommended team's fair prob
               bookmaker_prob_fair: recommendedFairProb,
               edge_percent: rawEdge * 100,
