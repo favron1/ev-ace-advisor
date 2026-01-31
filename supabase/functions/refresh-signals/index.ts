@@ -8,6 +8,20 @@ const corsHeaders = {
 // Polymarket CLOB API for live prices
 const CLOB_API_BASE = 'https://clob.polymarket.com';
 
+// Odds API for fresh bookmaker data
+const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
+
+// Sharp books for weighting
+const SHARP_BOOKS = ['pinnacle', 'betfair', 'betfair_ex_eu', 'betonline'];
+
+// Sport mapping for Odds API endpoints
+const SPORT_ENDPOINTS: Record<string, string> = {
+  'NHL': 'icehockey_nhl',
+  'NBA': 'basketball_nba',
+  'NFL': 'americanfootball_nfl',
+  'NCAA': 'basketball_ncaab',
+};
+
 interface SignalWithCache {
   id: string;
   expires_at: string | null;
@@ -18,12 +32,14 @@ interface SignalWithCache {
   bookmaker_prob_fair: number | null;
   polymarket_price: number;
   edge_percent: number;
+  event_name: string;
   // Joined from cache
   token_id_yes?: string | null;
   token_id_no?: string | null;
   cache_yes_price?: number;
   cache_no_price?: number;
   cache_volume?: number;
+  extracted_league?: string | null;
 }
 
 interface ClobPriceRequest {
@@ -33,6 +49,121 @@ interface ClobPriceRequest {
 
 interface ClobPriceResponse {
   [tokenId: string]: string; // price as string
+}
+
+// Calculate fair probability by removing vig (2-way markets)
+function calculateFairProb(odds: number[], targetIndex: number): number {
+  const probs = odds.map(o => 1 / o);
+  const totalProb = probs.reduce((a, b) => a + b, 0);
+  return probs[targetIndex] / totalProb;
+}
+
+// Calculate consensus fair probability from bookmakers with outlier protection
+function calculateConsensusFairProb(
+  game: any, 
+  marketKey: string, 
+  targetIndex: number,
+  sport: string = ''
+): number | null {
+  let totalWeight = 0;
+  let weightedProb = 0;
+  
+  const isIceHockey = sport.toUpperCase() === 'NHL';
+  
+  for (const bookmaker of game.bookmakers || []) {
+    const market = bookmaker.markets?.find((m: any) => m.key === marketKey);
+    if (!market?.outcomes || market.outcomes.length < 2) continue;
+    
+    let outcomes = [...market.outcomes];
+    let adjustedTargetIndex = targetIndex;
+    
+    // For NHL, filter out Draw/Tie and renormalize to 2-way
+    if (isIceHockey && outcomes.length >= 3) {
+      const drawIndex = outcomes.findIndex((o: any) => 
+        o.name.toLowerCase().includes('draw') || o.name.toLowerCase() === 'tie'
+      );
+      outcomes = outcomes.filter((o: any) => 
+        !o.name.toLowerCase().includes('draw') && o.name.toLowerCase() !== 'tie'
+      );
+      if (drawIndex !== -1 && drawIndex < targetIndex) {
+        adjustedTargetIndex = Math.max(0, targetIndex - 1);
+      }
+      if (outcomes.length < 2) continue;
+    }
+    
+    const odds = outcomes.map((o: any) => o.price);
+    if (odds.some((o: number) => isNaN(o) || o <= 1)) continue;
+    
+    const fairProb = calculateFairProb(odds, Math.min(adjustedTargetIndex, odds.length - 1));
+    
+    // OUTLIER PROTECTION: Reject extreme probabilities (>92% or <8%)
+    if (fairProb > 0.92 || fairProb < 0.08) {
+      console.log(`[REFRESH] OUTLIER REJECTED: ${bookmaker.key} fairProb=${(fairProb * 100).toFixed(1)}%`);
+      continue;
+    }
+    
+    const weight = SHARP_BOOKS.includes(bookmaker.key) ? 1.5 : 1.0;
+    weightedProb += fairProb * weight;
+    totalWeight += weight;
+  }
+  
+  return totalWeight > 0 ? weightedProb / totalWeight : null;
+}
+
+// Fetch fresh bookmaker odds for a sport
+async function fetchFreshBookmakerOdds(sport: string, apiKey: string): Promise<any[]> {
+  const endpoint = SPORT_ENDPOINTS[sport.toUpperCase()];
+  if (!endpoint) {
+    console.log(`[REFRESH] No endpoint for sport: ${sport}`);
+    return [];
+  }
+  
+  try {
+    const url = `${ODDS_API_BASE}/sports/${endpoint}/odds/?apiKey=${apiKey}&markets=h2h&regions=us,uk,eu&oddsFormat=decimal`;
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      if (response.status === 401) {
+        console.error('[REFRESH] ODDS_API_KEY unauthorized');
+      } else if (response.status !== 404) {
+        console.error(`[REFRESH] Odds API error for ${sport}: ${response.status}`);
+      }
+      return [];
+    }
+    
+    const data = await response.json();
+    console.log(`[REFRESH] Fetched ${data.length} games from Odds API for ${sport}`);
+    return data;
+  } catch (error) {
+    console.error(`[REFRESH] Failed to fetch ${sport}:`, error);
+    return [];
+  }
+}
+
+// Find matching game from Odds API data by event name
+function findMatchingGame(eventName: string, games: any[]): { game: any; targetIndex: number } | null {
+  const eventNorm = eventName.toLowerCase().replace(/[^a-z0-9\s]/g, '');
+  
+  for (const game of games) {
+    const homeNorm = (game.home_team || '').toLowerCase().replace(/[^a-z0-9\s]/g, '');
+    const awayNorm = (game.away_team || '').toLowerCase().replace(/[^a-z0-9\s]/g, '');
+    
+    // Extract last words (nicknames)
+    const homeNickname = homeNorm.split(' ').pop() || '';
+    const awayNickname = awayNorm.split(' ').pop() || '';
+    
+    const containsHome = homeNickname.length > 2 && eventNorm.includes(homeNickname);
+    const containsAway = awayNickname.length > 2 && eventNorm.includes(awayNickname);
+    
+    if (containsHome || containsAway) {
+      // Determine target index based on which team appears more prominently
+      const targetIndex = containsHome && !containsAway ? 0 : 
+                          containsAway && !containsHome ? 1 : 0;
+      return { game, targetIndex };
+    }
+  }
+  
+  return null;
 }
 
 // Batch fetch CLOB prices for token IDs (BUY = ask price, what user pays)
@@ -124,14 +255,15 @@ Deno.serve(async (req) => {
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+    const oddsApiKey = Deno.env.get('ODDS_API_KEY');
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    console.info('[REFRESH] Starting live signal refresh...');
+    console.info('[REFRESH] Starting live signal refresh with bookmaker verification...');
 
-    // Step 1: Fetch all active signals
+    // Step 1: Fetch all active signals with event_name for matching
     const { data: signals, error: fetchError } = await supabase
       .from('signal_opportunities')
-      .select('id, expires_at, urgency, signal_factors, polymarket_condition_id, side, bookmaker_prob_fair, polymarket_price, edge_percent')
+      .select('id, expires_at, urgency, signal_factors, polymarket_condition_id, side, bookmaker_prob_fair, polymarket_price, edge_percent, event_name')
       .eq('status', 'active');
 
     if (fetchError) throw fetchError;
@@ -144,6 +276,7 @@ Deno.serve(async (req) => {
           price_updates: 0,
           edge_improved: 0,
           edge_gone: 0,
+          stale_data_expired: 0,
           unchanged: 0,
           message: 'No active signals to refresh'
         }),
@@ -153,7 +286,7 @@ Deno.serve(async (req) => {
 
     console.info(`[REFRESH] Found ${signals.length} active signals`);
 
-    // Step 2: Get token IDs from polymarket_h2h_cache for signals with condition_id
+    // Step 2: Get token IDs and extracted_league from polymarket_h2h_cache
     const conditionIds = signals
       .map(s => s.polymarket_condition_id)
       .filter((id): id is string => !!id);
@@ -164,12 +297,13 @@ Deno.serve(async (req) => {
       yes_price: number;
       no_price: number;
       volume: number | null;
+      extracted_league: string | null;
     }>();
 
     if (conditionIds.length > 0) {
       const { data: cacheData, error: cacheError } = await supabase
         .from('polymarket_h2h_cache')
-        .select('condition_id, token_id_yes, token_id_no, yes_price, no_price, volume')
+        .select('condition_id, token_id_yes, token_id_no, yes_price, no_price, volume, extracted_league')
         .in('condition_id', conditionIds);
 
       if (cacheError) {
@@ -182,6 +316,7 @@ Deno.serve(async (req) => {
             yes_price: cache.yes_price,
             no_price: cache.no_price,
             volume: cache.volume,
+            extracted_league: cache.extracted_league,
           });
         }
       }
@@ -201,7 +336,33 @@ Deno.serve(async (req) => {
     const clobPrices = allTokenIds.length > 0 ? await fetchClobPrices(allTokenIds) : {};
     console.info(`[REFRESH] Got ${Object.keys(clobPrices).length} live prices from CLOB`);
 
-    // Step 5: Get commence times for expiry backfill
+    // Step 5: Fetch fresh bookmaker odds for sports with active signals (if API key available)
+    const freshOddsMap = new Map<string, any[]>(); // sport -> games[]
+    
+    if (oddsApiKey) {
+      // Collect unique sports from signals
+      const sportsWithSignals = new Set<string>();
+      for (const signal of signals) {
+        const cache = signal.polymarket_condition_id ? cacheMap.get(signal.polymarket_condition_id) : null;
+        if (cache?.extracted_league) {
+          sportsWithSignals.add(cache.extracted_league.toUpperCase());
+        }
+      }
+      
+      console.info(`[REFRESH] Fetching fresh bookmaker odds for ${sportsWithSignals.size} sports: ${[...sportsWithSignals].join(', ')}`);
+      
+      // Fetch fresh odds for each sport
+      for (const sport of sportsWithSignals) {
+        const games = await fetchFreshBookmakerOdds(sport, oddsApiKey);
+        if (games.length > 0) {
+          freshOddsMap.set(sport, games);
+        }
+      }
+    } else {
+      console.warn('[REFRESH] ODDS_API_KEY not configured - skipping bookmaker probability verification');
+    }
+
+    // Step 6: Get commence times for expiry backfill
     const missingExpiryConditionIds = signals
       .filter(s => !s.expires_at && s.polymarket_condition_id)
       .map(s => s.polymarket_condition_id as string);
@@ -224,7 +385,7 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Step 6: Process each signal
+    // Step 7: Process each signal
     const now = new Date();
     const toExpire: { id: string; reason: string }[] = [];
     const toUpdate: { 
@@ -237,6 +398,7 @@ Deno.serve(async (req) => {
     let priceUpdates = 0;
     let edgeImproved = 0;
     let edgeGone = 0;
+    let staleDataExpired = 0;
 
     for (const signal of signals) {
       const cache = signal.polymarket_condition_id 
@@ -260,22 +422,52 @@ Deno.serve(async (req) => {
         }
       }
 
+      // STALE DATA CHECK: Verify bookmaker probability against fresh odds
+      let bookmakerFairProb = signal.bookmaker_prob_fair;
+      let isStaleData = false;
+      
+      if (cache?.extracted_league && signal.event_name) {
+        const sport = cache.extracted_league.toUpperCase();
+        const freshGames = freshOddsMap.get(sport) || [];
+        
+        if (freshGames.length > 0) {
+          const matchResult = findMatchingGame(signal.event_name, freshGames);
+          
+          if (matchResult) {
+            const freshFairProb = calculateConsensusFairProb(
+              matchResult.game, 
+              'h2h', 
+              matchResult.targetIndex,
+              sport
+            );
+            
+            if (freshFairProb !== null && bookmakerFairProb !== null) {
+              const probDiff = Math.abs(freshFairProb - bookmakerFairProb);
+              
+              // If stored probability differs by >15% from fresh consensus, it's stale data
+              if (probDiff > 0.15) {
+                console.log(`[REFRESH] STALE DATA DETECTED: ${signal.event_name} - stored=${(bookmakerFairProb * 100).toFixed(1)}%, fresh=${(freshFairProb * 100).toFixed(1)}%, diff=${(probDiff * 100).toFixed(1)}%`);
+                isStaleData = true;
+                toExpire.push({ id: signal.id, reason: 'stale_bookmaker_data' });
+                staleDataExpired++;
+                continue;
+              } else {
+                // Update to fresh probability for more accurate edge calculation
+                bookmakerFairProb = freshFairProb;
+              }
+            }
+          }
+        }
+      }
+
       // Calculate new edge if we have both live price and fair prob
       let newEdge: number | null = null;
       let newNetEdge: number | null = null;
-      const bookmakerFairProb = signal.bookmaker_prob_fair;
       const volume = cache?.volume || 0;
 
       if (livePrice !== null && bookmakerFairProb !== null) {
         // Edge = bookmaker fair probability - polymarket ask price
-        // If side is NO, we need to use 1 - price comparisons appropriately
-        if (signal.side === 'YES') {
-          newEdge = bookmakerFairProb - livePrice;
-        } else {
-          // For NO side: edge = (1 - bookmaker_fair_yes) - no_ask_price
-          // But bookmaker_prob_fair is already for the recommended side
-          newEdge = bookmakerFairProb - livePrice;
-        }
+        newEdge = bookmakerFairProb - livePrice;
         newNetEdge = calculateNetEdge(newEdge, volume);
       }
 
@@ -371,10 +563,11 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Step 7: Batch expire signals
+    // Step 8: Batch expire signals
     const expiredByReason = {
       event_started: toExpire.filter(e => e.reason === 'event_started').map(e => e.id),
       edge_gone: toExpire.filter(e => e.reason === 'edge_gone').map(e => e.id),
+      stale_bookmaker_data: toExpire.filter(e => e.reason === 'stale_bookmaker_data').map(e => e.id),
     };
 
     for (const [reason, ids] of Object.entries(expiredByReason)) {
@@ -392,7 +585,7 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Step 8: Batch update signals
+    // Step 9: Batch update signals
     for (const update of toUpdate) {
       const { error: updateError } = await supabase
         .from('signal_opportunities')
@@ -409,11 +602,13 @@ Deno.serve(async (req) => {
       expired: toExpire.length,
       expired_by_time: expiredByReason.event_started.length,
       expired_by_edge: expiredByReason.edge_gone.length,
+      stale_data_expired: staleDataExpired,
       price_updates: priceUpdates,
       edge_improved: edgeImproved,
       updated: toUpdate.length,
       unchanged,
       clob_prices_fetched: Object.keys(clobPrices).length,
+      bookmaker_sports_refreshed: freshOddsMap.size,
       timestamp: now.toISOString()
     };
 
