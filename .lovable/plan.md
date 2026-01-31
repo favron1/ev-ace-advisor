@@ -1,110 +1,58 @@
 
 
-## Fix: Prevent False Sport Detection + Add English Football Support
+## Fix: Remove Misclassified QPR Cache Entries
 
-### Problem Summary
+### Root Cause Identified
 
-The QPR vs Coventry City signal is **completely invalid** due to multiple bugs:
+The QPR vs. Coventry City signal keeps regenerating because:
 
-| Issue | Impact |
-|-------|--------|
-| "Rangers" in team name matches NHL detection pattern | Signal tagged as NHL ice hockey |
-| System fetches NHL odds data for refresh | QPR match not found, no update |
-| Signal assigned `team_name: New York Rangers` | Completely wrong team |
-| 64% bookmaker probability is from NHL, not football | Edge calculation is garbage |
+1. The market was synced on Jan 29-30 with the **old detection patterns**
+2. The unanchored `rangers` regex matched "Queens Park Rangers" → tagged as `NHL`
+3. This sport tag is **persisted in `polymarket_h2h_cache`**:
+   - `extracted_league: NHL`
+   - `sport_category: NHL`
+4. The updated detection patterns only affect **new** market discovery
+5. The monitor reads cached `sport_category: NHL`, fetches NHL odds, matches "New York Rangers", creates bogus signal
 
-Sportsbet's 2.05 odds (48.8%) for Coventry is the **correct** market price. The 30.9% edge displayed is a **data artifact**.
+### Data Evidence
 
-### Root Cause
-
-In `supabase/functions/_shared/sports-config.ts` line 50:
-```typescript
-detectionPatterns: [
-  /\bnhl\b/i,
-  /rangers|islanders|.../i,  // "rangers" matches "Queens Park Rangers"
-]
+```
+polymarket_h2h_cache:
+  event_title: Queens Park Rangers FC vs. Coventry City FC
+  extracted_league: NHL   ← WRONG
+  sport_category: NHL     ← WRONG
+  monitoring_status: watching/triggered
 ```
 
-The regex `rangers` is not anchored, so it matches any text containing "Rangers" anywhere.
+### Solution
 
-### Two-Part Solution
+Delete the misclassified cache entries to stop them from being monitored:
 
-**Part 1: Fix NHL Detection Pattern (Prevention)**
-
-Make team name patterns more specific to avoid false positives:
-
-```typescript
-// Current (broken):
-/rangers|islanders|devils|.../i
-
-// Fixed (anchored to prevent false matches):
-/\b(new york\s+)?rangers\b/i  // Requires "Rangers" or "New York Rangers"
-/\bny\s*rangers\b/i           // Also matches "NY Rangers"
+```sql
+DELETE FROM polymarket_h2h_cache 
+WHERE event_title ILIKE '%queens park rangers%';
 ```
 
-Or better - use multi-word patterns:
-```typescript
-// Instead of just "rangers", require context:
-/new york rangers|ny rangers|nyr/i
-```
-
-**Part 2: Add English Football Support (Future Feature)**
-
-Add English Championship / EPL to `SPORTS_CONFIG`:
-
-```typescript
-efl_championship: {
-  name: 'EFL',
-  polymarketUrl: 'https://polymarket.com/sports/soccer/efl',
-  oddsApiSport: 'soccer_efl_champ',  // The Odds API endpoint
-  oddsApiMarkets: 'h2h',
-  teamMap: {
-    'qpr': 'Queens Park Rangers',
-    'cov': 'Coventry City',
-    // ... other Championship teams
-  },
-  detectionPatterns: [
-    /\befl\b/i,
-    /championship/i,
-    /coventry|qpr|queens park|cardiff|swansea|.../i,
-  ],
-}
-```
-
-Note: English football is a **3-way market** (Home/Draw/Away), which requires different edge calculation logic than 2-way H2H. This is a significant architecture consideration.
-
-### Immediate Action: Expire This Signal
-
-The QPR vs Coventry signal must be expired immediately as it's based on completely incorrect data.
+Also expire any active signals:
 
 ```sql
 UPDATE signal_opportunities 
 SET status = 'expired' 
-WHERE event_name ILIKE '%queens park rangers%' 
+WHERE event_name ILIKE '%queens park rangers%'
    OR event_name ILIKE '%coventry%';
 ```
 
-### Files to Modify
+### Files Modified
 
-| File | Change |
-|------|--------|
-| `supabase/functions/_shared/sports-config.ts` | Fix NHL detection patterns to require full team names like "New York Rangers" instead of just "Rangers" |
-| `supabase/functions/polymarket-monitor/index.ts` | Ensure sport detection fallback doesn't misclassify |
-| Database | Expire the QPR vs Coventry signal |
+None — this is a data cleanup only.
 
-### Technical Considerations for English Football
+### Expected Outcome
 
-Adding full English football support requires:
-1. 3-way market handling (Win/Draw/Win) vs current 2-way (Home/Away)
-2. Draw probability must be factored into edge calculations
-3. Different API endpoint (`soccer_efl_champ`, `soccer_england_league1`, etc.)
-4. May need separate "fair value" calculation that accounts for draws
+1. QPR markets removed from monitoring queue
+2. No new signals generated for this match
+3. Future English football markets will be ignored (no detection pattern match) until full soccer support is added
 
-This is a larger architectural change if you want to fully support European football markets.
+### Architectural Note
 
-### Expected Outcome After Fix
-
-1. QPR vs Coventry signal expires immediately
-2. Future matches with "Rangers" in team name won't be misclassified as NHL
-3. English football markets will be skipped (until full support is added) rather than incorrectly processed
+The detection pattern fix deployed earlier prevents **future** misclassification. This data cleanup resolves the **existing** cached entries that were already tagged incorrectly.
 
