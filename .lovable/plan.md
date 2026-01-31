@@ -1,118 +1,173 @@
 
 
-# Fix Polymarket Direct Links
+# Fix Countdown Timer Accuracy + "NO" Terminology
 
-## Problem Identified
-The Polymarket links aren't working because:
+## Summary
+Two issues need fixing:
 
-1. **Firecrawl games (majority of signals) don't have slugs** - The sync function stores slugs from Gamma API events, but Firecrawl-scraped games are upserted without the `polymarket_slug` field
-2. **When signals are updated, slugs aren't copied** - The UPDATE path in polymarket-monitor doesn't include `polymarket_slug`
-3. **Most signals have NULL slugs** - Query confirmed only 1 out of 10 recent signals has a slug
+1. **Countdown times are wrong** - The Odds API is returning incorrect commence times (midnight UTC instead of actual game times), causing 8h games to show as 20h away
+2. **"NO" terminology is confusing** - Signals show "side: NO" which is confusing since Polymarket doesn't support lay bets. Should display the actual team being bet on.
 
-## Data Evidence
-```sql
--- Most signals have NULL polymarket_slug:
-nhl-min-edm-2026-01-31 -- ONLY this one has a slug
-NULL -- Memphis Grizzlies vs New Orleans Pelicans
-NULL -- Toronto Raptors vs Orlando Magic
-NULL -- Lakers, Blue Jackets, Michigan, Seahawks, etc.
+---
+
+## Issue 1: Blue Jackets vs Blues Signal
+
+The signal **IS in the database and active**. It should be visible on the Terminal. Possible reasons it's not showing:
+
+- You may have scrolled past it
+- There might be a filter applied
+- The page might need a refresh
+
+**Verification step:** Click the "Refresh" button on the signal feed or reload the page.
+
+---
+
+## Issue 2: Wrong Countdown Times
+
+### Root Cause
+The Odds API is returning `2026-02-01 00:00:00+00` (midnight UTC on Feb 1st) for the St. Louis Blues vs Columbus Blue Jackets game. This appears to be **incorrect data from the API** - they're returning end-of-day or a placeholder instead of the actual puck drop time.
+
+**Evidence from logs:**
+```
+[FIRECRAWL] Matched Columbus Blue Jackets vs St. Louis Blues -> Kickoff: 2026-02-01T00:00:00.000Z
 ```
 
-## Solution
+**Calculation:**
+- Current time: ~3:45am UTC (2:45pm AEDT)
+- Stored game time: Feb 1, 00:00 UTC (Feb 1, 11:00am AEDT)
+- Result: Shows ~20h countdown
 
-### Part 1: Generate Slugs for Firecrawl Games (Backend Fix)
+But you're saying the game is ~8h 15m away (around 11pm-12am AEDT tonight).
+
+### Technical Solution
 
 **File: `supabase/functions/polymarket-sync-24h/index.ts`**
 
-When upserting Firecrawl games, generate the slug in the format Polymarket uses:
-`{sport}-{team1code}-{team2code}-{YYYY-MM-DD}`
+Add fallback logic to detect when Odds API returns suspicious "midnight" times and use a more reasonable estimate:
 
-Current upsert (line ~657):
 ```typescript
-const { error: fcError } = await supabase
-  .from('polymarket_h2h_cache')
-  .upsert({
-    condition_id: conditionId,
-    event_title: `${game.team1Name} vs ${game.team2Name}`,
-    // NO polymarket_slug!
-  });
+// In findOddsApiCommenceTime function
+// If commence_time is exactly midnight UTC, it's likely wrong
+const commenceTime = new Date(game.commence_time);
+const isExactMidnight = commenceTime.getUTCHours() === 0 && 
+                        commenceTime.getUTCMinutes() === 0;
+
+if (isExactMidnight) {
+  console.log(`[WARN] Suspicious midnight time for ${game.home_team} vs ${game.away_team} - likely inaccurate`);
+  // Don't use this as a match - fall through to next source
+  continue;
+}
 ```
 
-Add slug generation:
-```typescript
-// Generate Polymarket-style slug: nhl-min-edm-2026-01-31
-const dateStr = eventDate.toISOString().split('T')[0]; // YYYY-MM-DD
-const generatedSlug = `${sportCode}-${game.team1Code}-${game.team2Code}-${dateStr}`;
-
-const { error: fcError } = await supabase
-  .from('polymarket_h2h_cache')
-  .upsert({
-    // ... existing fields
-    polymarket_slug: generatedSlug, // NEW: Generated slug for direct URLs
-  });
-```
+Alternatively, **don't trust midnight UTC times from Odds API** and instead:
+1. Mark the signal as having uncertain timing
+2. Show "Time TBD" instead of a misleading countdown
 
 ---
 
-### Part 2: Copy Slug When Updating Signals (Backend Fix)
+## Issue 3: "NO" Terminology in Signals + Stats
 
-**File: `supabase/functions/polymarket-monitor/index.ts`**
+### Problem
+- Memphis Grizzlies vs New Orleans Pelicans shows "side: NO" 
+- The SMS said "BET ON New Orleans Pelicans TO WIN"
+- But the bet history shows "NO" which is confusing
 
-When updating an existing signal (lines 1509-1523), the slug isn't being included:
+### How It Works
+In Polymarket H2H markets:
+- **YES = Home team wins** (Team A in "Team A vs Team B")
+- **NO = Away team wins** (Team B)
+
+So "side: NO" on Memphis vs New Orleans means: **Bet on New Orleans Pelicans to win** (the away team).
+
+### Solution
+The Stats page already has the fix from earlier to display team names instead of YES/NO. We need to ensure:
+
+1. **Signal cards** also show the team name, not YES/NO
+2. **SMS alerts** already show the correct team (New Orleans Pelicans) which is correct!
+
+**File: `src/components/terminal/SignalCard.tsx`**
+
+Update the "BUY YES" / "BUY NO" display to show the actual team being bet on:
 
 ```typescript
-// Current UPDATE path - missing polymarket_slug
-const { data, error } = await supabase
-  .from('signal_opportunities')
-  .update({
-    ...signalData,
-    side: betSide,
-    // polymarket_slug NOT included here!
-  })
-```
-
-Fix: Also update the slug on existing signals:
-```typescript
-const polymarketSlug = cache?.polymarket_slug || null;
-
-const { data, error } = await supabase
-  .from('signal_opportunities')
-  .update({
-    ...signalData,
-    side: betSide,
-    polymarket_slug: polymarketSlug, // NEW: Update slug on existing signals
-  })
-```
-
----
-
-### Part 3: Improve Frontend Fallback (Already Done)
-
-The frontend code in SignalCard.tsx already has the correct URL generation logic from the earlier change:
-```typescript
-const getPolymarketDirectUrl = (): string | null => {
-  const slug = (signal as any).polymarket_slug;
-  if (!slug) return null;
-  
-  // Extract sport, calculate week, build URL
-  return `https://polymarket.com/sports/${sport}/games/week/${weekNumber}/${slug}`;
+// Parse home/away from event title
+const getPickedTeam = (): string => {
+  const vsMatch = signal.event_name.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
+  if (!vsMatch) return signal.side;
+  const [, teamA, teamB] = vsMatch;
+  return signal.side === 'YES' ? teamA.trim() : teamB.trim();
 };
-```
 
-The issue is just that the slug is NULL because of the backend problems above.
+// Display: "BUY Minnesota Wild" instead of "BUY NO"
+```
 
 ---
 
-## Summary of Changes
+## Changes Summary
 
 | File | Change |
 |------|--------|
-| `supabase/functions/polymarket-sync-24h/index.ts` | Generate `polymarket_slug` for Firecrawl games |
-| `supabase/functions/polymarket-monitor/index.ts` | Copy `polymarket_slug` when updating existing signals |
+| `supabase/functions/polymarket-sync-24h/index.ts` | Skip midnight UTC times from Odds API as likely inaccurate |
+| `src/components/terminal/SignalCard.tsx` | Display team name instead of YES/NO |
 
-## Expected Result
+---
+
+## Technical Details
+
+### Midnight Time Detection
+```typescript
+// Add to findOddsApiCommenceTime() function
+function findOddsApiCommenceTime(team1Name: string, team2Name: string): Date | null {
+  // ... existing matching code ...
+  
+  for (const game of oddsApiGames) {
+    // ... existing matching ...
+    
+    if ((matches1Home && matches2Away) || (matches1Away && matches2Home)) {
+      const commenceTime = new Date(game.commence_time);
+      
+      // NEW: Skip suspicious midnight times (likely API data quality issue)
+      const isExactMidnight = commenceTime.getUTCHours() === 0 && 
+                              commenceTime.getUTCMinutes() === 0 &&
+                              commenceTime.getUTCSeconds() === 0;
+      
+      if (isExactMidnight) {
+        console.log(`[WARN] Skipping midnight UTC time for ${game.home_team} vs ${game.away_team}`);
+        continue; // Try next match
+      }
+      
+      if (!isNaN(commenceTime.getTime())) {
+        return commenceTime;
+      }
+    }
+  }
+  
+  return null;
+}
+```
+
+### Team Name Display in SignalCard
+```typescript
+// Add helper function
+const getPickedTeam = (): string => {
+  const vsMatch = signal.event_name.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
+  if (!vsMatch) return signal.side === 'YES' ? 'Home' : 'Away';
+  const [, teamA, teamB] = vsMatch;
+  return signal.side === 'YES' ? teamA.trim() : teamB.trim();
+};
+
+// Replace "BUY YES" / "BUY NO" display with:
+<span className={`text-xs font-bold ${signal.side === 'YES' ? 'text-green-400' : 'text-red-400'}`}>
+  BUY {getPickedTeam()}
+</span>
+```
+
+---
+
+## Expected Results
+
 After these fixes:
-1. New Firecrawl-scraped games will have slugs like `nhl-min-edm-2026-01-31`
-2. Existing signals will get slugs when they're updated by the monitor
-3. The "Trade on Poly" button will open the correct game page directly
+1. **Midnight times will be skipped** - Games with suspicious 00:00 UTC times will fall back to "Check time" display instead of showing wrong countdowns
+2. **Team names instead of YES/NO** - "BUY Minnesota Wild" instead of "BUY NO"
+3. **Consistent terminology** - SMS, terminal, and stats all show team names
 
