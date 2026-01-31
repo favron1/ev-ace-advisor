@@ -689,9 +689,7 @@ async function sendSmsAlert(
     const timeUntil = formatTimeUntil(eventDate);
     const netEv = (netEdge * stakeAmount).toFixed(2);
     
-    // Directional labeling: BUY YES vs BUY NO
-    const betDirectionLabel = betSide === 'YES' ? 'BUY YES' : 'BUY NO';
-    const polyPriceLabel = betSide === 'YES' ? 'Poly YES' : 'Poly NO';
+    // Team-centric labeling: BET ON [team] TO WIN
     const tierEmoji = signalTier === 'elite' ? '🚨' : '🎯';
     
     // Movement direction text
@@ -702,8 +700,8 @@ async function sendSmsAlert(
         : '';
     
     const message = `${tierEmoji} ${signalTier.toUpperCase()}: ${event.event_name}
-${betDirectionLabel}: ${teamName}
-${polyPriceLabel}: ${(polyPrice * 100).toFixed(0)}¢ ($${(volume / 1000).toFixed(0)}K)
+BET ON ${teamName} TO WIN
+Poly: ${(polyPrice * 100).toFixed(0)}¢ ($${(volume / 1000).toFixed(0)}K)
 Book: ${(bookmakerFairProb * 100).toFixed(0)}%
 Edge: +${(rawEdge * 100).toFixed(1)}% raw, +$${netEv} net EV
 Sharp books ${movementText}

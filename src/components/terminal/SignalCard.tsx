@@ -422,22 +422,10 @@ export function SignalCard({
             
             <h3 className="font-medium text-sm truncate mb-1">{signal.event_name}</h3>
             
-            {/* Clear bet recommendation - SIMPLIFIED for Polymarket mechanics */}
-            {/* On Polymarket H2H: "Team A vs Team B" → YES = Team A wins, NO = Team B wins */}
-            {/* So we need to translate BUY NO into "Bet on OTHER team to win" */}
+            {/* Clear bet recommendation - SIMPLIFIED: Use recommended_outcome directly */}
             {(() => {
-              // Parse teams from event name: "Blue Jackets vs. Blackhawks" 
-              const vsMatch = signal.event_name.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
-              const homeTeam = vsMatch?.[1]?.trim(); // Blue Jackets (YES side)
-              const awayTeam = vsMatch?.[2]?.trim(); // Blackhawks (NO side)
-              
-              // Determine which team to bet on based on side
-              // BUY YES = bet on home team, BUY NO = bet on away team
-              const teamToBetOn = signal.side === 'YES' ? homeTeam : awayTeam;
-              const isAwayTeamBet = signal.side === 'NO';
-              
-              // bookmakerProbFair is already for the MATCHED TEAM (the team we're betting on)
-              // so no flipping needed - just use it directly
+              // Use recommended_outcome from backend as the single source of truth
+              const teamToBetOn = signal.recommended_outcome;
               const displayFairProb = bookmakerProbFair * 100;
               
               return (
@@ -451,28 +439,11 @@ export function SignalCard({
                         BET SIDE UNKNOWN
                       </Badge>
                     ) : teamToBetOn ? (
-                      <>
-                        {/* Clear action: BET [Team] TO WIN - always green since you're buying shares */}
-                        <Badge 
-                          className="bg-green-500/20 text-green-400 hover:bg-green-500/30 font-semibold"
-                        >
-                          <Target className="h-3 w-3 mr-1" />
-                          BET: {teamToBetOn} TO WIN
-                        </Badge>
-                        {/* Small technical indicator for which Polymarket token */}
-                        <Badge 
-                          variant="outline"
-                          className="text-xs text-muted-foreground"
-                        >
-                          {signal.side === 'YES' ? 'YES shares' : 'NO shares'}
-                        </Badge>
-                      </>
-                    ) : betTarget ? (
                       <Badge 
                         className="bg-green-500/20 text-green-400 hover:bg-green-500/30 font-semibold"
                       >
                         <Target className="h-3 w-3 mr-1" />
-                        BET: {betTarget}
+                        BET ON {teamToBetOn} TO WIN
                       </Badge>
                     ) : (
                       <Badge 
@@ -491,13 +462,6 @@ export function SignalCard({
                   ) : teamToBetOn ? (
                     <p className="text-xs text-muted-foreground">
                       Sharp books value <span className="font-medium text-foreground">{teamToBetOn}</span> at {displayFairProb.toFixed(1)}% to win
-                      {signalFactors?.confirming_books && (
-                        <span className="ml-1">• {signalFactors.confirming_books} books</span>
-                      )}
-                    </p>
-                  ) : betTarget ? (
-                    <p className="text-xs text-muted-foreground">
-                      Back <span className="font-medium text-foreground">{betTarget}</span> • {(bookmakerProbFair * 100).toFixed(1)}% fair prob
                       {signalFactors?.confirming_books && (
                         <span className="ml-1">• {signalFactors.confirming_books} books</span>
                       )}

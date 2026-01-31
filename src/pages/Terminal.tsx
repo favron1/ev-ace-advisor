@@ -30,7 +30,6 @@ export default function Terminal() {
   const [showTrueEdgesOnly, setShowTrueEdgesOnly] = useState(false);
   const [showBettableOnly, setShowBettableOnly] = useState(false);
   const [showMovementConfirmedOnly, setShowMovementConfirmedOnly] = useState(true); // Default ON
-  const [showBuyYesOnly, setShowBuyYesOnly] = useState(false); // NEW: BUY YES only filter
 
   // Notifications hook
   const {
@@ -166,7 +165,6 @@ export default function Terminal() {
     trueEdgesOnly: showTrueEdgesOnly,
     bettableOnly: showBettableOnly,
     movementConfirmedOnly: showMovementConfirmedOnly,
-    buyYesOnly: showBuyYesOnly, // NEW: Pass buy yes only filter
   });
 
   if (!user) {
@@ -195,14 +193,12 @@ export default function Terminal() {
           showTrueEdgesOnly={showTrueEdgesOnly}
           showBettableOnly={showBettableOnly}
           showMovementConfirmedOnly={showMovementConfirmedOnly}
-          showBuyYesOnly={showBuyYesOnly}
           onMinEdgeChange={setMinEdge}
           onMinConfidenceChange={setMinConfidence}
           onUrgencyChange={setSelectedUrgency}
           onShowTrueEdgesOnlyChange={setShowTrueEdgesOnly}
           onShowBettableOnlyChange={setShowBettableOnly}
           onShowMovementConfirmedOnlyChange={setShowMovementConfirmedOnly}
-          onShowBuyYesOnlyChange={setShowBuyYesOnly}
         />
 
         {/* Main Content */}
