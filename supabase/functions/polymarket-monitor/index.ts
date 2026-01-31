@@ -586,9 +586,11 @@ async function fetchClobPrices(tokenIds: string[]): Promise<Map<string, { bid: n
       for (const [tokenId, priceData] of Object.entries(data)) {
         if (typeof priceData === 'object' && priceData !== null) {
           const pd = priceData as Record<string, string>;
+          // BUY = what you pay to buy = ask price
+          // SELL = what you receive when selling = bid price
           priceMap.set(tokenId, {
-            bid: parseFloat(pd.BUY || '0'),
-            ask: parseFloat(pd.SELL || '0'),
+            bid: parseFloat(pd.SELL || '0'),
+            ask: parseFloat(pd.BUY || '0'),
           });
         }
       }
@@ -1044,24 +1046,28 @@ Deno.serve(async (req) => {
         const cache = [...cacheMap.values()].find(c => c.condition_id === signal.polymarket_condition_id);
         if (!cache?.token_id_yes) continue;
         
-        // Get fresh price from CLOB
+        // Get fresh price from CLOB, or fall back to cache
+        let freshPrice = 0;
         if (clobPrices.has(cache.token_id_yes)) {
           const prices = clobPrices.get(cache.token_id_yes)!;
-          const freshPrice = prices.ask > 0 ? prices.ask : prices.bid;
+          freshPrice = prices.ask > 0 ? prices.ask : prices.bid;
+        } else {
+          // Fallback to cache yes_price if CLOB didn't return this token
+          freshPrice = cache.yes_price || 0;
+        }
+        
+        if (freshPrice > 0) {
+          await supabase
+            .from('signal_opportunities')
+            .update({
+              polymarket_yes_price: freshPrice,
+              polymarket_price: freshPrice,
+              polymarket_volume: cache.volume || 0,
+              polymarket_updated_at: now.toISOString(),
+            })
+            .eq('id', signal.id);
           
-          if (freshPrice > 0) {
-            await supabase
-              .from('signal_opportunities')
-              .update({
-                polymarket_yes_price: freshPrice,
-                polymarket_price: freshPrice,
-                polymarket_volume: cache.volume || 0,
-                polymarket_updated_at: now.toISOString(),
-              })
-              .eq('id', signal.id);
-            
-            priceUpdatesCount++;
-          }
+          priceUpdatesCount++;
         }
       }
       
