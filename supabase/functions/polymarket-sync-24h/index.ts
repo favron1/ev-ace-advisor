@@ -324,6 +324,25 @@ Deno.serve(async (req) => {
     // Helper: Check if event is within 24-hour window using multiple date sources
     // This fixes NBA/Tennis where endDate is set to season end, not game day
     function isWithin24HourWindow(event: any, now: Date, in24Hours: Date): { inWindow: boolean; dateSource: string; resolvedDate: Date | null } {
+      // 0. NEW PRIORITY: Parse date from Polymarket slug (e.g., "nhl-det-col-2026-02-02")
+      // This is the MOST RELIABLE source for sports events - prevents cross-game contamination
+      const eventSlug = event.slug || '';
+      const slugDateMatch = eventSlug.match(/(\d{4}-\d{2}-\d{2})$/);
+      if (slugDateMatch) {
+        const slugDate = new Date(slugDateMatch[1] + 'T23:59:59Z');
+        if (!isNaN(slugDate.getTime())) {
+          // If slug date is within 24h window, use it as authoritative source
+          if (slugDate >= now && slugDate <= in24Hours) {
+            console.log(`[POLY-SYNC-24H] SLUG DATE MATCH: "${event.title}" slug=${eventSlug} → ${slugDateMatch[1]} (in window)`);
+            return { inWindow: true, dateSource: 'slug', resolvedDate: slugDate };
+          }
+          // If slug date is OUTSIDE 24h window, reject IMMEDIATELY
+          // This prevents Odds API from matching to wrong game (e.g., today's game for a Feb 2 market)
+          console.log(`[POLY-SYNC-24H] SLUG DATE OUTSIDE WINDOW: "${event.title}" slug=${eventSlug} → ${slugDateMatch[1]} (>24h away) - REJECTING`);
+          return { inWindow: false, dateSource: 'slug-outside', resolvedDate: null };
+        }
+      }
+      
       // 1. Try startDate first (most accurate for actual game time)
       if (event.startDate) {
         const startDate = new Date(event.startDate);
@@ -381,8 +400,8 @@ Deno.serve(async (req) => {
         }
       }
       
-      // 4. NEW: Cross-reference with Odds API schedule
-      // Extract team names from Polymarket title and match against today's games
+      // 4. Cross-reference with Odds API schedule (ONLY if no slug date available)
+      // This is a fallback for markets without date-formatted slugs
       const title = event.title || '';
       const titleNorm = normalizeForMatch(title);
       
