@@ -183,21 +183,15 @@ export function SignalCard({
     };
   };
 
-  // Generate Polymarket direct URL using slug from backend (FIXED)
+  // Generate Polymarket direct URL using slug from backend
+  // NOTE: The /markets?conditionId= route does NOT work on Polymarket frontend
+  // Only slug-based URLs work: /event/{slug}
   const getPolymarketDirectUrl = (): string | null => {
-    // Priority 1: Use slug from backend (most reliable)
     const slug = (signal as any).polymarket_slug;
     if (slug) {
       return `https://polymarket.com/event/${slug}`;
     }
-    
-    // Priority 2: Use condition_id for direct market access (if it's a hex hash)
-    const conditionId = (signal as any).polymarket_condition_id;
-    if (conditionId && conditionId.startsWith('0x')) {
-      return `https://polymarket.com/markets?conditionId=${conditionId}`;
-    }
-    
-    return null; // Fall through to search
+    return null; // Slug is the ONLY reliable direct URL format
   };
   
   // Enhanced fallback search URL with smarter query construction
@@ -587,35 +581,53 @@ export function SignalCard({
         <div className="flex items-center gap-2 mt-4 pt-3 border-t border-border">
           {isTrueArbitrage && signal.execution ? (
             <>
+              {/* Primary action: Direct link to Polymarket (opens immediately) */}
+              <Button 
+                size="sm" 
+                variant="outline"
+                className="gap-1 bg-primary/10 hover:bg-primary/20 text-primary border-primary/30"
+                asChild
+              >
+                <a 
+                  href={getPolymarketDirectUrl() || getPolymarketSearchUrl()}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <ExternalLink className="h-3 w-3" />
+                  {getPolymarketDirectUrl() ? 'Trade on Poly' : 'Find on Poly'}
+                </a>
+              </Button>
+              {/* Secondary: dropdown with copy option */}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button 
                     size="sm" 
-                    variant="outline"
-                    className="gap-1 bg-primary/10 hover:bg-primary/20 text-primary border-primary/30"
+                    variant="ghost"
+                    className="px-2"
                   >
-                    <Link className="h-3 w-3" />
-                    Trade on Poly
-                    <ChevronDown className="h-3 w-3" />
+                    <ChevronDown className="h-4 w-4" />
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-56 bg-popover border border-border z-50">
-                  {getPolymarketDirectUrl() && (
-                    <>
-                      <DropdownMenuItem asChild>
-                        <a 
-                          href={getPolymarketDirectUrl()!}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="cursor-pointer flex items-center gap-2"
-                        >
-                          <ExternalLink className="h-4 w-4" />
-                          Open Market Directly
-                        </a>
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                    </>
+                  {getPolymarketDirectUrl() ? (
+                    <DropdownMenuItem asChild>
+                      <a 
+                        href={getPolymarketDirectUrl()!}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="cursor-pointer flex items-center gap-2"
+                      >
+                        <ExternalLink className="h-4 w-4" />
+                        Open Market Directly
+                      </a>
+                    </DropdownMenuItem>
+                  ) : (
+                    <DropdownMenuItem disabled className="text-muted-foreground flex items-center gap-2">
+                      <AlertCircle className="h-4 w-4" />
+                      No direct link available
+                    </DropdownMenuItem>
                   )}
+                  <DropdownMenuSeparator />
                   <DropdownMenuItem asChild>
                     <a 
                       href={getPolymarketSearchUrl()}
@@ -681,21 +693,36 @@ export function SignalCard({
                   No Poly Market
                 </Button>
               ) : (
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button 
-                      size="sm" 
-                      variant="outline"
-                      className="gap-1 bg-primary/10 hover:bg-primary/20 text-primary border-primary/30"
+                <>
+                  {/* Primary action: Direct link to Polymarket */}
+                  <Button 
+                    size="sm" 
+                    variant="outline"
+                    className="gap-1 bg-primary/10 hover:bg-primary/20 text-primary border-primary/30"
+                    asChild
+                  >
+                    <a 
+                      href={getPolymarketDirectUrl() || getPolymarketSearchUrl()}
+                      target="_blank"
+                      rel="noopener noreferrer"
                     >
-                      <Link className="h-3 w-3" />
-                      {getPolymarketDirectUrl() ? 'Open Poly' : 'Search Poly'}
-                      <ChevronDown className="h-3 w-3" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start" className="w-56 bg-popover border border-border z-50">
-                    {getPolymarketDirectUrl() && (
-                      <>
+                      <ExternalLink className="h-3 w-3" />
+                      {getPolymarketDirectUrl() ? 'Open Poly' : 'Find on Poly'}
+                    </a>
+                  </Button>
+                  {/* Secondary: dropdown with alternatives */}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button 
+                        size="sm" 
+                        variant="ghost"
+                        className="px-2"
+                      >
+                        <ChevronDown className="h-4 w-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start" className="w-56 bg-popover border border-border z-50">
+                      {getPolymarketDirectUrl() ? (
                         <DropdownMenuItem asChild>
                           <a 
                             href={getPolymarketDirectUrl()!}
@@ -707,27 +734,32 @@ export function SignalCard({
                             Open Market Directly
                           </a>
                         </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                      </>
-                    )}
-                    <DropdownMenuItem asChild>
-                      <a 
-                        href={getPolymarketSearchUrl()}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="cursor-pointer flex items-center gap-2"
-                      >
-                        <Search className="h-4 w-4" />
-                        Search on Polymarket
-                      </a>
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem onClick={copyLinkToClipboard} className="cursor-pointer flex items-center gap-2">
-                      <Copy className="h-4 w-4" />
-                      Copy link to clipboard
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                      ) : (
+                        <DropdownMenuItem disabled className="text-muted-foreground flex items-center gap-2">
+                          <AlertCircle className="h-4 w-4" />
+                          No direct link available
+                        </DropdownMenuItem>
+                      )}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem asChild>
+                        <a 
+                          href={getPolymarketSearchUrl()}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="cursor-pointer flex items-center gap-2"
+                        >
+                          <Search className="h-4 w-4" />
+                          Search on Polymarket
+                        </a>
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onClick={copyLinkToClipboard} className="cursor-pointer flex items-center gap-2">
+                        <Copy className="h-4 w-4" />
+                        Copy link to clipboard
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </>
               )}
               <Button 
                 size="sm" 
