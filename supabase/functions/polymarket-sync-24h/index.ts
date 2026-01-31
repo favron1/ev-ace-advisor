@@ -557,6 +557,19 @@ Deno.serve(async (req) => {
         // Either team1=home & team2=away, OR team1=away & team2=home
         if ((matches1Home && matches2Away) || (matches1Away && matches2Home)) {
           const commenceTime = new Date(game.commence_time);
+          
+          // CRITICAL: Skip suspicious "midnight UTC" times (likely API data quality issue)
+          // Odds API sometimes returns 00:00:00 UTC as a placeholder instead of actual game time
+          // This causes 8h games to show as 20h away
+          const isExactMidnight = commenceTime.getUTCHours() === 0 && 
+                                  commenceTime.getUTCMinutes() === 0 &&
+                                  commenceTime.getUTCSeconds() === 0;
+          
+          if (isExactMidnight) {
+            console.log(`[WARN] Skipping midnight UTC time for ${game.home_team} vs ${game.away_team} - likely inaccurate`);
+            continue; // Try next match or fall through to fallback
+          }
+          
           if (!isNaN(commenceTime.getTime())) {
             return commenceTime;
           }
