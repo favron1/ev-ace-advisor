@@ -1467,9 +1467,56 @@ Deno.serve(async (req) => {
 
     for (const event of eventsToProcess) {
       try {
-        // Check if event started
+        // ============= ROOT CAUSE FIX: Cross-reference bookmaker commence_time =============
+        // Polymarket often has placeholder times (23:59:59). Use bookmaker data as source of truth.
         const eventStart = new Date(event.commence_time);
-        if (eventStart <= now) {
+        const cache = cacheMap.get(event.polymarket_condition_id);
+        
+        // Check if Polymarket time is a placeholder (midnight or end-of-day)
+        const isPlaceholder = isPlaceholderPolymarketTime(eventStart);
+        
+        // If placeholder, try to find real time from bookmaker data
+        let effectiveStartTime = eventStart;
+        if (isPlaceholder) {
+          // Look for matching bookmaker event to get real commence_time
+          const sport = cache?.extracted_league || 'Unknown';
+          const bookmakerGames = allBookmakerData.get(sport) || [];
+          
+          // Try to find a matching game with real commence_time
+          for (const bookGame of bookmakerGames) {
+            const bookEventName = bookGame.event_name?.toLowerCase() || '';
+            const polyEventName = event.event_name?.toLowerCase() || '';
+            
+            // Simple match: both team names appear in both strings
+            const polyTeams = polyEventName.split(/\s+vs\.?\s+/i);
+            if (polyTeams.length === 2) {
+              const [team1, team2] = polyTeams.map(t => t.trim().toLowerCase());
+              if (bookEventName.includes(team1.split(' ').pop() || '') && 
+                  bookEventName.includes(team2.split(' ').pop() || '')) {
+                if (bookGame.commence_time) {
+                  const bookTime = new Date(bookGame.commence_time);
+                  if (!isNaN(bookTime.getTime())) {
+                    effectiveStartTime = bookTime;
+                    console.log(`[POLY-MONITOR] PLACEHOLDER_TIME_FIXED`, {
+                      event: event.event_name,
+                      polyPlaceholder: eventStart.toISOString(),
+                      bookmakerTime: effectiveStartTime.toISOString()
+                    });
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        }
+        
+        // Check if event started using the best available time
+        if (effectiveStartTime <= now) {
+          console.log(`[POLY-MONITOR] EVENT_ALREADY_STARTED`, {
+            event: event.event_name,
+            startTime: effectiveStartTime.toISOString(),
+            wasPlaceholder: isPlaceholder
+          });
           await supabase
             .from('event_watch_state')
             .update({ watch_state: 'expired', updated_at: now.toISOString() })
@@ -1478,8 +1525,6 @@ Deno.serve(async (req) => {
           continue;
         }
 
-        // Get cache info
-        const cache = cacheMap.get(event.polymarket_condition_id);
         const sport = cache?.extracted_league || 'Unknown';
         const marketType = cache?.market_type || 'h2h';
         const tokenIdYes = cache?.token_id_yes;
@@ -1541,29 +1586,63 @@ Deno.serve(async (req) => {
         const MIN_SANE_PRICE = 0.05;  // 5 cents
         const MAX_SANE_PRICE = 0.95;  // 95 cents
         
+        // RESOLVED MARKET DETECTION: Prices near 0% or 100% indicate game has ended
+        const RESOLVED_THRESHOLD_LOW = 0.02;   // 2 cents = market resolved
+        const RESOLVED_THRESHOLD_HIGH = 0.98;  // 98 cents = market resolved
+        
         // Try CLOB batch prices first
         if (tokenIdYes && clobPrices.has(tokenIdYes)) {
           const prices = clobPrices.get(tokenIdYes)!;
           bestBid = prices.bid;
           bestAsk = prices.ask;
           
+          // ROOT CAUSE FIX: Detect RESOLVED markets (game ended) vs garbage data
+          // If CLOB returns < 2% or > 98%, the market is RESOLVED - skip entirely
+          if (bestAsk <= RESOLVED_THRESHOLD_LOW || bestAsk >= RESOLVED_THRESHOLD_HIGH) {
+            console.log(`[POLY-MONITOR] MARKET_RESOLVED_SKIP`, {
+              event: event.event_name,
+              clobAsk: bestAsk,
+              reason: bestAsk <= RESOLVED_THRESHOLD_LOW ? 'market_resolved_no_won' : 'market_resolved_yes_won',
+              action: 'skipping_finished_game'
+            });
+            
+            // Mark event as expired in watch state
+            await supabase
+              .from('event_watch_state')
+              .update({ watch_state: 'expired', updated_at: now.toISOString() })
+              .eq('id', event.id);
+            
+            // Update cache status to reflect market is closed
+            if (event.polymarket_condition_id) {
+              await supabase
+                .from('polymarket_h2h_cache')
+                .update({ status: 'resolved' })
+                .eq('condition_id', event.polymarket_condition_id);
+            }
+            
+            eventsExpired++;
+            continue; // DO NOT create signal for finished game
+          }
+          
           // SANITY CHECK: Only use CLOB price if it's within reasonable bounds
           if (bestAsk >= MIN_SANE_PRICE && bestAsk <= MAX_SANE_PRICE) {
             livePolyPrice = bestAsk;
           } else {
-            console.log(`[POLY-MONITOR] GARBAGE_CLOB_PRICE_REJECTED`, {
+            console.log(`[POLY-MONITOR] EXTREME_PRICE_WARNING`, {
               event: event.event_name,
               clobAsk: bestAsk,
               clobBid: bestBid,
               fallbackPrice: livePolyPrice,
-              reason: bestAsk < MIN_SANE_PRICE ? 'too_low' : 'too_high'
+              reason: bestAsk < MIN_SANE_PRICE ? 'extreme_underdog' : 'heavy_favorite',
+              action: 'using_clob_price_anyway'
             });
-            // Keep the fallback livePolyPrice from cache
+            // FIXED: Use the CLOB price even for extreme values - don't fall back to stale 50% cache
+            livePolyPrice = bestAsk;
           }
           
           if (clobSpreads.has(tokenIdYes)) {
             spreadPct = clobSpreads.get(tokenIdYes)!;
-          } else if (bestBid > 0 && bestAsk > 0 && bestAsk >= MIN_SANE_PRICE && bestAsk <= MAX_SANE_PRICE) {
+          } else if (bestBid > 0 && bestAsk > 0) {
             // Convert to percentage-of-mid for consistent units with calculateNetEdge()
             const mid = (bestAsk + bestBid) / 2;
             spreadPct = mid > 0 ? (bestAsk - bestBid) / mid : null;
@@ -1624,7 +1703,7 @@ Deno.serve(async (req) => {
         const polyEventDate = cache?.event_date ? new Date(cache.event_date) : 
                               event.commence_time ? new Date(event.commence_time) : null;
         const polySlug = cache?.polymarket_slug || null;
-        const isPlaceholder = polyEventDate ? isPlaceholderPolymarketTime(polyEventDate) : false;
+        const isPlaceholderTime = polyEventDate ? isPlaceholderPolymarketTime(polyEventDate) : false;
         
         // Get the canonical book index for this sport
         const sportCode = getSportCodeFromLeague(sport);
@@ -1649,7 +1728,7 @@ Deno.serve(async (req) => {
             polyNoTeam,
             polyEventDate,
             teamMap,
-            isPlaceholder
+            isPlaceholderTime
           );
           
           // Track resolution stats
@@ -1800,7 +1879,7 @@ Deno.serve(async (req) => {
                 resolved.awayTeam,
                 polyEventDate,
                 teamMap,
-                isPlaceholder
+                isPlaceholderTime
               );
               
               if (aiCanonicalResult.match) {
