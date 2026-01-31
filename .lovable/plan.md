@@ -1,78 +1,57 @@
 
 
-# ✅ FIXED: Sharp Book Probability Display Mismatch
+# Clean Up Invalid Signals & Verify Remaining Bets
 
-## Problem Summary
+## Summary
 
-The signal card showed **"Sharp books value Blackhawks at 60.1% to win"** but actual bookmaker data showed Blackhawks at **~40%** (odds of 2.67). This caused user confusion about which team was favored.
+Yes, the **NO-side signals are NOT good bets**. They were calculated with inverted probability logic, showing positive edges when the real edges were negative.
 
-## Root Cause
+## Signals to REMOVE (False Positives)
 
-There were **TWO bugs**:
+| Event | Claimed Edge | Real Edge | Why Bad |
+|-------|-------------|-----------|---------|
+| Blackhawks (NO) | +19.0% | **-1.1%** | Bug inverted 40% underdog to 60% favorite |
+| Patriots (NO) | +16.9% | **-17%** | Bug inverted 33% underdog |
+| Flyers (NO) | +5.1% | **-3%** | Bug inverted ~47% to ~53% |
+| Michigan State (NO) | +11.4% | **-11%** | Bug inverted 39% to 61% |
+| Blue Jackets vs Blues (NO) | +6.0% | **~-6%** | Bug inverted probabilities |
 
-### Bug 1: Frontend Display Flip (SignalCard.tsx)
-The frontend incorrectly flipped `bookmakerProbFair` when displaying for NO side bets.
+These 5 signals will be dismissed.
 
-### Bug 2: Backend Edge Calculation (polymarket-monitor/index.ts)
-The edge calculation assumed `bookmakerFairProb` was for the YES side, but it was actually for the **matched team** (which could be either side).
+## Signals to VERIFY (YES-side)
 
----
+| Event | Edge | Status | Concern |
+|-------|------|--------|---------|
+| Wizards (YES) | +40% | SUSPICIOUS | 93.8% fair prob vs 50% Poly - artifact or stale data |
+| Seahawks (YES) | +26.6% | CHECK | 76.6% fair prob needs staleness check |
+| Panthers (YES) | +19.3% | LIKELY VALID | 60% vs 41% - reasonable spread |
+| Red Wings (YES) | +24.2% | LIKELY VALID | 58% vs 34% - reasonable |
+| Sabres (YES) | +10.5% | LIKELY VALID | 55% vs 45% - reasonable |
 
-## Solution Applied
+## Action Plan
 
-### Fix 1: Frontend Display (SignalCard.tsx)
-Removed the flip logic since `bookmakerProbFair` is already for the matched team.
+### Step 1: Dismiss All NO-Side Signals
+Update status to 'dismissed' for the 5 false positive signals.
 
-```typescript
-// BEFORE (WRONG):
-const displayFairProb = isAwayTeamBet 
-  ? (1 - bookmakerProbFair) * 100 
-  : bookmakerProbFair * 100;
+### Step 2: Investigate Suspicious YES Signals
+- **Wizards**: 93.8% fair prob with 50% Polymarket price is a 40%+ edge - this triggers the "high probability artifact" filter. This was likely created before that filter was active.
+- **Seahawks**: 76.6% at 50% Poly is a 26% edge - high but possible if bookmakers are sharp.
 
-// AFTER (CORRECT):
-const displayFairProb = bookmakerProbFair * 100;
-```
+### Step 3: Keep Valid YES Signals
+- Panthers, Red Wings, and Sabres signals appear mathematically valid with reasonable edges.
 
-### Fix 2: Backend Edge Calculation (polymarket-monitor/index.ts)
-Added tracking for which side the matched team is on, then normalize to YES-side probability before edge calculation.
+## Technical Changes
 
-```typescript
-// Track which side the matched team is on
-isMatchedTeamYesSide = match.targetIndex === 0;
+### File: Edge Function Call (API)
+Dismiss the 5 NO-side signals by updating their status in the database.
 
-// Normalize to YES-side probability
-const yesSideFairProb = isMatchedTeamYesSide ? bookmakerFairProb : (1 - bookmakerFairProb);
+### Validation
+After cleanup, run a fresh poll to generate new signals with the corrected edge calculation. The fix we deployed earlier will ensure new signals are calculated correctly.
 
-// Now edge calculations are correct
-const yesEdge = yesSideFairProb - livePolyPrice;
-const noEdge = (1 - yesSideFairProb) - (1 - livePolyPrice);
-```
+## Expected Result
 
----
+- 5 bad signals removed
+- 2 suspicious signals flagged for review (may keep or dismiss after checking current prices)
+- 3 valid YES signals retained
+- Fresh poll will only generate signals with true positive edges
 
-## Files Modified
-
-| File | Change |
-|------|--------|
-| `src/components/terminal/SignalCard.tsx` | Removed flip logic in two places (lines 437-443 and 517-521) |
-| `supabase/functions/polymarket-monitor/index.ts` | Added `isMatchedTeamYesSide` tracking and normalized edge calculation |
-
----
-
-## Expected Behavior After Fix
-
-For the Blackhawks example:
-- **Before**: "Sharp books value Blackhawks at 60.1% to win" (WRONG)
-- **After**: "Sharp books value Blackhawks at 39.9% to win" (CORRECT - matches bookmaker odds)
-
-For edge calculation:
-- **Before**: False 19.1% edge displayed (inverted calculation)
-- **After**: Correct edge or no signal if edge is negative
-
----
-
-## Testing
-
-1. ✅ Run a poll and check signals where `side = 'NO'`
-2. ✅ Verify displayed sharp book probability matches actual bookmaker odds
-3. ✅ Cross-reference with Sportsbet/bookmaker site to confirm accuracy
