@@ -882,7 +882,28 @@ function findBookmakerMatch(
       let noOutcomeIndex = exactIndex(noFull);
       let matchMethod = 'exact';
       
-      // TIER 2: Token overlap fallback (requires ≥2 shared tokens)
+      // TIER 2: Substring containment (handles "Canadiens" in "Montréal Canadiens")
+      if (yesOutcomeIndex === -1 || noOutcomeIndex === -1) {
+        const substringMatch = (needle: string, excludeIdx: number = -1) => {
+          const n = norm(needle);
+          return market.outcomes.findIndex((o: any, i: number) => {
+            if (i === excludeIdx) return false;
+            const h = norm(o.name);
+            return h.includes(n) || n.includes(h);
+          });
+        };
+        
+        if (yesOutcomeIndex === -1) {
+          yesOutcomeIndex = substringMatch(polyYesTeam);
+          if (yesOutcomeIndex !== -1) matchMethod = 'substring';
+        }
+        if (noOutcomeIndex === -1) {
+          noOutcomeIndex = substringMatch(polyNoTeam, yesOutcomeIndex);
+          if (noOutcomeIndex !== -1 && matchMethod !== 'substring') matchMethod = 'substring';
+        }
+      }
+      
+      // TIER 3: Token overlap fallback (requires ≥2 shared tokens)
       if (yesOutcomeIndex === -1 || noOutcomeIndex === -1) {
         const tokens = (s: string) => new Set(norm(s).split(' ').filter(Boolean));
         const overlapScore = (a: Set<string>, b: Set<string>) => {
@@ -908,14 +929,14 @@ function findBookmakerMatch(
           const { best, bestScore } = bestMatchIndex(yesTok);
           if (bestScore >= 2) {
             yesOutcomeIndex = best;
-            matchMethod = 'token-overlap';
+            if (matchMethod !== 'substring') matchMethod = 'token-overlap';
           }
         }
         if (noOutcomeIndex === -1) {
           const { best, bestScore } = bestMatchIndex(noTok, yesOutcomeIndex);
           if (bestScore >= 2) {
             noOutcomeIndex = best;
-            matchMethod = 'token-overlap';
+            if (matchMethod !== 'substring') matchMethod = 'token-overlap';
           }
         }
       }
@@ -1425,58 +1446,76 @@ Deno.serve(async (req) => {
         let matchMethod = 'direct';
 
         // TIER 2: Local nickname expansion (fast, no API)
+        // FIX: Always use original event.event_name to preserve Polymarket YES/NO order
         if (!match && bookmakerGames.length > 0) {
           const expanded = expandTeamNamesLocally(event.event_name, sport);
           if (expanded) {
+            // Filter bookmaker games to only include the matched game
+            const matchedGames = bookmakerGames.filter(g => {
+              const gameNorm = normalizeName(`${g.home_team} ${g.away_team}`);
+              return gameNorm.includes(normalizeName(expanded.homeTeam).split(' ').pop() || '') ||
+                     gameNorm.includes(normalizeName(expanded.awayTeam).split(' ').pop() || '');
+            });
+            
             match = findBookmakerMatch(
-              `${expanded.homeTeam} vs ${expanded.awayTeam}`,
+              event.event_name,  // ← Always use original Polymarket title
               event.polymarket_question || '',
               marketType,
-              bookmakerGames,
-              polyEventDate,  // Pass date for cross-game validation
-              polySlug        // Pass slug for secondary date validation
+              matchedGames.length > 0 ? matchedGames : bookmakerGames,
+              polyEventDate,
+              polySlug
             );
             if (match) {
-              console.log(`[POLY-MONITOR] NICKNAME MATCH: "${event.event_name}" → ${expanded.homeTeam} vs ${expanded.awayTeam}`);
+              console.log(`[POLY-MONITOR] NICKNAME MATCH: "${event.event_name}" → found via ${expanded.homeTeam} vs ${expanded.awayTeam}`);
               matchMethod = 'nickname';
             }
           }
         }
 
         // TIER 3: Direct Odds API fuzzy matching (fast, no AI overhead)
+        // FIX: Pass only the matched game, but use original event_name to preserve YES/NO order
         if (!match && bookmakerGames.length > 0) {
           const fuzzyResult = findDirectOddsApiMatch(event.event_name, bookmakerGames, 0.5);
           if (fuzzyResult) {
             match = findBookmakerMatch(
-              `${fuzzyResult.homeTeam} vs ${fuzzyResult.awayTeam}`,
+              event.event_name,  // ← Always use original Polymarket title
               event.polymarket_question || '',
               marketType,
-              bookmakerGames,
-              polyEventDate,  // Pass date for cross-game validation
-              polySlug        // Pass slug for secondary date validation
+              [fuzzyResult.game],  // ← Pass only the matched game
+              polyEventDate,
+              polySlug
             );
             if (match) {
+              console.log(`[POLY-MONITOR] FUZZY MATCH SUCCESS: "${event.event_name}" found via ${fuzzyResult.homeTeam} vs ${fuzzyResult.awayTeam}`);
               matchMethod = 'fuzzy';
             }
           }
         }
 
         // TIER 4: AI resolution (slower, but handles edge cases)
+        // FIX: AI only identifies which game - use original event_name to preserve YES/NO order
         if (!match && bookmakerGames.length > 0) {
           const resolved = await resolveTeamNamesWithAI(event.event_name, sport);
           
           if (resolved) {
+            // Filter to games that contain the AI-resolved teams
+            const matchedGames = bookmakerGames.filter(g => {
+              const gameNorm = normalizeName(`${g.home_team} ${g.away_team}`);
+              return gameNorm.includes(normalizeName(resolved.homeTeam).split(' ').pop() || '') ||
+                     gameNorm.includes(normalizeName(resolved.awayTeam).split(' ').pop() || '');
+            });
+            
             match = findBookmakerMatch(
-              `${resolved.homeTeam} vs ${resolved.awayTeam}`,
+              event.event_name,  // ← Always use original Polymarket title
               event.polymarket_question || '',
               marketType,
-              bookmakerGames,
-              polyEventDate,  // Pass date for cross-game validation
-              polySlug        // Pass slug for secondary date validation
+              matchedGames.length > 0 ? matchedGames : bookmakerGames,
+              polyEventDate,
+              polySlug
             );
             
             if (match) {
-              console.log(`[POLY-MONITOR] AI MATCH: "${event.event_name}" → ${resolved.homeTeam} vs ${resolved.awayTeam}`);
+              console.log(`[POLY-MONITOR] AI MATCH: "${event.event_name}" found via ${resolved.homeTeam} vs ${resolved.awayTeam}`);
               matchMethod = 'ai';
             }
           }
