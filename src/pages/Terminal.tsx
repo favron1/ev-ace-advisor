@@ -36,9 +36,9 @@ export default function Terminal() {
   const [minEdge, setMinEdge] = useState(0);
   const [minConfidence, setMinConfidence] = useState(0);
   const [selectedUrgency, setSelectedUrgency] = useState<string[]>([]);
-  const [showTrueEdgesOnly, setShowTrueEdgesOnly] = useState(true);
-  const [showBettableOnly, setShowBettableOnly] = useState(true);
-  const [showMovementConfirmedOnly, setShowMovementConfirmedOnly] = useState(true);
+  const [showTrueEdgesOnly, setShowTrueEdgesOnly] = useState(false);
+  const [showBettableOnly, setShowBettableOnly] = useState(false);
+  const [showMovementConfirmedOnly, setShowMovementConfirmedOnly] = useState(false);
 
   // Notifications hook
   const {
