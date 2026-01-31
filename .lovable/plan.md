@@ -1,105 +1,89 @@
 
 
-# Fix Countdown Timer Accuracy + "NO" Terminology
+# Fix: Enforce 24-Hour Window for All Signal Sources
 
-## Summary
-Two issues need fixing:
+## Problem Identified
 
-1. **Countdown times are wrong** - The Odds API is returning incorrect commence times (midnight UTC instead of actual game times), causing 8h games to show as 20h away
-2. **"NO" terminology is confusing** - Signals show "side: NO" which is confusing since Polymarket doesn't support lay bets. Should display the actual team being bet on.
+The Seahawks vs Patriots signal showing **8 days 20 hours** to kickoff is a clear bug. Your system is supposed to only scan events within 24 hours, but this NFL game is being displayed anyway.
 
----
+## Root Cause
 
-## Issue 1: Blue Jackets vs Blues Signal
+Two places are missing the 24-hour filter:
 
-The signal **IS in the database and active**. It should be visible on the Terminal. Possible reasons it's not showing:
+1. **Firecrawl Scraping** (polymarket-sync-24h): When games are scraped from Polymarket's sports pages, they're inserted directly into the cache **without checking if they're within 24 hours**. The Polymarket page shows NFL games scheduled for next week.
 
-- You may have scrolled past it
-- There might be a filter applied
-- The page might need a refresh
+2. **Monitor Loading** (polymarket-monitor): When loading markets to check for edges, the query only filters for `event_date > now` (future events) but doesn't cap at 24 hours.
 
-**Verification step:** Click the "Refresh" button on the signal feed or reload the page.
+## Solution
 
----
+### Fix 1: Filter Firecrawl Games by 24-Hour Window
 
-## Issue 2: Wrong Countdown Times
+**File: `supabase/functions/polymarket-sync-24h/index.ts` (lines ~640-700)**
 
-### Root Cause
-The Odds API is returning `2026-02-01 00:00:00+00` (midnight UTC on Feb 1st) for the St. Louis Blues vs Columbus Blue Jackets game. This appears to be **incorrect data from the API** - they're returning end-of-day or a placeholder instead of the actual puck drop time.
-
-**Evidence from logs:**
-```
-[FIRECRAWL] Matched Columbus Blue Jackets vs St. Louis Blues -> Kickoff: 2026-02-01T00:00:00.000Z
-```
-
-**Calculation:**
-- Current time: ~3:45am UTC (2:45pm AEDT)
-- Stored game time: Feb 1, 00:00 UTC (Feb 1, 11:00am AEDT)
-- Result: Shows ~20h countdown
-
-But you're saying the game is ~8h 15m away (around 11pm-12am AEDT tonight).
-
-### Technical Solution
-
-**File: `supabase/functions/polymarket-sync-24h/index.ts`**
-
-Add fallback logic to detect when Odds API returns suspicious "midnight" times and use a more reasonable estimate:
+Before upserting each Firecrawl game, check if the game is within 24 hours. Skip games that are too far away.
 
 ```typescript
-// In findOddsApiCommenceTime function
-// If commence_time is exactly midnight UTC, it's likely wrong
-const commenceTime = new Date(game.commence_time);
-const isExactMidnight = commenceTime.getUTCHours() === 0 && 
-                        commenceTime.getUTCMinutes() === 0;
-
-if (isExactMidnight) {
-  console.log(`[WARN] Suspicious midnight time for ${game.home_team} vs ${game.away_team} - likely inaccurate`);
-  // Don't use this as a match - fall through to next source
-  continue;
-}
+// Inside the batch.map() for Firecrawl games
+await Promise.all(batch.map(async ({ game, sport, sportCode }) => {
+  // CRITICAL FIX: Get actual commence time
+  const actualCommenceTime = findOddsApiCommenceTime(game.team1Name, game.team2Name);
+  const eventDate = actualCommenceTime || fallbackEventDate;
+  
+  // NEW: Skip games outside 24-hour window
+  const hoursUntilEvent = (eventDate.getTime() - now.getTime()) / (1000 * 60 * 60);
+  if (hoursUntilEvent > 24 || hoursUntilEvent < 0) {
+    console.log(`[FIRECRAWL] Skipping ${game.team1Name} vs ${game.team2Name} - ${hoursUntilEvent.toFixed(1)}h away (outside 24h window)`);
+    return; // Skip this game
+  }
+  
+  // ... rest of upsert logic
+}));
 ```
 
-Alternatively, **don't trust midnight UTC times from Odds API** and instead:
-1. Mark the signal as having uncertain timing
-2. Show "Time TBD" instead of a misleading countdown
+### Fix 2: Add 24-Hour Filter to Monitor Query
 
----
+**File: `supabase/functions/polymarket-monitor/index.ts` (lines ~920-942)**
 
-## Issue 3: "NO" Terminology in Signals + Stats
-
-### Problem
-- Memphis Grizzlies vs New Orleans Pelicans shows "side: NO" 
-- The SMS said "BET ON New Orleans Pelicans TO WIN"
-- But the bet history shows "NO" which is confusing
-
-### How It Works
-In Polymarket H2H markets:
-- **YES = Home team wins** (Team A in "Team A vs Team B")
-- **NO = Away team wins** (Team B)
-
-So "side: NO" on Memphis vs New Orleans means: **Bet on New Orleans Pelicans to win** (the away team).
-
-### Solution
-The Stats page already has the fix from earlier to display team names instead of YES/NO. We need to ensure:
-
-1. **Signal cards** also show the team name, not YES/NO
-2. **SMS alerts** already show the correct team (New Orleans Pelicans) which is correct!
-
-**File: `src/components/terminal/SignalCard.tsx`**
-
-Update the "BUY YES" / "BUY NO" display to show the actual team being bet on:
+Add a `.lte('event_date', in24Hours)` filter to both market loading queries.
 
 ```typescript
-// Parse home/away from event title
-const getPickedTeam = (): string => {
-  const vsMatch = signal.event_name.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
-  if (!vsMatch) return signal.side;
-  const [, teamA, teamB] = vsMatch;
-  return signal.side === 'YES' ? teamA.trim() : teamB.trim();
-};
+const now = new Date();
+const in24Hours = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
-// Display: "BUY Minnesota Wild" instead of "BUY NO"
+// First, load API-sourced markets with volume filter
+const { data: apiMarkets, error: apiLoadError } = await supabase
+  .from('polymarket_h2h_cache')
+  .select('*')
+  .in('monitoring_status', ['watching', 'triggered'])
+  .eq('status', 'active')
+  .in('extracted_league', supportedSports)
+  .or('source.is.null,source.eq.api')
+  .gte('volume', 5000)
+  .gte('event_date', now.toISOString())           // NEW: Only future events
+  .lte('event_date', in24Hours.toISOString())     // NEW: Within 24 hours
+  .order('event_date', { ascending: true })
+  .limit(150);
+
+// Second, load Firecrawl-sourced markets
+const { data: firecrawlMarkets, error: fcLoadError } = await supabase
+  .from('polymarket_h2h_cache')
+  .select('*')
+  .in('monitoring_status', ['watching', 'triggered'])
+  .eq('status', 'active')
+  .eq('source', 'firecrawl')
+  .in('extracted_league', supportedSports)
+  .gte('event_date', now.toISOString())           // NEW: Only future events
+  .lte('event_date', in24Hours.toISOString())     // NEW: Within 24 hours
+  .order('event_date', { ascending: true })
+  .limit(100);
 ```
+
+### Fix 3: Clean Up Existing Out-of-Window Signals
+
+After deploying the fixes, we should also clean up the Seahawks signal that's already in the database. This can be done by either:
+
+- Dismissing it manually from the Terminal
+- Running a cleanup query to expire signals where event is >24h away
 
 ---
 
@@ -107,67 +91,14 @@ const getPickedTeam = (): string => {
 
 | File | Change |
 |------|--------|
-| `supabase/functions/polymarket-sync-24h/index.ts` | Skip midnight UTC times from Odds API as likely inaccurate |
-| `src/components/terminal/SignalCard.tsx` | Display team name instead of YES/NO |
-
----
-
-## Technical Details
-
-### Midnight Time Detection
-```typescript
-// Add to findOddsApiCommenceTime() function
-function findOddsApiCommenceTime(team1Name: string, team2Name: string): Date | null {
-  // ... existing matching code ...
-  
-  for (const game of oddsApiGames) {
-    // ... existing matching ...
-    
-    if ((matches1Home && matches2Away) || (matches1Away && matches2Home)) {
-      const commenceTime = new Date(game.commence_time);
-      
-      // NEW: Skip suspicious midnight times (likely API data quality issue)
-      const isExactMidnight = commenceTime.getUTCHours() === 0 && 
-                              commenceTime.getUTCMinutes() === 0 &&
-                              commenceTime.getUTCSeconds() === 0;
-      
-      if (isExactMidnight) {
-        console.log(`[WARN] Skipping midnight UTC time for ${game.home_team} vs ${game.away_team}`);
-        continue; // Try next match
-      }
-      
-      if (!isNaN(commenceTime.getTime())) {
-        return commenceTime;
-      }
-    }
-  }
-  
-  return null;
-}
-```
-
-### Team Name Display in SignalCard
-```typescript
-// Add helper function
-const getPickedTeam = (): string => {
-  const vsMatch = signal.event_name.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
-  if (!vsMatch) return signal.side === 'YES' ? 'Home' : 'Away';
-  const [, teamA, teamB] = vsMatch;
-  return signal.side === 'YES' ? teamA.trim() : teamB.trim();
-};
-
-// Replace "BUY YES" / "BUY NO" display with:
-<span className={`text-xs font-bold ${signal.side === 'YES' ? 'text-green-400' : 'text-red-400'}`}>
-  BUY {getPickedTeam()}
-</span>
-```
-
----
+| `supabase/functions/polymarket-sync-24h/index.ts` | Skip Firecrawl games outside 24-hour window |
+| `supabase/functions/polymarket-monitor/index.ts` | Add 24-hour filter to market loading queries |
 
 ## Expected Results
 
 After these fixes:
-1. **Midnight times will be skipped** - Games with suspicious 00:00 UTC times will fall back to "Check time" display instead of showing wrong countdowns
-2. **Team names instead of YES/NO** - "BUY Minnesota Wild" instead of "BUY NO"
-3. **Consistent terminology** - SMS, terminal, and stats all show team names
+1. **Firecrawl games >24h away** will be skipped during sync
+2. **Monitor queries** will only load markets within 24 hours
+3. **The Seahawks vs Patriots signal** (and similar far-future games) won't appear
+4. **Only actionable, near-term signals** will show in the Terminal
 
