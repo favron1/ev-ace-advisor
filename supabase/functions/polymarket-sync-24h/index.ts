@@ -661,6 +661,13 @@ Deno.serve(async (req) => {
         const actualCommenceTime = findOddsApiCommenceTime(game.team1Name, game.team2Name);
         const eventDate = actualCommenceTime || fallbackEventDate;
         
+        // CRITICAL FIX: Enforce 24-hour window - skip games outside the window
+        const hoursUntilEvent = (eventDate.getTime() - now.getTime()) / (1000 * 60 * 60);
+        if (hoursUntilEvent > 24 || hoursUntilEvent < 0) {
+          console.log(`[FIRECRAWL] Skipping ${game.team1Name} vs ${game.team2Name} - ${hoursUntilEvent.toFixed(1)}h away (outside 24h window)`);
+          return; // Skip this game
+        }
+        
         if (actualCommenceTime) {
           console.log(`[FIRECRAWL] Matched ${game.team1Name} vs ${game.team2Name} -> Kickoff: ${actualCommenceTime.toISOString()}`);
         }
