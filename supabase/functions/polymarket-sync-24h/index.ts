@@ -652,6 +652,10 @@ Deno.serve(async (req) => {
           console.log(`[FIRECRAWL] Matched ${game.team1Name} vs ${game.team2Name} -> Kickoff: ${actualCommenceTime.toISOString()}`);
         }
         
+        // Generate Polymarket-style slug for direct URLs: nhl-min-edm-2026-01-31
+        const dateStr = eventDate.toISOString().split('T')[0]; // YYYY-MM-DD
+        const generatedSlug = `${sportCode}-${game.team1Code}-${game.team2Code}-${dateStr}`.toLowerCase();
+        
         const { error: fcError } = await supabase
           .from('polymarket_h2h_cache')
           .upsert({
@@ -673,6 +677,7 @@ Deno.serve(async (req) => {
             status: 'active',
             monitoring_status: 'watching',
             source: 'firecrawl',
+            polymarket_slug: generatedSlug, // NEW: Generated slug for direct Polymarket URLs
             last_price_update: now.toISOString(),
             last_bulk_sync: now.toISOString(),
           }, {

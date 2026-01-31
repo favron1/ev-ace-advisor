@@ -1508,11 +1508,15 @@ Deno.serve(async (req) => {
 
             if (existingSignal) {
               // UPDATE existing active signal with fresh data
+              // Include slug from cache so it gets populated on existing signals
+              const polymarketSlug = cache?.polymarket_slug || null;
+              
               const { data, error } = await supabase
                 .from('signal_opportunities')
                 .update({
                   ...signalData,
                   side: betSide, // Update side based on movement direction
+                  polymarket_slug: polymarketSlug, // Copy slug for direct Polymarket URLs
                 })
                 .eq('id', existingSignal.id)
                 .select()
