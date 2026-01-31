@@ -1,83 +1,110 @@
 
 
-# Fix: Signal Created for Wrong Game Date
+# Improved Team Matching Logic
 
-## Problem Identified
+## Problem Being Solved
 
-The "Red Wings vs. Avalanche" signal showing 41.8% fair probability is mixing data from **two different games**:
+The current nickname-only matching (last word of team name) can fail for:
+- Teams with similar suffixes (e.g., "Hawks" vs "Blackhawks")
+- Multi-word team names where the last word isn't unique
+- Soccer/football clubs with prefixes (FC, SC, AFC)
 
-| Data Source | Game Date | Details |
-|-------------|-----------|---------|
-| Polymarket market | **Feb 2, 2026** | Condition `0x91194...`, slug `nhl-det-col-2026-02-02` |
-| Bookmaker odds | **Jan 31, 2026** | Colorado @ Detroit TODAY |
-| Cache `event_date` | Jan 31 (WRONG) | Should be Feb 2 |
+## Your Suggested Solution
 
-**Result**: System calculates bookmaker fair probability for **today's game** but applies it to **Feb 2nd's Polymarket market**, creating a phantom signal.
+### Step 1: Enhanced Normalization
 
----
-
-## Root Cause
-
-The cache entry for `0x91194...` has `event_date: 2026-01-31 18:00:00` but the CLOB data says `game_start_time: 2026-02-03T02:00:00Z` (Feb 2nd 9PM ET).
-
-This date mismatch causes the bookmaker matching to find "Avalanche vs Red Wings" (the Jan 31 game) and use those odds for the Feb 2nd Polymarket market.
-
----
-
-## Solution
-
-### Fix 1: Parse Game Date from CLOB `game_start_time`
-
-When syncing markets to the cache, use the CLOB `game_start_time` field (not inferred from question text) as the authoritative event date:
+Add a stricter normalization function that removes common club prefixes:
 
 ```typescript
-// In sync function
-const gameStartTime = clobMarket.game_start_time;
-if (gameStartTime) {
-  eventDate = new Date(gameStartTime);
+const norm = (s: string) => normalizeName(s)
+  .replace(/\b(fc|sc|afc|cf|bc|the)\b/g, '')
+  .replace(/\s+/g, ' ')
+  .trim();
+```
+
+### Step 2: Exact Match First
+
+Try exact full-name matching before falling back:
+
+```typescript
+const yesFull = norm(polyYesTeam);
+const noFull = norm(polyNoTeam);
+
+const exactIndex = (team: string) =>
+  market.outcomes.findIndex((o: any) => norm(o.name) === team);
+
+let yesOutcomeIndex = exactIndex(yesFull);
+let noOutcomeIndex = exactIndex(noFull);
+```
+
+### Step 3: Token Overlap Fallback
+
+If exact match fails, use token-based scoring with a minimum threshold:
+
+```typescript
+const tokens = (s: string) => new Set(norm(s).split(' ').filter(Boolean));
+const overlapScore = (a: Set<string>, b: Set<string>) => {
+  let hit = 0;
+  for (const t of a) if (b.has(t)) hit++;
+  return hit;
+};
+
+const bestMatchIndex = (teamTok: Set<string>) => {
+  let best = -1, bestScore = 0;
+  market.outcomes.forEach((o: any, i: number) => {
+    const s = overlapScore(teamTok, tokens(o.name));
+    if (s > bestScore) { bestScore = s; best = i; }
+  });
+  return { best, bestScore };
+};
+
+// Require at least 2 shared tokens for confidence
+if (yesOutcomeIndex === -1) {
+  const { best, bestScore } = bestMatchIndex(yesTok);
+  if (bestScore >= 2) yesOutcomeIndex = best;
+}
+if (noOutcomeIndex === -1) {
+  const { best, bestScore } = bestMatchIndex(noTok);
+  if (bestScore >= 2) noOutcomeIndex = best;
 }
 ```
 
-### Fix 2: Add Date Validation to Bookmaker Matching
+---
 
-Before matching a Polymarket market to bookmaker odds, validate the dates are within 24 hours:
+## Technical Implementation
+
+### File to Modify
+
+**`supabase/functions/polymarket-monitor/index.ts`** (lines 848-878)
+
+Replace the current nickname-only matching with the 3-tier approach:
+1. Exact normalized name match
+2. Token overlap with ≥2 shared words requirement
+3. Reject if neither tier succeeds
+
+### Why This is Better
+
+| Current Approach | Proposed Approach |
+|-----------------|-------------------|
+| Nickname only (last word) | Exact match first |
+| Single-word comparison | Multi-word token overlap |
+| No minimum threshold | Requires ≥2 shared tokens |
+| Vulnerable to suffix collisions | Strips common prefixes |
+
+### Logging Enhancement
+
+Add detailed logging to track which matching tier succeeded:
 
 ```typescript
-// In findBookmakerMatch()
-const polyDate = new Date(event.event_date);
-const bookDate = new Date(game.commence_time);
-const hoursDiff = Math.abs(polyDate.getTime() - bookDate.getTime()) / 36e5;
-
-if (hoursDiff > 24) {
-  console.log(`[POLY-MONITOR] DATE MISMATCH: Poly=${polyDate.toISOString()}, Book=${bookDate.toISOString()} - skipping`);
-  continue;
-}
+console.log(`[POLY-MONITOR] MATCH: ${method} for "${eventName}" → YES=${yesTeamName}, NO=${noTeamName}`);
+// method = "exact" | "token-overlap" | "failed"
 ```
 
-### Fix 3: Expire the Current Bad Signal
-
-The active "Red Wings vs. Avalanche" signal (ID `1a2329a0...`) is based on wrong data and should be expired immediately.
-
 ---
 
-## Technical Changes
+## Risk Mitigation
 
-### Files to Modify
-
-1. **`supabase/functions/polymarket-sync-24h/index.ts`** (or similar sync function)
-   - Update event_date parsing to use CLOB `game_start_time` field
-
-2. **`supabase/functions/polymarket-monitor/index.ts`**
-   - Add date validation in `findBookmakerMatch()` to prevent cross-game matching
-   - Log warning when Polymarket and bookmaker event dates don't align
-
-3. **Database**: Fix the cache entry for `0x91194...` to have correct event_date
-
----
-
-## Immediate Actions
-
-1. Expire the bad signal (`1a2329a0...`)
-2. Update cache entry for `0x91194...` to correct event_date (Feb 2nd)
-3. Implement date validation in matching logic
+- The ≥2 token requirement prevents false positives on single-word matches
+- Exact match takes precedence, so correctly formatted names won't regress
+- Logging shows which tier matched for debugging
 
