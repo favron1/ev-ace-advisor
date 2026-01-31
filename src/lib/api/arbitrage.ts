@@ -105,12 +105,17 @@ export const arbitrageApi = {
     return data as SignalDetectionResult;
   },
 
-  // Refresh signals without API calls
+  // Refresh signals with live CLOB prices
   async refreshSignals(): Promise<{
     refreshed: number;
     expired: number;
+    expired_by_time?: number;
+    expired_by_edge?: number;
+    price_updates?: number;
+    edge_improved?: number;
     updated: number;
     unchanged: number;
+    clob_prices_fetched?: number;
   }> {
     const { data, error } = await supabase.functions.invoke('refresh-signals', {
       body: {}
