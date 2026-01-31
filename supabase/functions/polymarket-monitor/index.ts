@@ -1310,7 +1310,7 @@ Deno.serve(async (req) => {
     // This ensures signals show current timestamps even if they no longer meet edge thresholds
     const { data: activeSignals } = await supabase
       .from('signal_opportunities')
-      .select('id, polymarket_condition_id')
+      .select('id, polymarket_condition_id, side')  // Include side for correct price assignment
       .eq('status', 'active');
     
     if (activeSignals && activeSignals.length > 0) {
@@ -1321,27 +1321,32 @@ Deno.serve(async (req) => {
         const cache = [...cacheMap.values()].find(c => c.condition_id === signal.polymarket_condition_id);
         if (!cache?.token_id_yes) continue;
         
-        // Get fresh price from CLOB, or fall back to cache
-        let freshPrice = 0;
+        // Get fresh YES price from CLOB, or fall back to cache
+        let freshYesPrice = 0;
         if (clobPrices.has(cache.token_id_yes)) {
           const prices = clobPrices.get(cache.token_id_yes)!;
-          freshPrice = prices.ask > 0 ? prices.ask : prices.bid;
+          freshYesPrice = prices.ask > 0 ? prices.ask : prices.bid;
         } else {
           // Fallback to cache yes_price if CLOB didn't return this token
-          freshPrice = cache.yes_price || 0;
+          freshYesPrice = cache.yes_price || 0;
         }
         
-        if (freshPrice > 0) {
+        if (freshYesPrice > 0) {
+          // FIX: Calculate side-adjusted price based on signal's side
+          const signalSide = signal.side || 'YES';
+          const signalPrice = signalSide === 'YES' ? freshYesPrice : (1 - freshYesPrice);
+          
           await supabase
             .from('signal_opportunities')
             .update({
-              polymarket_yes_price: freshPrice,
-              polymarket_price: freshPrice,
+              polymarket_yes_price: freshYesPrice,
+              polymarket_price: signalPrice,  // Side-adjusted price
               polymarket_volume: cache.volume || 0,
               polymarket_updated_at: now.toISOString(),
             })
             .eq('id', signal.id);
           
+          console.log(`[POLY-MONITOR] Price refresh: signal=${signal.id.slice(0,8)} side=${signalSide} yes=${(freshYesPrice * 100).toFixed(1)}c signal_price=${(signalPrice * 100).toFixed(1)}c`);
           priceUpdatesCount++;
         }
       }
