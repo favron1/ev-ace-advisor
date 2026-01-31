@@ -1,3 +1,10 @@
+// ============================================================================
+// LAYER 2: PRESENTATION - SAFE TO MODIFY
+// ============================================================================
+// This file handles display and user interaction only.
+// Safe to modify for UI improvements, styling, and UX changes.
+// ============================================================================
+
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '@/integrations/supabase/client';

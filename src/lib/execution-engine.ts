@@ -1,3 +1,11 @@
+// ============================================================================
+// LAYER 1: CORE ALGORITHM - PROTECTED
+// ============================================================================
+// This file is part of the signal detection engine.
+// DO NOT MODIFY unless explicitly requested.
+// Changes here affect signal detection, edge calculation, and data accuracy.
+// ============================================================================
+
 // Execution Decision Engine
 // Calculates net +EV after fees, spread, and slippage
 // Applied AFTER signal detection - does not alter detection logic

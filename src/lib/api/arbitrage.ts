@@ -1,3 +1,13 @@
+// ============================================================================
+// INTERFACE LAYER: API CONTRACT
+// ============================================================================
+// This file defines the API methods that Layer 2 (Presentation) uses to
+// communicate with Layer 1 (Core Algorithm) via edge functions.
+// 
+// All data access should go through this file or useSignals hook.
+// Components should NEVER call supabase directly.
+// ============================================================================
+
 import { supabase } from '@/integrations/supabase/client';
 import type { 
   SignalOpportunity, 

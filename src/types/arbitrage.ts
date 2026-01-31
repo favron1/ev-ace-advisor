@@ -1,3 +1,13 @@
+// ============================================================================
+// INTERFACE LAYER: DATA CONTRACT (v1.0)
+// ============================================================================
+// This file defines the data contract between Layer 1 (Core Algorithm) and
+// Layer 2 (Presentation). Both layers depend on these types.
+// 
+// MODIFY CAREFULLY - changes here affect both the backend detection engine
+// and the frontend display components.
+// ============================================================================
+
 // Core types for the Prediction Market Arbitrage Engine
 
 export interface PolymarketMarket {
