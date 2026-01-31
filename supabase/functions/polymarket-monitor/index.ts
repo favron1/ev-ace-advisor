@@ -1183,15 +1183,17 @@ Deno.serve(async (req) => {
 
     // Load markets marked for monitoring - filter to sports with bookmaker coverage
     // This is the "Scan Once, Monitor Continuously" architecture
-    // CRITICAL FIX: Include ALL market types (H2H, Totals, Spreads), not just those with extracted_league
+    // Load only H2H markets since we're comparing against H2H bookmaker odds
+    // Future: Add separate processing for spreads/totals with corresponding bookmaker data
     const supportedSports = Object.keys(SPORT_ENDPOINTS); // ['NHL', 'NBA', 'NCAA', 'NFL']
     
-    // First, load API-sourced markets with volume filter + 24h window
+    // First, load API-sourced H2H markets with volume filter + 24h window
     const { data: apiMarkets, error: apiLoadError } = await supabase
       .from('polymarket_h2h_cache')
       .select('*')
       .in('monitoring_status', ['watching', 'triggered'])
       .eq('status', 'active')
+      .eq('market_type', 'h2h') // CRITICAL: Only H2H markets to match H2H bookmaker odds
       .in('extracted_league', supportedSports)
       .or('source.is.null,source.eq.api')
       .gte('volume', 5000) // Volume filter only for API-sourced markets
@@ -1200,12 +1202,13 @@ Deno.serve(async (req) => {
       .order('event_date', { ascending: true })
       .limit(150);
 
-    // Second, load Firecrawl-sourced markets WITHOUT volume filter + 24h window
+    // Second, load Firecrawl-sourced H2H markets WITHOUT volume filter + 24h window
     const { data: firecrawlMarkets, error: fcLoadError } = await supabase
       .from('polymarket_h2h_cache')
       .select('*')
       .in('monitoring_status', ['watching', 'triggered'])
       .eq('status', 'active')
+      .eq('market_type', 'h2h') // CRITICAL: Only H2H markets to match H2H bookmaker odds
       .eq('source', 'firecrawl')
       .in('extracted_league', supportedSports)
       .gte('event_date', now.toISOString()) // Only future events
@@ -1466,6 +1469,12 @@ Deno.serve(async (req) => {
         const sport = cache?.extracted_league || 'Unknown';
         const marketType = cache?.market_type || 'h2h';
         const tokenIdYes = cache?.token_id_yes;
+        
+        // SAFETY CHECK: Skip non-H2H markets (should be filtered at query level, but belt-and-suspenders)
+        if (marketType !== 'h2h') {
+          console.log(`[POLY-MONITOR] Skipping non-H2H market: ${event.event_name} (type=${marketType})`);
+          continue;
+        }
         
         // Get bookmaker data for this sport
         const bookmakerGames = allBookmakerData.get(sport) || [];
