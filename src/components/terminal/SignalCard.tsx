@@ -272,7 +272,19 @@ export function SignalCard({
     ? new Date(signal.expires_at) <= new Date() 
     : false;
   
-  const countdown = formatCountdown(hoursUntilEvent, hasStarted);
+  // Detect if expires_at is a fallback value (exactly ~12h from created_at)
+  // This indicates the backend couldn't find the actual game time
+  const isFallbackTime = signal.expires_at && signal.created_at 
+    ? Math.abs(
+        new Date(signal.expires_at).getTime() - 
+        new Date(signal.created_at).getTime() - 
+        (12 * 60 * 60 * 1000)
+      ) < 120000  // Within 2 minutes of exactly 12h = likely fallback
+    : false;
+  
+  const countdown = isFallbackTime 
+    ? { text: 'Check time', urgent: false, isLive: false }
+    : formatCountdown(hoursUntilEvent, hasStarted);
   
   // Determine display state
   const displayState = watchState || (isTrueArbitrage ? 'confirmed' : 'signal');
