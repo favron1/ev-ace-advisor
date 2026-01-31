@@ -406,19 +406,31 @@ Deno.serve(async (req) => {
         : null;
 
       // Get live price from CLOB based on signal side
-      // For Firecrawl-sourced signals (no token IDs), fall back to cached prices
+      // ENHANCED: Also fetch the opposite side for validation logging
       let livePrice: number | null = null;
+      let oppositePrice: number | null = null;
+
       if (cache) {
         const tokenId = signal.side === 'YES' ? cache.token_id_yes : cache.token_id_no;
+        const oppositeTokenId = signal.side === 'YES' ? cache.token_id_no : cache.token_id_yes;
+        
         if (tokenId && clobPrices[tokenId]) {
           // Use live CLOB price (Gamma API sourced)
           livePrice = parseFloat(clobPrices[tokenId]);
         } else {
           // Fallback: Use cached price from polymarket_h2h_cache (Firecrawl sourced)
           livePrice = signal.side === 'YES' ? cache.yes_price : cache.no_price;
-          if (livePrice !== null) {
-            console.log(`[REFRESH] Using cached price for ${signal.polymarket_condition_id}: ${livePrice}`);
-          }
+        }
+        
+        // Also get opposite side price for validation
+        if (oppositeTokenId && clobPrices[oppositeTokenId]) {
+          oppositePrice = parseFloat(clobPrices[oppositeTokenId]);
+        } else {
+          oppositePrice = signal.side === 'YES' ? cache.no_price : cache.yes_price;
+        }
+        
+        if (livePrice !== null) {
+          console.log(`[REFRESH] PRICE_FETCH: signal=${signal.id.slice(0,8)} side=${signal.side} price=${(livePrice * 100).toFixed(1)}c opposite=${oppositePrice !== null ? (oppositePrice * 100).toFixed(1) + 'c' : 'null'} event="${signal.event_name}"`);
         }
       }
 

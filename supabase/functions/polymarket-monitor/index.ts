@@ -1621,26 +1621,48 @@ Deno.serve(async (req) => {
             continue;
           }
 
-           // SAFETY RAIL: outcome-side consistency guard
-           // If team mapping/matching produced a mismatch, force betSide to align with recommendedOutcome.
-           // This prevents storing e.g. recommended_outcome=Sabres but side=YES (which would show wrong price).
-           const expectedSide: 'YES' | 'NO' = recommendedOutcome === yesTeamName ? 'YES' : 'NO';
-           if (expectedSide !== betSide) {
-             console.log(`[POLY-MONITOR] SIDE_MISMATCH_GUARD: forcing side to match outcome`, {
-               event: event.event_name,
-               betSide,
-               expectedSide,
-               yesTeamName,
-               noTeamName,
-               recommendedOutcome,
-               yesEdge,
-               noEdge,
-             });
+          // SAFETY RAIL #4: Outcome-side consistency guard with NORMALIZED matching
+          // Uses same normalization as team matching to prevent false mismatches
+          // e.g. "Buffalo Sabres" vs "Sabres" should still match correctly
+          const recOutcomeNorm = normalizeName(recommendedOutcome);
+          const yesTeamNorm = normalizeName(yesTeamName);
+          const noTeamNorm = normalizeName(noTeamName);
 
-             betSide = expectedSide;
-             rawEdge = expectedSide === 'YES' ? yesEdge : noEdge;
-             recommendedFairProb = expectedSide === 'YES' ? yesFairProb : noFairProb;
-           }
+          // Check which team the recommended outcome matches using word overlap
+          const recWords = new Set(recOutcomeNorm.split(' ').filter(w => w.length > 2));
+          const yesWords = new Set(yesTeamNorm.split(' ').filter(w => w.length > 2));
+          const noWords = new Set(noTeamNorm.split(' ').filter(w => w.length > 2));
+
+          const yesOverlap = [...recWords].filter(w => yesWords.has(w)).length;
+          const noOverlap = [...recWords].filter(w => noWords.has(w)).length;
+
+          let expectedSide: 'YES' | 'NO';
+          if (yesOverlap > noOverlap) {
+            expectedSide = 'YES';
+          } else if (noOverlap > yesOverlap) {
+            expectedSide = 'NO';
+          } else {
+            // Equal overlap or zero - use exact match as fallback
+            expectedSide = recOutcomeNorm === yesTeamNorm ? 'YES' : 'NO';
+          }
+
+          if (expectedSide !== betSide) {
+            console.error(`[POLY-MONITOR] SIDE_INVERSION_BLOCKED: ${recommendedOutcome} mapped to ${expectedSide} but betSide=${betSide}. Forcing side=${expectedSide}.`, JSON.stringify({
+              event: event.event_name,
+              yesTeamName,
+              noTeamName,
+              recommendedOutcome,
+              yesOverlap,
+              noOverlap,
+              originalBetSide: betSide,
+              yesEdge,
+              noEdge,
+            }));
+
+            betSide = expectedSide;
+            rawEdge = expectedSide === 'YES' ? yesEdge : noEdge;
+            recommendedFairProb = expectedSide === 'YES' ? yesFairProb : noFairProb;
+          }
           
           // SAFETY RAIL #3: Movement NEVER overrides side selection
           // Use movement from the side we're actually betting on
@@ -1766,9 +1788,54 @@ Deno.serve(async (req) => {
 
             // FIX: Store the price of the side we're actually betting on
             // YES = livePolyPrice, NO = 1 - livePolyPrice
+            // =========================
+            // CRITICAL: FINAL SIDE/OUTCOME VALIDATION (last-resort gate)
+            // =========================
+            // This catches any edge cases where team mapping produced a mismatch
+            // If recommending NO team but side=YES (or vice versa), BLOCK the signal
+            const finalRecNorm = normalizeName(recommendedOutcome);
+            const finalYesNorm = normalizeName(yesTeamName);
+            const finalNoNorm = normalizeName(noTeamName);
+
+            // Extract nicknames for validation (last word of team name)
+            const recNickname = finalRecNorm.split(' ').pop() || '';
+            const yesNickname = finalYesNorm.split(' ').pop() || '';
+            const noNickname = finalNoNorm.split(' ').pop() || '';
+
+            const matchesYes = recNickname === yesNickname || (yesNickname.length > 2 && finalRecNorm.includes(yesNickname));
+            const matchesNo = recNickname === noNickname || (noNickname.length > 2 && finalRecNorm.includes(noNickname));
+
+            if (matchesNo && !matchesYes && betSide === 'YES') {
+              console.error(`[POLY-MONITOR] FINAL_GATE_BLOCKED: ${recommendedOutcome} matches NO team but betSide=YES`, JSON.stringify({
+                event: event.event_name,
+                yesTeamName,
+                noTeamName,
+                recommendedOutcome,
+                betSide,
+                recNickname,
+                yesNickname,
+                noNickname,
+              }));
+              continue; // Skip this signal entirely rather than risk inversion
+            }
+
+            if (matchesYes && !matchesNo && betSide === 'NO') {
+              console.error(`[POLY-MONITOR] FINAL_GATE_BLOCKED: ${recommendedOutcome} matches YES team but betSide=NO`, JSON.stringify({
+                event: event.event_name,
+                yesTeamName,
+                noTeamName,
+                recommendedOutcome,
+                betSide,
+                recNickname,
+                yesNickname,
+                noNickname,
+              }));
+              continue; // Skip this signal entirely rather than risk inversion
+            }
+
             const signalPolyPrice = betSide === 'YES' ? livePolyPrice : (1 - livePolyPrice);
             
-            console.log(`[POLY-MONITOR] SIGNAL CREATE: ${betSide} ${recommendedOutcome} @ ${(signalPolyPrice * 100).toFixed(1)}c (raw YES price=${(livePolyPrice * 100).toFixed(1)}c)`);
+            console.log(`[POLY-MONITOR] SIGNAL CREATE: ${betSide} ${recommendedOutcome} @ ${(signalPolyPrice * 100).toFixed(1)}c | YES=${yesTeamName} @ ${(livePolyPrice * 100).toFixed(1)}c, NO=${noTeamName} @ ${((1-livePolyPrice) * 100).toFixed(1)}c`);
 
             const signalData = {
               polymarket_price: signalPolyPrice, // FIX: Use side-adjusted price
