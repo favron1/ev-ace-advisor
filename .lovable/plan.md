@@ -1,110 +1,114 @@
 
 
-# Improved Team Matching Logic
+# Fix: Incorrect Event Date Causing Cross-Game Odds Contamination
 
-## Problem Being Solved
+## Problem Summary
 
-The current nickname-only matching (last word of team name) can fail for:
-- Teams with similar suffixes (e.g., "Hawks" vs "Blackhawks")
-- Multi-word team names where the last word isn't unique
-- Soccer/football clubs with prefixes (FC, SC, AFC)
+The Red Wings vs. Avalanche signal shows 41.8% fair probability for Detroit, but this is data from **today's game (Jan 31)** being applied to a **future Polymarket market (Feb 2)**. This creates phantom signals with invalid edges.
 
-## Your Suggested Solution
+## Root Cause Chain
 
-### Step 1: Enhanced Normalization
-
-Add a stricter normalization function that removes common club prefixes:
-
-```typescript
-const norm = (s: string) => normalizeName(s)
-  .replace(/\b(fc|sc|afc|cf|bc|the)\b/g, '')
-  .replace(/\s+/g, ' ')
-  .trim();
+```text
+Polymarket Market: "Red Wings vs. Avalanche" (slug: nhl-det-col-2026-02-02)
+                            |
+                            v
+Gamma API returns bad/missing startDate/endDate
+                            |
+                            v
+isWithin24HourWindow() falls back to Odds API matching
+                            |
+                            v
+Finds "Avalanche" + "Red Wings" in title, matches TODAY's game
+(Colorado @ Detroit on Jan 31) instead of Feb 2's game
+                            |
+                            v
+Cache stores event_date: 2026-01-31 (WRONG - should be Feb 2)
+                            |
+                            v
+polymarket-monitor uses cached date for validation
+                            |
+                            v
+TODAY's bookmaker odds (Detroit 41.8% at HOME) applied to Feb 2 market
+                            |
+                            v
+Signal created with wrong fair probability
 ```
 
-### Step 2: Exact Match First
+## Solution: Parse Date from Polymarket Slug
 
-Try exact full-name matching before falling back:
+The Polymarket slug (`nhl-det-col-2026-02-02`) contains the **authoritative game date**. We should:
 
-```typescript
-const yesFull = norm(polyYesTeam);
-const noFull = norm(polyNoTeam);
+1. **Parse the date from the slug** before falling back to Odds API matching
+2. **Use slug date as priority source** when available (most reliable for sports events)
+3. **Skip Odds API cross-reference** if slug date is outside 24h window
 
-const exactIndex = (team: string) =>
-  market.outcomes.findIndex((o: any) => norm(o.name) === team);
+### Technical Implementation
 
-let yesOutcomeIndex = exactIndex(yesFull);
-let noOutcomeIndex = exactIndex(noFull);
-```
+**File: `supabase/functions/polymarket-sync-24h/index.ts`**
 
-### Step 3: Token Overlap Fallback
-
-If exact match fails, use token-based scoring with a minimum threshold:
+Add slug date extraction to `isWithin24HourWindow()`:
 
 ```typescript
-const tokens = (s: string) => new Set(norm(s).split(' ').filter(Boolean));
-const overlapScore = (a: Set<string>, b: Set<string>) => {
-  let hit = 0;
-  for (const t of a) if (b.has(t)) hit++;
-  return hit;
-};
-
-const bestMatchIndex = (teamTok: Set<string>) => {
-  let best = -1, bestScore = 0;
-  market.outcomes.forEach((o: any, i: number) => {
-    const s = overlapScore(teamTok, tokens(o.name));
-    if (s > bestScore) { bestScore = s; best = i; }
-  });
-  return { best, bestScore };
-};
-
-// Require at least 2 shared tokens for confidence
-if (yesOutcomeIndex === -1) {
-  const { best, bestScore } = bestMatchIndex(yesTok);
-  if (bestScore >= 2) yesOutcomeIndex = best;
-}
-if (noOutcomeIndex === -1) {
-  const { best, bestScore } = bestMatchIndex(noTok);
-  if (bestScore >= 2) noOutcomeIndex = best;
+// Add before Odds API fallback (line ~384):
+// 3.5. NEW: Parse date from event slug (e.g., "nhl-det-col-2026-02-02")
+const eventSlug = event.slug || '';
+const slugDateMatch = eventSlug.match(/(\d{4}-\d{2}-\d{2})$/);
+if (slugDateMatch) {
+  const slugDate = new Date(slugDateMatch[1] + 'T23:59:59Z');
+  if (!isNaN(slugDate.getTime())) {
+    // If slug date is within 24h window, use it
+    if (slugDate >= now && slugDate <= in24Hours) {
+      return { inWindow: true, dateSource: 'slug', resolvedDate: slugDate };
+    }
+    // If slug date is OUTSIDE 24h window, reject early
+    // This prevents matching to wrong game via Odds API
+    return { inWindow: false, dateSource: 'slug-outside', resolvedDate: null };
+  }
 }
 ```
 
----
+### Why This Fixes the Bug
 
-## Technical Implementation
+| Before | After |
+|--------|-------|
+| Slug date ignored | Slug date checked first |
+| Falls back to Odds API matching | Slug date outside 24h = reject immediately |
+| Matches wrong game with same teams | No cross-contamination possible |
+| Creates phantom signals | Only creates signals for games in 24h window |
 
-### File to Modify
+### Additional Safety: Strengthen polymarket-monitor Date Check
 
-**`supabase/functions/polymarket-monitor/index.ts`** (lines 848-878)
+**File: `supabase/functions/polymarket-monitor/index.ts`**
 
-Replace the current nickname-only matching with the 3-tier approach:
-1. Exact normalized name match
-2. Token overlap with ≥2 shared words requirement
-3. Reject if neither tier succeeds
-
-### Why This is Better
-
-| Current Approach | Proposed Approach |
-|-----------------|-------------------|
-| Nickname only (last word) | Exact match first |
-| Single-word comparison | Multi-word token overlap |
-| No minimum threshold | Requires ≥2 shared tokens |
-| Vulnerable to suffix collisions | Strips common prefixes |
-
-### Logging Enhancement
-
-Add detailed logging to track which matching tier succeeded:
+Add secondary validation using the slug date:
 
 ```typescript
-console.log(`[POLY-MONITOR] MATCH: ${method} for "${eventName}" → YES=${yesTeamName}, NO=${noTeamName}`);
-// method = "exact" | "token-overlap" | "failed"
+// Before matching, verify slug date matches bookmaker date (if slug available)
+const cache = cacheMap.get(event.polymarket_condition_id);
+const slugDate = cache?.polymarket_slug?.match(/(\d{4}-\d{2}-\d{2})$/)?.[1];
+
+if (slugDate) {
+  const slugDateObj = new Date(slugDate);
+  const bookmakerDate = new Date(game.commence_time);
+  const daysDiff = Math.abs(slugDateObj.getTime() - bookmakerDate.getTime()) / (1000 * 60 * 60 * 24);
+  
+  if (daysDiff > 1) {
+    console.log(`[POLY-MONITOR] SLUG DATE MISMATCH: slug=${slugDate}, book=${bookmakerDate.toISOString().split('T')[0]} - SKIPPING`);
+    continue;
+  }
+}
 ```
 
----
+### Immediate Actions
 
-## Risk Mitigation
+1. **Expire the bad signal**: Update signal `0928b81a...` to status='expired'
+2. **Fix the cache entry**: Update `event_date` for condition `0x9119...` to Feb 2
+3. **Deploy the slug-based date parsing fix**
 
-- The ≥2 token requirement prevents false positives on single-word matches
-- Exact match takes precedence, so correctly formatted names won't regress
-- Logging shows which tier matched for debugging
+### Test Cases
+
+After deployment, verify:
+1. Markets with slug dates outside 24h are NOT synced
+2. Markets with slug dates INSIDE 24h use the correct slug date
+3. No cross-game contamination for teams playing multiple times (like Red Wings vs Avalanche)
 
