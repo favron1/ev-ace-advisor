@@ -1278,10 +1278,36 @@ Deno.serve(async (req) => {
           bookmakerFairProb = calculateConsensusFairProb(match.game, match.marketKey, match.targetIndex, sport);
           teamName = match.teamName;
           
-          // Determine if matched team is the YES side (home) or NO side (away)
-          // In Polymarket H2H, YES = home team = first team in "Team A vs. Team B"
-          // match.targetIndex: 0 = first outcome (typically home), 1 = second outcome (typically away)
-          isMatchedTeamYesSide = match.targetIndex === 0;
+          // FIXED: Determine YES/NO by comparing matched team to the POLYMARKET title order
+          // Parse the Polymarket event name to get the YES team (first team in "Team A vs. Team B")
+          const titleParts = event.event_name.match(/^(.+?)\s+vs\.?\s+(.+?)(?:\s*-\s*.*)?$/i);
+          const polyYesTeam = titleParts?.[1]?.trim()?.toLowerCase() || '';
+          const polyNoTeam = titleParts?.[2]?.trim()?.toLowerCase() || '';
+          const matchedTeamNorm = normalizeName(teamName || '');
+
+          // Get last word of each team (the nickname: "Wild", "Oilers", "Kings", etc.)
+          const matchedNickname = matchedTeamNorm.split(' ').pop() || '';
+          const yesNickname = polyYesTeam.split(' ').pop() || '';
+          const noNickname = polyNoTeam.split(' ').pop() || '';
+
+          // Check if matched team's nickname appears in the YES team name
+          const matchesYes = yesNickname && matchedNickname && 
+            (matchedNickname.includes(yesNickname) || yesNickname.includes(matchedNickname));
+          const matchesNo = noNickname && matchedNickname && 
+            (matchedNickname.includes(noNickname) || noNickname.includes(matchedNickname));
+
+          // Assign based on which side matched
+          if (matchesYes && !matchesNo) {
+            isMatchedTeamYesSide = true;
+          } else if (matchesNo && !matchesYes) {
+            isMatchedTeamYesSide = false;
+          } else {
+            // Fallback: Log ambiguity and skip this event
+            console.log(`[POLY-MONITOR] AMBIGUOUS SIDE: "${teamName}" unclear in "${event.event_name}" - skipping`);
+            continue;
+          }
+
+          console.log(`[POLY-MONITOR] Side mapping: matched="${teamName}" → ${isMatchedTeamYesSide ? 'YES' : 'NO'} side (polyYes="${polyYesTeam}", polyNo="${polyNoTeam}")`);
           
           // CRITICAL FIX #1: Team participant validation
           // Validate that matched team is actually in the Polymarket event name
