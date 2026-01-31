@@ -92,9 +92,21 @@ export function useSignals() {
       const result = await arbitrageApi.refreshSignals();
       await fetchSignals();
       
+      // Build detailed description from richer response
+      const parts: string[] = [];
+      if (result.price_updates > 0) parts.push(`${result.price_updates} price update${result.price_updates > 1 ? 's' : ''}`);
+      if (result.edge_improved > 0) parts.push(`${result.edge_improved} edge improved`);
+      if (result.expired_by_edge > 0) parts.push(`${result.expired_by_edge} expired (edge gone)`);
+      if (result.expired_by_time > 0) parts.push(`${result.expired_by_time} expired (started)`);
+      if (result.unchanged > 0) parts.push(`${result.unchanged} unchanged`);
+      
+      const description = parts.length > 0 
+        ? parts.join(', ')
+        : `${result.expired || 0} expired, ${result.updated || 0} updated, ${result.unchanged || 0} unchanged`;
+      
       toast({
         title: 'Signals Refreshed',
-        description: `${result.expired} expired, ${result.updated} updated, ${result.unchanged} unchanged`,
+        description,
       });
       return result;
     } catch (err) {
