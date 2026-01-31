@@ -1,217 +1,157 @@
 
 
-# Protect the Core Algorithm: Layer 1 vs Layer 2 Separation
+# Fix Polymarket Direct Links (Layer 2 Only)
 
-## Goal
+## Problem Summary
 
-Establish a clear architectural boundary between the **signal detection engine** (Layer 1 - protected) and the **UI/presentation layer** (Layer 2 - frequently changed). This prevents accidental breaks when making UI improvements.
+The "Trade on Poly" button currently goes to the Polymarket homepage because:
 
----
+1. **`polymarket_slug` is NULL** in the signal database for all existing signals
+2. Firecrawl-sourced markets (many of your signals) never receive slugs from the Gamma API
+3. The sync function correctly saves slugs to the cache, but they're not backfilled to existing signals
 
-## Current Architecture Analysis
+## Current Data State
 
-### Layer 1: Core Algorithm (Backend - Protected)
+```
+Signal: Michigan Wolverines vs Michigan State Spartans
+├── polymarket_slug: NULL      ← This is why the link fails
+├── polymarket_condition_id: NULL
+└── polymarket_market_id: NULL
+```
 
-These files contain the signal detection and edge calculation logic. They should ONLY be changed when explicitly requested:
+## Solution: Enhanced Fallback URL Generation (Layer 2)
 
-| File | Purpose |
-|------|---------|
-| `supabase/functions/polymarket-sync-24h/` | Syncs Polymarket markets, extracts slugs, kickoff times |
-| `supabase/functions/polymarket-monitor/` | Compares prices, calculates edges, creates signals |
-| `supabase/functions/ingest-odds/` | Fetches bookmaker data from Odds API |
-| `supabase/functions/refresh-signals/` | Updates existing signal prices |
-| `supabase/functions/settle-bets/` | Settles bets after events complete |
-| `supabase/functions/_shared/sports-config.ts` | Team maps, detection patterns |
-| `supabase/functions/_shared/firecrawl-scraper.ts` | Firecrawl integration |
-| `src/lib/execution-engine.ts` | Net EV calculation, cost estimation |
-| `src/types/arbitrage.ts` | Core type definitions |
-
-### Layer 2: Presentation (Frontend - Frequently Changed)
-
-These files display signals and handle user interaction. Safe to modify without affecting detection:
-
-| File | Purpose |
-|------|---------|
-| `src/components/terminal/SignalCard.tsx` | Signal card display, countdown, badges |
-| `src/components/terminal/SignalFeed.tsx` | Signal list container |
-| `src/components/terminal/ScanControlPanel.tsx` | Scan buttons, automation toggles |
-| `src/components/terminal/FiltersBar.tsx` | Filter controls |
-| `src/components/terminal/ExecutionDecision.tsx` | Decision display component |
-| `src/pages/Terminal.tsx` | Main terminal page |
-| `src/hooks/useSignals.ts` | Fetches and subscribes to signals |
-| `src/lib/api/arbitrage.ts` | API wrapper (calls edge functions) |
-
-### Interface Layer: The Bridge
-
-These define the contract between Layer 1 and Layer 2:
-
-| File | Purpose |
-|------|---------|
-| `src/types/arbitrage.ts` | Type definitions (shared) |
-| Database tables | `signal_opportunities`, `polymarket_h2h_cache` |
+Since we're keeping Layer 1 protected, this fix improves the frontend logic to generate better URLs when the slug is missing.
 
 ---
 
-## Protection Mechanisms to Implement
+## Technical Changes
 
-### 1. Documentation Headers (Layer Markers)
+### File: `src/components/terminal/SignalCard.tsx`
 
-Add clear headers to every file indicating which layer it belongs to:
-
-**Layer 1 files get this header:**
+**Current Logic (lines 168-181):**
 ```typescript
-// ============================================================================
-// LAYER 1: CORE ALGORITHM - PROTECTED
-// ============================================================================
-// This file is part of the signal detection engine.
-// DO NOT MODIFY unless explicitly requested.
-// Changes here affect signal detection, edge calculation, and data accuracy.
-// ============================================================================
+const getPolymarketDirectUrl = (): string | null => {
+  const slug = (signal as any).polymarket_slug;
+  if (slug) {
+    return `https://polymarket.com/event/${slug}`;
+  }
+  const conditionId = (signal as any).polymarket_condition_id;
+  if (conditionId && conditionId.startsWith('0x')) {
+    return `https://polymarket.com/markets?conditionId=${conditionId}`;
+  }
+  return null; // Falls through to search
+};
 ```
 
-**Layer 2 files get this header:**
+**Enhanced Logic:**
 ```typescript
-// ============================================================================
-// LAYER 2: PRESENTATION - SAFE TO MODIFY
-// ============================================================================
-// This file handles display and user interaction only.
-// Safe to modify for UI improvements, styling, and UX changes.
-// ============================================================================
+const getPolymarketDirectUrl = (): string | null => {
+  // Priority 1: Use slug from backend (most reliable)
+  const slug = (signal as any).polymarket_slug;
+  if (slug) {
+    return `https://polymarket.com/event/${slug}`;
+  }
+  
+  // Priority 2: Use condition_id for direct market access
+  const conditionId = (signal as any).polymarket_condition_id;
+  if (conditionId && conditionId.startsWith('0x')) {
+    return `https://polymarket.com/markets?conditionId=${conditionId}`;
+  }
+  
+  return null; // Falls through to smart search
+};
+
+// Enhanced search URL with better query construction
+const getPolymarketSearchUrl = () => {
+  // Extract just the team names for better search results
+  const teams = extractTeamNames(signal.event_name);
+  if (teams) {
+    // Search for "Lakers vs Wizards" instead of "Los Angeles Lakers vs Washington Wizards"
+    return `https://polymarket.com/search?query=${encodeURIComponent(teams.short)}`;
+  }
+  // Fallback to recommended_outcome (team name) for single-team search
+  const searchTerm = signal.recommended_outcome || signal.event_name;
+  return `https://polymarket.com/search?query=${encodeURIComponent(searchTerm)}`;
+};
+
+// Helper: Extract team names for smarter search
+function extractTeamNames(eventName: string): { full: string; short: string } | null {
+  // Match "Team A vs Team B" or "Team A vs. Team B"
+  const vsMatch = eventName.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
+  if (!vsMatch) return null;
+  
+  const team1 = vsMatch[1].trim();
+  const team2 = vsMatch[2].trim();
+  
+  // Extract last word (nickname) from each team: "Michigan Wolverines" → "Wolverines"
+  const team1Short = team1.split(' ').pop() || team1;
+  const team2Short = team2.split(' ').pop() || team2;
+  
+  return {
+    full: `${team1} vs ${team2}`,
+    short: `${team1Short} vs ${team2Short}`
+  };
+}
 ```
 
-### 2. Architecture Documentation File
+### Improved Dropdown Menu UX
 
-Create `ARCHITECTURE.md` at project root with:
-- Clear definition of Layer 1 vs Layer 2
-- File inventory for each layer
-- Rules for when to modify Layer 1
-- Data contract (what fields Layer 2 can expect)
+When no direct link is available, show a clearer message:
 
-### 3. Type Contracts (Interface Layer)
-
-Freeze the signal data contract in `src/types/arbitrage.ts`:
-- Document every field that Layer 2 depends on
-- Add version number to track contract changes
-- Layer 2 should ONLY read fields defined in the type
-
-### 4. API Contract Documentation
-
-Document in `src/lib/api/arbitrage.ts`:
-- What each edge function returns
-- Expected response shapes
-- Never call edge functions directly from components (always via hooks)
-
-### 5. Read-Only Hook Pattern
-
-Ensure `useSignals.ts` acts as the ONLY interface between Layer 2 and data:
-- Layer 2 components should never call `supabase` directly
-- All data access goes through the hook
-- This creates a single point of control
-
----
-
-## Files to Create/Update
-
-| File | Action | Purpose |
-|------|--------|---------|
-| `ARCHITECTURE.md` | **CREATE** | Master architecture documentation |
-| `supabase/functions/polymarket-sync-24h/index.ts` | Add header | Mark as Layer 1 |
-| `supabase/functions/polymarket-monitor/index.ts` | Add header | Mark as Layer 1 |
-| `supabase/functions/_shared/sports-config.ts` | Add header | Mark as Layer 1 |
-| `src/lib/execution-engine.ts` | Add header | Mark as Layer 1 |
-| `src/types/arbitrage.ts` | Add header + version | Interface layer contract |
-| `src/components/terminal/SignalCard.tsx` | Add header | Mark as Layer 2 |
-| `src/components/terminal/ScanControlPanel.tsx` | Add header | Mark as Layer 2 |
-| `src/pages/Terminal.tsx` | Add header | Mark as Layer 2 |
-| `src/hooks/useSignals.ts` | Add header + docs | Interface layer bridge |
-| `src/lib/api/arbitrage.ts` | Add header + docs | API contract layer |
-
----
-
-## ARCHITECTURE.md Contents
-
-```markdown
-# EV Ace Advisor - Architecture
-
-## Two-Layer System
-
-This project uses a strict separation between signal detection (Layer 1) 
-and display (Layer 2) to prevent UI changes from breaking the core algorithm.
-
-### Layer 1: Core Algorithm (PROTECTED)
-- Edge functions that sync markets, calculate edges, create signals
-- Execution engine that calculates net EV
-- Shared config (team maps, detection patterns)
-- **Rule**: Only modify when explicitly requested
-
-### Layer 2: Presentation (SAFE TO MODIFY)
-- React components that display signals
-- Hooks that fetch and subscribe to data
-- Styling, animations, UX improvements
-- **Rule**: Safe to modify freely for UI improvements
-
-### Interface Layer (CONTRACT)
-- `src/types/arbitrage.ts` - Signal data shape
-- `src/hooks/useSignals.ts` - Data access hook
-- Database tables define the schema
-
-## File Inventory
-
-### Layer 1 Files (DO NOT MODIFY without explicit request)
-- supabase/functions/polymarket-sync-24h/
-- supabase/functions/polymarket-monitor/
-- supabase/functions/ingest-odds/
-- supabase/functions/refresh-signals/
-- supabase/functions/settle-bets/
-- supabase/functions/_shared/
-- src/lib/execution-engine.ts
-
-### Layer 2 Files (Safe to modify)
-- src/components/terminal/*
-- src/pages/Terminal.tsx
-- src/pages/Stats.tsx
-- src/pages/Settings.tsx
-
-### Interface Files (Modify carefully - affects both layers)
-- src/types/arbitrage.ts
-- src/hooks/useSignals.ts
-- src/lib/api/arbitrage.ts
+```typescript
+{getPolymarketDirectUrl() ? (
+  <>
+    <DropdownMenuItem asChild>
+      <a href={getPolymarketDirectUrl()!} target="_blank">
+        <ExternalLink className="h-4 w-4" />
+        Open Market Directly
+      </a>
+    </DropdownMenuItem>
+    <DropdownMenuSeparator />
+  </>
+) : (
+  <>
+    <DropdownMenuItem disabled className="text-muted-foreground">
+      <AlertCircle className="h-4 w-4" />
+      Direct link unavailable
+    </DropdownMenuItem>
+    <DropdownMenuSeparator />
+  </>
+)}
 ```
 
 ---
 
-## Data Contract (Signal Fields Layer 2 Can Use)
+## Expected Behavior After Fix
 
-From `signal_opportunities` table via `useSignals`:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Unique identifier |
-| `event_name` | string | Game title |
-| `recommended_outcome` | string | Team to bet on |
-| `side` | 'YES' or 'NO' | Which side to buy |
-| `polymarket_price` | number | Current Polymarket price |
-| `edge_percent` | number | Raw edge % |
-| `confidence_score` | number | 0-100 confidence |
-| `urgency` | enum | 'low', 'normal', 'high', 'critical' |
-| `expires_at` | string | ISO timestamp of kickoff |
-| `is_true_arbitrage` | boolean | Has Polymarket match |
-| `polymarket_slug` | string | URL slug for direct links |
-| `polymarket_volume` | number | Market volume in $ |
-| `signal_tier` | enum | 'elite', 'strong', 'static' |
-
-Layer 2 should ONLY read these fields. If a new field is needed, update Layer 1 first.
+| Scenario | URL Generated | Result |
+|----------|---------------|--------|
+| Signal has slug | `https://polymarket.com/event/nhl-lak-phi-2026-01-31` | Goes directly to market |
+| Signal has condition_id | `https://polymarket.com/markets?conditionId=0x...` | Goes to market page |
+| Signal has neither | `https://polymarket.com/search?query=Wolverines+vs+Spartans` | Shows relevant search results |
 
 ---
 
-## Summary
+## Files to Modify
 
-After this implementation:
-1. Every file has a clear Layer 1/2 marker
-2. `ARCHITECTURE.md` serves as the reference document
-3. When you ask for UI changes, I will only touch Layer 2 files
-4. When you explicitly ask to modify the algorithm, I will touch Layer 1 files
-5. The data contract is documented so we know what fields are safe to use
+| File | Changes |
+|------|---------|
+| `src/components/terminal/SignalCard.tsx` | Add `extractTeamNames()` helper, improve search URL generation, add disabled state for missing direct link |
 
-This creates a **firewall** between the detection engine and the presentation layer.
+---
+
+## Immediate Workaround (No Code Change)
+
+Until this fix is deployed, clicking "Search on Polymarket" in the dropdown will still work - it just requires one extra click.
+
+---
+
+## Future Layer 1 Enhancement (Optional)
+
+If you want to fully fix this in the future, the backend would need to:
+1. Backfill slugs from cache to existing signals during sync
+2. Generate synthetic slugs for Firecrawl-sourced events
+
+This would be a Layer 1 change requiring explicit approval.
 
