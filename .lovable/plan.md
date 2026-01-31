@@ -1,98 +1,163 @@
 
-## Fix: Side Inversion Bug in polymarket-monitor
 
-### Root Cause Confirmed
+# Plan: Fix Inverted Edge Calculations for H2H Signals
 
-Your intuition is correct - **YES is always the first team in the Polymarket event title**. The bug is:
+## Problem Summary
 
-1. `findBookmakerMatch()` returns `targetIndex = 0` when both teams appear in the event name (lines 819-830)
-2. But `targetIndex = 0` refers to the **bookmaker API's outcome order**, not Polymarket's
-3. Bookmaker APIs often list the **away team first** (e.g., "Edmonton Oilers" is outcomes[0] even though Wild is home)
-4. The code then assumes `targetIndex === 0` means "YES side" in Polymarket — **wrong!**
+The Avalanche vs. Red Wings and Hurricanes vs. Capitals signals are showing **inverted fair probabilities**:
 
-**Data Evidence (Wild vs. Oilers):**
+| Signal | DB Shows | Bookmaker Reality |
+|--------|----------|-------------------|
+| Red Wings | 58.2% fair | **33.3%** fair (should be the underdog) |
+| Capitals | 60.2% fair | **31.6%** fair (should be the underdog) |
 
-| Field | Value | Problem |
-|-------|-------|---------|
-| Polymarket title | "Wild vs. Oilers" | Wild = YES, Oilers = NO |
-| Bookmaker outcomes[0] | Edmonton Oilers | Oilers listed first in API |
-| `targetIndex` | 0 | System thinks "matched team is YES" |
-| `isMatchedTeamYesSide` | TRUE | **WRONG** - Oilers are NO side |
-| `bookmakerFairProb` | 55.6% (Oilers) | Correctly calculated |
-| `yesSideFairProb` | 55.6% | **WRONG** - should be 44.4% (Wild) |
-| Stored `recommended_outcome` | Wild | Looks right but... |
-| Stored `edge_percent` | 10.6% | **WRONG** - comparing Oilers' 55.6% to Wild's 45¢ |
+This causes the system to recommend betting on underdogs as if they were favorites, creating false "high-edge" signals.
 
-### Solution
+---
 
-Replace the flawed `targetIndex === 0` logic with explicit team-to-title matching.
+## Root Cause Analysis
 
-**File:** `supabase/functions/polymarket-monitor/index.ts`
+I traced through the entire matching and calculation pipeline. The bug is in `findBookmakerMatch()` (lines 812-831).
 
-**Location:** Lines 1281-1284
+### The Fallback Bug
 
-**Current Code:**
-```typescript
-// Determine if matched team is the YES side (home) or NO side (away)
-// In Polymarket H2H, YES = home team = first team in "Team A vs. Team B"
-// match.targetIndex: 0 = first outcome (typically home), 1 = second outcome (typically away)
-isMatchedTeamYesSide = match.targetIndex === 0;
+When **BOTH teams are found** in the Polymarket event name (common for H2H markets), the code falls into a fallback:
+
+```javascript
+} else {
+  // Both teams found - try question, then fallback
+  if (homeWords.some(w => questionNorm.includes(w))) {
+    targetIndex = 0;
+    teamName = game.home_team;
+  } else if (awayWords.some(w => questionNorm.includes(w))) {
+    targetIndex = 1;
+    teamName = game.away_team;
+  } else {
+    // BUG: Always picks index 0 (first bookmaker outcome)
+    targetIndex = 0;
+    teamName = market.outcomes[0]?.name || game.home_team;
+  }
+}
 ```
 
-**Fixed Code:**
-```typescript
-// FIXED: Determine YES/NO by comparing matched team to the POLYMARKET title order
-// Parse the Polymarket event name to get the YES team (first team in "Team A vs. Team B")
-const titleParts = event.event_name.match(/^(.+?)\s+vs\.?\s+(.+?)(?:\s*-\s*.*)?$/i);
-const polyYesTeam = titleParts?.[1]?.trim()?.toLowerCase() || '';
-const polyNoTeam = titleParts?.[2]?.trim()?.toLowerCase() || '';
-const matchedTeamNorm = normalizeName(teamName || '');
+**Why this fails:**
+- Bookmaker data: "Detroit Red Wings vs Colorado Avalanche" → Index 0 = Colorado (46.6%)
+- Polymarket title: "Avalanche vs. Red Wings" (different order)
+- System sets `targetIndex = 0` and gets **Colorado's probability (46.6%)**
+- After 3-way to 2-way conversion: 46.6% / 79.9% = **58.3%**
+- System **thinks** this is Detroit's probability (because `teamName = Detroit`)
+- Edge calculation uses wrong probability → **inverted recommendation**
 
-// Get last word of each team (the nickname: "Wild", "Oilers", "Kings", etc.)
-const matchedNickname = matchedTeamNorm.split(' ').pop() || '';
-const yesNickname = polyYesTeam.split(' ').pop() || '';
-const noNickname = polyNoTeam.split(' ').pop() || '';
+---
 
-// Check if matched team's nickname appears in the YES team name
-const matchesYes = yesNickname && matchedNickname && 
-  (matchedNickname.includes(yesNickname) || yesNickname.includes(matchedNickname));
-const matchesNo = noNickname && matchedNickname && 
-  (matchedNickname.includes(noNickname) || noNickname.includes(matchedNickname));
+## Solution
 
-// Assign based on which side matched
-if (matchesYes && !matchesNo) {
-  isMatchedTeamYesSide = true;
-} else if (matchesNo && !matchesYes) {
-  isMatchedTeamYesSide = false;
-} else {
-  // Fallback: Log ambiguity and skip this event
-  console.log(`[POLY-MONITOR] AMBIGUOUS SIDE: "${teamName}" unclear in "${event.event_name}" - skipping`);
+### Fix 1: Use Polymarket Title Order to Determine Target Team
+
+Instead of relying on bookmaker outcome order, determine which team to track based on **which Polymarket side** we're calculating:
+
+```javascript
+// When both teams are found in event name:
+// Parse Polymarket title to get YES/NO teams
+const titleParts = eventName.match(/^(.+?)\s+vs\.?\s+(.+?)$/i);
+const polyYesTeamNorm = normalizeName(titleParts?.[1] || '');
+const polyNoTeamNorm = normalizeName(titleParts?.[2] || '');
+
+// Match each Polymarket team to bookmaker outcomes
+const yesOutcomeIndex = market.outcomes.findIndex(o => {
+  const outcomeNorm = normalizeName(o.name);
+  const yesNickname = polyYesTeamNorm.split(' ').pop();
+  return outcomeNorm.includes(yesNickname);
+});
+
+const noOutcomeIndex = market.outcomes.findIndex(o => {
+  const outcomeNorm = normalizeName(o.name);
+  const noNickname = polyNoTeamNorm.split(' ').pop();
+  return outcomeNorm.includes(noNickname);
+});
+
+// Calculate fair probability for BOTH sides directly
+const yesFairProb = calculateConsensusFairProb(..., yesOutcomeIndex, ...);
+const noFairProb = calculateConsensusFairProb(..., noOutcomeIndex, ...);
+
+// Now edge calculation uses correct probabilities
+```
+
+### Fix 2: Simplify Edge Calculation
+
+Since we can calculate both YES and NO fair probabilities directly:
+
+```javascript
+// Direct comparison - no inversions needed
+const yesEdge = yesFairProb - livePolyPrice;
+const noEdge = noFairProb - (1 - livePolyPrice);
+
+// Pick the positive edge side
+if (yesEdge > 0 && yesEdge >= noEdge) {
+  betSide = 'YES';
+  recommendedOutcome = polyYesTeam;
+  recommendedFairProb = yesFairProb;
+  rawEdge = yesEdge;
+} else if (noEdge > 0) {
+  betSide = 'NO';
+  recommendedOutcome = polyNoTeam;
+  recommendedFairProb = noFairProb;
+  rawEdge = noEdge;
+}
+```
+
+### Fix 3: Add Validation Logging
+
+Add explicit probability sanity checks:
+
+```javascript
+// Sanity check: Fair prob should match roughly with bookmaker consensus
+console.log(`[POLY-MONITOR] Fair probs: YES=${polyYesTeam}=${(yesFairProb*100).toFixed(1)}%, NO=${polyNoTeam}=${(noFairProb*100).toFixed(1)}%`);
+
+// Block if probabilities don't sum to ~100%
+if (Math.abs(yesFairProb + noFairProb - 1.0) > 0.05) {
+  console.log(`[POLY-MONITOR] PROBABILITY MISMATCH: ${yesFairProb + noFairProb} - skipping`);
   continue;
 }
-
-console.log(`[POLY-MONITOR] Side mapping: matched="${teamName}" → ${isMatchedTeamYesSide ? 'YES' : 'NO'} side (polyYes="${polyYesTeam}", polyNo="${polyNoTeam}")`);
 ```
 
-### Impact
+---
 
-| Before Fix | After Fix |
-|------------|-----------|
-| Compares favorite's probability to underdog's price | Compares same team's probability to same team's price |
-| Creates phantom 10%+ edges | Only surfaces real edges |
-| Recommends wrong team | Recommends correct team |
-| Side inversion on 50%+ of signals | Correct side mapping |
+## Technical Changes
 
-### Files Modified
+### Files to Modify
 
-1. `supabase/functions/polymarket-monitor/index.ts` — Lines 1281-1284 replaced with explicit title-based side mapping
+1. **`supabase/functions/polymarket-monitor/index.ts`**
+   - Refactor `findBookmakerMatch()` to return both YES and NO team mappings
+   - Modify edge calculation section (lines 1375-1436) to use direct team-to-probability mapping
+   - Add probability validation logging
+   - Remove the fragile `isMatchedTeamYesSide` inversion logic
 
-### Testing
+### Changes Summary
 
-After deployment, run a scan and verify:
-1. New signals have `bookmaker_prob_fair` matching the `recommended_outcome` team
-2. Edge calculations compare apples-to-apples (same team's fair prob vs same team's Poly price)
-3. No more "Bet on underdog at 45¢ because favorite is 55% fair" signals
+```
+Current flow:
+1. Match ONE team → get its probability
+2. Determine if matched team is YES or NO side
+3. Invert probability if needed
+4. Calculate edge with inverted values
 
-### Note on Speaking in Team Names
+New flow:
+1. Parse Polymarket title → get YES team and NO team names
+2. Find bookmaker probability for YES team directly
+3. Find bookmaker probability for NO team directly  
+4. Calculate yesEdge = yesFairProb - polyYesPrice
+5. Calculate noEdge = noFairProb - polyNoPrice
+6. Pick the side with positive edge
+```
 
-This fix aligns with your preference to **use team names instead of YES/NO** in the data model. The signal already stores `recommended_outcome` (team name), and the UI should display this rather than "BUY YES". The underlying YES/NO mapping becomes an internal implementation detail, not user-facing language.
+---
+
+## Immediate Action
+
+Before implementing the full fix, I can **expire the current bad signals** and they won't resurface until the code is fixed (because the edge calculation would produce the same wrong result).
+
+Should I proceed with:
+1. Expiring the Avalanche/Red Wings and Hurricanes/Capitals signals now
+2. Implementing the fix to prevent future inversions
+
