@@ -845,41 +845,79 @@ function findBookmakerMatch(
     
     if (!market || !market.outcomes) continue;
     
-    // For H2H markets, find indices for BOTH Polymarket teams in bookmaker outcomes
+    // For H2H markets, use 3-tier matching: exact → token-overlap → reject
     if (targetMarketKey === 'h2h') {
-      // Find bookmaker outcome that matches Polymarket YES team
-      const yesOutcomeIndex = market.outcomes.findIndex((o: any) => {
-        const outcomeNorm = normalizeName(o.name);
-        const outcomeNickname = outcomeNorm.split(' ').pop() || '';
-        // Match by nickname (last word)
-        return yesNickname && outcomeNickname && 
-          (outcomeNickname.includes(yesNickname) || yesNickname.includes(outcomeNickname));
-      });
+      // Enhanced normalization: strip common prefixes/suffixes
+      const norm = (s: string) => normalizeName(s)
+        .replace(/\b(fc|sc|afc|cf|bc|the)\b/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
       
-      // Find bookmaker outcome that matches Polymarket NO team  
-      const noOutcomeIndex = market.outcomes.findIndex((o: any) => {
-        const outcomeNorm = normalizeName(o.name);
-        const outcomeNickname = outcomeNorm.split(' ').pop() || '';
-        return noNickname && outcomeNickname && 
-          (outcomeNickname.includes(noNickname) || noNickname.includes(outcomeNickname));
-      });
+      const yesFull = norm(polyYesTeam);
+      const noFull = norm(polyNoTeam);
       
-      // CRITICAL: We need BOTH teams to match for valid H2H comparison
+      // TIER 1: Exact normalized name match
+      const exactIndex = (team: string) =>
+        market.outcomes.findIndex((o: any) => norm(o.name) === team);
+      
+      let yesOutcomeIndex = exactIndex(yesFull);
+      let noOutcomeIndex = exactIndex(noFull);
+      let matchMethod = 'exact';
+      
+      // TIER 2: Token overlap fallback (requires ≥2 shared tokens)
       if (yesOutcomeIndex === -1 || noOutcomeIndex === -1) {
-        console.log(`[POLY-MONITOR] H2H partial match skipped: yesIdx=${yesOutcomeIndex}, noIdx=${noOutcomeIndex} for "${eventName}"`);
+        const tokens = (s: string) => new Set(norm(s).split(' ').filter(Boolean));
+        const overlapScore = (a: Set<string>, b: Set<string>) => {
+          let hit = 0;
+          for (const t of a) if (b.has(t)) hit++;
+          return hit;
+        };
+        
+        const yesTok = tokens(polyYesTeam);
+        const noTok = tokens(polyNoTeam);
+        
+        const bestMatchIndex = (teamTok: Set<string>, excludeIdx: number = -1) => {
+          let best = -1, bestScore = 0;
+          market.outcomes.forEach((o: any, i: number) => {
+            if (i === excludeIdx) return; // Prevent matching same outcome twice
+            const s = overlapScore(teamTok, tokens(o.name));
+            if (s > bestScore) { bestScore = s; best = i; }
+          });
+          return { best, bestScore };
+        };
+        
+        if (yesOutcomeIndex === -1) {
+          const { best, bestScore } = bestMatchIndex(yesTok);
+          if (bestScore >= 2) {
+            yesOutcomeIndex = best;
+            matchMethod = 'token-overlap';
+          }
+        }
+        if (noOutcomeIndex === -1) {
+          const { best, bestScore } = bestMatchIndex(noTok, yesOutcomeIndex);
+          if (bestScore >= 2) {
+            noOutcomeIndex = best;
+            matchMethod = 'token-overlap';
+          }
+        }
+      }
+      
+      // TIER 3: Reject if neither tier succeeds
+      if (yesOutcomeIndex === -1 || noOutcomeIndex === -1) {
+        console.log(`[POLY-MONITOR] MATCH: failed for "${eventName}" → YES="${polyYesTeam}", NO="${polyNoTeam}" (yesIdx=${yesOutcomeIndex}, noIdx=${noOutcomeIndex})`);
         continue;
       }
       
       // Ensure they're different outcomes (not matching same team twice)
       if (yesOutcomeIndex === noOutcomeIndex) {
-        console.log(`[POLY-MONITOR] H2H same-team match skipped: both indices=${yesOutcomeIndex} for "${eventName}"`);
+        console.log(`[POLY-MONITOR] MATCH: same-team collision for "${eventName}" → both indices=${yesOutcomeIndex}`);
         continue;
       }
       
       const yesTeamName = market.outcomes[yesOutcomeIndex]?.name || polyYesTeam;
       const noTeamName = market.outcomes[noOutcomeIndex]?.name || polyNoTeam;
       
-      console.log(`[POLY-MONITOR] H2H DIRECT MATCH: "${eventName}" → YES=${yesTeamName}(idx${yesOutcomeIndex}), NO=${noTeamName}(idx${noOutcomeIndex})`);
+      console.log(`[POLY-MONITOR] MATCH: ${matchMethod} for "${eventName}" → YES=${yesTeamName}(idx${yesOutcomeIndex}), NO=${noTeamName}(idx${noOutcomeIndex})`);
       
       return { 
         game, 
