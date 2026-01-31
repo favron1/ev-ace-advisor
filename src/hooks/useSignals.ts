@@ -1,3 +1,13 @@
+// ============================================================================
+// INTERFACE LAYER: DATA ACCESS HOOK
+// ============================================================================
+// This hook is the ONLY approved way for Layer 2 (Presentation) components
+// to access signal data. It acts as the bridge between layers.
+// 
+// All data fetching, subscriptions, and mutations go through this hook.
+// Components should import useSignals, not call supabase directly.
+// ============================================================================
+
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { arbitrageApi } from '@/lib/api/arbitrage';

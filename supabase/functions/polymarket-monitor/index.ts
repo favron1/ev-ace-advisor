@@ -1,3 +1,11 @@
+// ============================================================================
+// LAYER 1: CORE ALGORITHM - PROTECTED
+// ============================================================================
+// This file is part of the signal detection engine.
+// DO NOT MODIFY unless explicitly requested.
+// Changes here affect signal detection, edge calculation, and data accuracy.
+// ============================================================================
+
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { 
   buildSportEndpoints,

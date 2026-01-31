@@ -1,3 +1,10 @@
+// ============================================================================
+// LAYER 2: PRESENTATION - SAFE TO MODIFY
+// ============================================================================
+// This file handles display and user interaction only.
+// Safe to modify for UI improvements, styling, and UX changes.
+// ============================================================================
+
 import { useState } from 'react';
 import { 
   Zap, 

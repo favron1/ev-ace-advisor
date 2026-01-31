@@ -1,3 +1,10 @@
+// ============================================================================
+// LAYER 2: PRESENTATION - SAFE TO MODIFY
+// ============================================================================
+// This file handles display and user interaction only.
+// Safe to modify for UI improvements, styling, and UX changes.
+// ============================================================================
+
 import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle, Eye, Zap, DollarSign, Timer, ExternalLink, Copy, ChevronDown, Search, Link } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';

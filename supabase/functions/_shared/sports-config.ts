@@ -1,4 +1,12 @@
 // ============================================================================
+// LAYER 1: CORE ALGORITHM - PROTECTED
+// ============================================================================
+// This file is part of the signal detection engine.
+// DO NOT MODIFY unless explicitly requested.
+// Changes here affect signal detection, edge calculation, and data accuracy.
+// ============================================================================
+
+// ============================================================================
 // UNIFIED SPORTS CONFIGURATION
 // ============================================================================
 // Single source of truth for all sport configurations.
