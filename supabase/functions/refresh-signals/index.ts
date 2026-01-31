@@ -451,14 +451,20 @@ Deno.serve(async (req) => {
                 toExpire.push({ id: signal.id, reason: 'stale_bookmaker_data' });
                 staleDataExpired++;
                 continue;
-              } else {
-                // Update to fresh probability for more accurate edge calculation
+              } else if (probDiff > 0.005) {
+                // Meaningful update - log and update to fresh probability
+                console.log(`[REFRESH] Updating bookmaker prob for ${signal.event_name}: ${(bookmakerFairProb * 100).toFixed(1)}% -> ${(freshFairProb * 100).toFixed(1)}%`);
                 bookmakerFairProb = freshFairProb;
               }
             }
           }
         }
       }
+
+      // Track if bookmaker prob changed significantly (needs DB update)
+      const bookmakerProbChanged = bookmakerFairProb !== null && 
+        signal.bookmaker_prob_fair !== null &&
+        Math.abs(bookmakerFairProb - signal.bookmaker_prob_fair) > 0.005;
 
       // Calculate new edge if we have both live price and fair prob
       let newEdge: number | null = null;
@@ -519,6 +525,14 @@ Deno.serve(async (req) => {
         // Update edge if changed
         if (newEdge !== null && Math.abs(newEdge - oldEdge) > 0.001) {
           updates.edge_percent = Math.round(newEdge * 1000) / 1000; // 3 decimal places
+          needsUpdate = true;
+        }
+
+        // Update bookmaker fair probability if it changed from fresh odds
+        if (bookmakerProbChanged && bookmakerFairProb !== null) {
+          updates.bookmaker_prob_fair = Math.round(bookmakerFairProb * 1000) / 1000;
+          // Also update the display probability (bookmaker_probability is used in UI)
+          updates.bookmaker_probability = Math.round(bookmakerFairProb * 100);
           needsUpdate = true;
         }
 
