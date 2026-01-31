@@ -1,399 +1,176 @@
 
-# 3-Step Fix Plan: Polymarket Tokenization Pipeline
+# Root Cause Analysis: Bookmaker Data as Source of Truth
 
 ## Executive Summary
 
-The system has **two critical data failures** that create garbage signals:
+The system currently has **three core architectural flaws** causing stale signals, duplicate markets, and signals for completed games:
 
-| Problem | Current State | Impact |
-|---------|---------------|--------|
-| **Missing Token IDs** | NBA/CBB from Firecrawl/scrape-nba: 0-5% token coverage | Markets fallback to 0.50 prices, unusable |
-| **Fair Probability Outlier Bug** | 92% threshold blocks valid sharp data | Creates false 32% edges on heavy favorites |
-| **Low Match Rate** | 11% of events match to bookmaker data | 89% of potential opportunities missed |
-
-**Root Cause:** Firecrawl/scrape-nba extract **visible prices** (e.g., "lal76¢") from markdown, but **never extract token IDs**. Without token IDs, the system cannot:
-1. Fetch real-time CLOB executable prices
-2. Validate price accuracy
-3. Determine which contract is YES vs NO
-
-## Database Evidence
-
-```text
-Source          | Total | Has Tokens | Token %
-----------------|-------|------------|--------
-api (Gamma)     | 1,279 |      1,279 | 100%
-gamma-api       |    81 |         81 | 100%
-firecrawl       |    51 |          0 | 0%      ← BROKEN
-scrape-nba      |    37 |          2 | 5%      ← BROKEN
-```
+1. **Trusting Polymarket timestamps** - The system stores Polymarket's placeholder times (23:59:59 or 00:00:00 UTC) as `event_date` and `expires_at` instead of using bookmaker `commence_time`
+2. **Trusting Polymarket prices as fallback** - When CLOB data fails, the system falls back to stale cached prices (often 50¢) instead of deriving prices from bookmaker fair probability
+3. **No authoritative bookmaker sync** - Bookmaker data is treated as supplementary for matching rather than as the canonical source
 
 ---
 
-## Step 1: Build Tokenization Service (UI Repair Path)
+## Root Cause Deep-Dive
 
-**Goal:** Every discovered market ends in one of two states: `TOKENIZED` or `UNTRADEABLE`
+### Issue 1: Placeholder Timestamps Create Stale/Duplicate Signals
 
-### 1.1 Create New Edge Function: `tokenize-market`
-
-A dedicated service to resolve token IDs from any market reference.
-
-```text
-INPUT:
-  - market_url OR slug OR condition_id OR team names
-
-OUTPUT:
-  - condition_id
-  - token_id_yes
-  - token_id_no
-  - token_source: 'clob' | 'gamma' | 'ui_network' | 'ui_dom'
-  - confidence: 0-100
-  - OR: { tradeable: false, untradeable_reason: 'MISSING_TOKENS' }
+**Current Flow:**
+```
+Polymarket API → event.endDate (often 23:59:59 placeholder)
+                    ↓
+              polymarket_h2h_cache.event_date = placeholder
+                    ↓
+              signal_opportunities.expires_at = placeholder
+                    ↓
+              Signal shows as "valid" even after game finished
 ```
 
-### 1.2 Extraction Priority Order
-
-The function will try multiple extractors in order:
-
-```text
-Priority 1: CLOB API Direct
-  └─ GET https://clob.polymarket.com/markets/{condition_id}
-  └─ Returns: { tokens: [{ token_id, outcome }] }
-  └─ Confidence: 100%
-
-Priority 2: Gamma API Lookup (by team names)
-  └─ GET https://gamma-api.polymarket.com/events?tag_slug=nba
-  └─ Search for matching event, extract clobTokenIds
-  └─ Confidence: 95%
-
-Priority 3: Firecrawl HTML + __NEXT_DATA__ Extraction
-  └─ Scrape market page with Firecrawl (formats: ['html'])
-  └─ Parse <script id="__NEXT_DATA__">
-  └─ Extract conditionId, clobTokenIds from JSON
-  └─ Confidence: 80%
-
-Priority 4: CLOB Search (batch)
-  └─ GET https://clob.polymarket.com/markets?limit=500
-  └─ Search by team nicknames in question/description
-  └─ Confidence: 75%
-
-FALLBACK: Mark untradeable
-  └─ { tradeable: false, untradeable_reason: 'MISSING_TOKENS' }
+**Evidence from database:**
+```sql
+-- Multiple games have 23:59:59 placeholder times
+event_date:2026-01-31 23:59:59+00  (Rangers vs. Penguins - FINISHED)
+event_date:2026-01-31 23:59:59+00  (Jets vs. Panthers - FINISHED)
+event_date:2026-01-31 23:59:59+00  (Ipswich vs Preston - duplicated)
 ```
 
-### 1.3 Database Schema Addition
+**Code Location (polymarket-sync-24h):**
+Line 468: `const eventDate = resolvedDate || new Date(event.endDate || event.startDate);`
+- Falls back to Polymarket's placeholder when no better date found
+- Odds API cross-reference happens but result isn't always persisted
 
-Add new fields to `polymarket_h2h_cache`:
+### Issue 2: Stale 50¢ Cache Prices Create False Edges
+
+**Current Flow:**
+```
+CLOB API → returns 99¢ (game resolved)
+              ↓
+        Price rejected as "resolved" (good!)
+              ↓
+        BUT: Fallback to cache.yes_price (0.5)
+              ↓
+        Signal created with 50¢ vs 60% fair = false edge!
+```
+
+**Evidence from database:**
+```sql
+-- Cache shows stale 0.5 prices despite active CLOB data
+yes_price:0.5, no_price:0.5  (Jets vs. Panthers - best_ask: 0.999!)
+yes_price:0.5, no_price:0.5  (Rangers vs. Penguins - best_ask: 0.999!)
+```
+
+**Code Location (polymarket-monitor):**
+Line 1578: `let livePolyPrice = cache?.yes_price || event.polymarket_yes_price || 0.5;`
+- When CLOB fails or returns resolved prices, system uses cached 50¢
+
+### Issue 3: No Bookmaker-Authoritative Date Override
+
+**What Should Happen:**
+Bookmaker data from Odds API (Pinnacle, Betfair) has accurate `commence_time` for every game. This should be the **canonical source** for:
+- When the game starts (for expiration)
+- Whether the game has already started (for signal blocking)
+- General consensus scheduling
+
+**What Currently Happens:**
+- `findOddsApiCommenceTime()` in sync-24h finds the correct time
+- But it's only used as a fallback, not persisted to cache
+- Monitor function has partial fix (lines 1470-1510) but doesn't update cache
+
+---
+
+## The Solution: Bookmaker-First Architecture
+
+### Principle: "Sharp Books Are Truth"
+
+When syncing and monitoring, always:
+1. Use bookmaker `commence_time` as authoritative event start
+2. Derive Polymarket edge from CLOB ask price vs bookmaker fair probability
+3. When CLOB fails, skip the market entirely (no stale fallback)
+
+### Implementation Changes
+
+#### Change 1: Persist Bookmaker Commence Time to Cache
+
+**File: `supabase/functions/polymarket-sync-24h/index.ts`**
+
+Add `bookmaker_commence_time` column to track accurate start time:
+- When matching Polymarket event to Odds API game, store `game.commence_time`
+- Update existing helper `findOddsApiCommenceTime()` to return both team match AND time
+- Persist to `polymarket_h2h_cache.bookmaker_commence_time`
+
+#### Change 2: Update Cache Prices from CLOB During Sync
+
+**File: `supabase/functions/polymarket-sync-24h/index.ts`**
+
+After upsert to cache, batch-fetch CLOB prices and write `yes_price`/`no_price`:
+- Add CLOB batch price fetch after cache upsert
+- Update `yes_price`, `no_price`, `best_bid`, `best_ask` columns
+- Skip updating if CLOB returns resolved prices (< 2¢ or > 98¢)
+
+#### Change 3: Use Bookmaker Time as Signal Expiry
+
+**File: `supabase/functions/polymarket-monitor/index.ts`**
+
+Replace `event.commence_time` (Polymarket) with `bookmaker_commence_time`:
+- Line 2360: `expires_at: event.commence_time` → `expires_at: match.game.commence_time`
+- SMS block gate (line 711-723): Already uses `event.commence_time`, update to use matched bookmaker time
+
+#### Change 4: Eliminate Stale Price Fallback
+
+**File: `supabase/functions/polymarket-monitor/index.ts`**
+
+When CLOB returns no price or resolved price, skip the market entirely:
+- Line 1578: Remove `|| 0.5` fallback
+- Add explicit skip if `livePolyPrice` is undefined after CLOB fetch
+- Log `SKIPPED_NO_CLOB_PRICE` for debugging
+
+#### Change 5: Add Bookmaker Fair Probability as Price Reference
+
+When CLOB data is unavailable but bookmaker data exists:
+- Use `yesFairProb` from bookmaker consensus as reference
+- Signal creation blocked unless live CLOB price is available
+- Display bookmaker fair % in UI as secondary reference
+
+### Database Schema Changes
 
 ```sql
+-- Add bookmaker-authoritative time to cache
 ALTER TABLE polymarket_h2h_cache 
-ADD COLUMN IF NOT EXISTS tradeable boolean DEFAULT true,
-ADD COLUMN IF NOT EXISTS untradeable_reason text,
-ADD COLUMN IF NOT EXISTS token_source text,
-ADD COLUMN IF NOT EXISTS token_confidence numeric,
-ADD COLUMN IF NOT EXISTS last_token_repair_at timestamptz;
-```
+ADD COLUMN IF NOT EXISTS bookmaker_commence_time TIMESTAMPTZ;
 
-### 1.4 Hard Rule Enforcement
-
-**No tokens = No price = No signal**
-
-At the earliest point in `polymarket-monitor`, before any price calculation:
-
-```typescript
-// HARD GATE: Cannot trade without token IDs
-if (!cache?.token_id_yes) {
-  await supabase.from('polymarket_h2h_cache').update({
-    tradeable: false,
-    untradeable_reason: 'MISSING_TOKENS'
-  }).eq('condition_id', conditionId);
-  
-  funnelStats.blocked_no_tokens++;
-  continue; // Skip to next market
-}
+-- Add index for efficient queries
+CREATE INDEX IF NOT EXISTS idx_cache_bookmaker_time 
+ON polymarket_h2h_cache(bookmaker_commence_time);
 ```
 
 ---
 
-## Step 2: Kill Garbage Signals + Add Funnel Visibility
+## Technical Implementation Summary
 
-**Goal:** Eliminate 0.50/0.999 placeholders and make failures measurable
-
-### 2.1 Remove All Placeholder Price Logic
-
-Currently in multiple files, the system falls back to `0.5` when data is missing:
-
-**scrape-polymarket-prices (line 179):**
-```typescript
-// REMOVE: Placeholder fallback
-yes_price: game.team1Price,  // This is from markdown, not CLOB
-```
-
-**polymarket-monitor (line 1489):**
-```typescript
-// REMOVE: Placeholder fallback
-let livePolyPrice = cache?.yes_price || event.polymarket_yes_price || 0.5;
-```
-
-Replace with strict token-gated logic:
-```typescript
-// STRICT: No token = skip entirely (already handled by gate above)
-const tokenIdYes = cache?.token_id_yes;
-if (!tokenIdYes || !clobPrices.has(tokenIdYes)) {
-  console.log('[FUNNEL] SKIP: No executable price for', event.event_name);
-  funnelStats.no_executable_price++;
-  continue;
-}
-const livePolyPrice = clobPrices.get(tokenIdYes)!.ask;
-```
-
-### 2.2 Implement Funnel Counters
-
-Add comprehensive tracking to `polymarket-monitor`:
-
-```typescript
-interface FunnelStats {
-  // Discovery
-  discovered_markets: number;
-  
-  // Tokenization Gate
-  tokenized: number;
-  blocked_no_tokens: number;
-  
-  // Matching
-  matched_to_bookmaker: number;
-  match_tier1_canonical: number;
-  match_tier2_nickname: number;
-  match_tier3_fuzzy: number;
-  skipped_no_bookmaker: number;
-  
-  // Pricing
-  priced_from_clob: number;
-  rejected_garbage_price: number;
-  
-  // Sanity
-  passed_sanity: number;
-  failed_sanity_outlier: number;
-  
-  // Signal
-  positive_ev: number;
-  signaled: number;
-}
-```
-
-**Summary Log Output:**
-```text
-[POLY-MONITOR] FUNNEL_SUMMARY
-  NBA:  64 discovered → 62 tokenized → 40 matched → 33 priced → 28 sane → 6 +EV → 2 signaled
-  NHL: 142 discovered → 142 tokenized → 130 matched → 125 priced → 118 sane → 8 +EV → 3 signaled
-```
-
-### 2.3 Update Firecrawl Scrapers
-
-Modify `scrape-polymarket-prices` and `scrape-polymarket-nba` to:
-
-1. **Request HTML format** (not just markdown) to access `__NEXT_DATA__`
-2. **Call tokenization service** before upserting
-3. **Mark untradeable** if tokens cannot be resolved
-
-```typescript
-// NEW FLOW in scrape-polymarket-prices
-const firecrawlData = await fetch('...', {
-  body: JSON.stringify({
-    url: sportUrl,
-    formats: ['markdown', 'html'],  // ADD HTML
-    waitFor: 5000,
-  })
-});
-
-const html = firecrawlData.data?.html || '';
-
-// Extract token IDs from __NEXT_DATA__
-const tokenData = extractTokensFromNextData(html);
-
-// Only upsert if we have tokens
-if (tokenData.tokenIdYes) {
-  await supabase.from('polymarket_h2h_cache').upsert({
-    // ... existing fields
-    token_id_yes: tokenData.tokenIdYes,
-    token_id_no: tokenData.tokenIdNo,
-    token_source: 'ui_network',
-    tradeable: true,
-  });
-} else {
-  // Mark as needing repair
-  await supabase.from('polymarket_h2h_cache').upsert({
-    // ... existing fields
-    tradeable: false,
-    untradeable_reason: 'TOKENS_NOT_FOUND_IN_HTML',
-  });
-}
-```
-
----
-
-## Step 3: Fix Accuracy Bugs
-
-**Goal:** Stop false edges and stop blocking real edges
-
-### 3.1 Fair Probability Outlier Bug
-
-**Problem:** After converting 3-way markets (H2H + Draw) to 2-way, favorites can legitimately reach 95%+. The 92% threshold blocks valid sharp data.
-
-**Current Code (polymarket-monitor, line 1132):**
-```typescript
-if (fairProb > 0.92 || fairProb < 0.08) {
-  // BLOCKS: Carolina at 92.7% (legitimate heavy favorite)
-  continue;
-}
-```
-
-**Fix:** Raise thresholds and add minimum sharp count:
-
-```typescript
-// UPDATED: Raised for post-normalization H2H markets
-const OUTLIER_HIGH = 0.96;  // Up from 0.92
-const OUTLIER_LOW = 0.04;   // Down from 0.08
-const MIN_SHARP_COUNT = 2;  // Require 2+ sharp books before outlier rejection
-
-// Count how many sharp books agree
-const sharpCount = bookmakers.filter(b => 
-  SHARP_BOOKS.includes(b.key) && 
-  fairProb >= OUTLIER_LOW && 
-  fairProb <= OUTLIER_HIGH
-).length;
-
-if (fairProb > OUTLIER_HIGH || fairProb < OUTLIER_LOW) {
-  if (sharpCount >= MIN_SHARP_COUNT) {
-    // Trust the sharps even if it looks extreme
-    console.log('[FAIR_PROB] Extreme but sharp-confirmed:', fairProb);
-  } else {
-    console.log('[FAIR_PROB] OUTLIER_REJECTED:', bookmaker.key, fairProb);
-    continue;
-  }
-}
-```
-
-### 3.2 Low Match Rate (Team Name Resolution)
-
-**Problem:** Only 11% of events match. Missing aliases cause canonical matching to fail.
-
-**Current Aliases (sync-polymarket-h2h, line 56-122):**
-- Has: `'washington capitals': ['capitals', 'caps']`
-- Missing: `'wsh'`, `'wash'`, `'washington'`
-
-**Fix:** Expand alias tables in `_shared/canonicalize.ts`:
-
-```typescript
-const NHL_ALIASES = {
-  'carolina hurricanes': ['hurricanes', 'canes', 'car', 'carolina'],
-  'washington capitals': ['capitals', 'caps', 'wsh', 'wash', 'washington'],
-  'san jose sharks': ['sharks', 'sjs', 'san jose', 'sj sharks'],
-  'calgary flames': ['flames', 'cgy', 'calgary'],
-  // ... etc
-};
-
-const NBA_ALIASES = {
-  'los angeles lakers': ['lakers', 'lal', 'la lakers', 'los angeles'],
-  'boston celtics': ['celtics', 'bos', 'boston'],
-  // ... etc
-};
-```
-
-**Add Match Failure Logging:**
-```typescript
-if (!matchedGame) {
-  console.log('[MATCH_FAIL]', {
-    polyEvent: event.event_name,
-    searchTerms: [homeNorm, awayNorm],
-    topCandidates: bookmakerGames.slice(0, 3).map(g => g.home_team + ' vs ' + g.away_team),
-    reason: 'no_alias_match'
-  });
-}
-```
-
----
-
-## Implementation Order
-
-```text
-┌─────────────────────────────────────────────────────────────────┐
-│ PHASE 1: Stop the Bleeding (Day 1)                              │
-│                                                                 │
-│ ✓ Add database columns: tradeable, untradeable_reason,         │
-│   token_source, token_confidence                                │
-│ ✓ Add hard gate in polymarket-monitor: no tokens = skip        │
-│ ✓ Remove all 0.50 placeholder fallback logic                   │
-│ ✓ Expire existing garbage signals                               │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ PHASE 2: Build Tokenization Pipeline (Day 2-3)                  │
-│                                                                 │
-│ ✓ Create tokenize-market edge function                          │
-│ ✓ Implement multi-extractor priority chain                     │
-│ ✓ Update scrape-polymarket-nba to extract HTML + tokens        │
-│ ✓ Add funnel counters and summary logging                      │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ PHASE 3: Fix Accuracy Bugs (Day 4)                              │
-│                                                                 │
-│ ✓ Raise outlier threshold to 96%/4%                            │
-│ ✓ Add minimum sharp count requirement                          │
-│ ✓ Expand team alias tables                                      │
-│ ✓ Add match failure logging                                     │
-└─────────────────────────────────────────────────────────────────┘
-```
+| File | Change | Lines Affected |
+|------|--------|----------------|
+| `polymarket-sync-24h/index.ts` | Persist `bookmaker_commence_time` from Odds API match | ~550-600 |
+| `polymarket-sync-24h/index.ts` | Batch CLOB price fetch + cache update | ~750-850 |
+| `polymarket-monitor/index.ts` | Use bookmaker time for `expires_at` | ~2360 |
+| `polymarket-monitor/index.ts` | Remove 0.5 fallback, skip if no CLOB | ~1578 |
+| `polymarket-monitor/index.ts` | Skip market if CLOB returns resolved price | ~1600-1624 |
+| Database migration | Add `bookmaker_commence_time` column | New migration |
 
 ---
 
 ## Expected Outcomes
 
-| Metric | Current | After Phase 1 | After Phase 3 |
-|--------|---------|---------------|---------------|
-| NBA token coverage | 5% | 0% (marked untradeable) | 80%+ |
-| Garbage signals | Many | 0 | 0 |
-| Match rate | 11% | 11% | 50%+ |
-| False positive edges | High | 0 | 0 |
-| False negative edges | High | Same | Near 0 |
+After implementation:
+- **No stale signals**: Games that have finished will be detected immediately via bookmaker commence_time
+- **No false edges**: Markets without live CLOB prices will be skipped, not filled with 50¢
+- **Accurate expiration**: `expires_at` will reflect actual game start, not placeholder midnight
+- **Duplicate prevention**: Each game will have one canonical start time, preventing duplicate detection
 
 ---
 
-## Cleanup SQL (Run After Phase 1)
+## Verification Steps
 
-```sql
--- Expire all signals from untokenized markets
-UPDATE signal_opportunities
-SET status = 'expired',
-    signal_factors = COALESCE(signal_factors, '{}'::jsonb) || 
-      '{"expired_reason": "untokenized_market"}'::jsonb
-WHERE polymarket_condition_id IN (
-  SELECT condition_id 
-  FROM polymarket_h2h_cache 
-  WHERE token_id_yes IS NULL
-)
-AND status = 'active';
-
--- Mark all untokenized firecrawl/scrape-nba markets as untradeable
-UPDATE polymarket_h2h_cache
-SET tradeable = false,
-    untradeable_reason = 'MISSING_TOKENS'
-WHERE token_id_yes IS NULL
-  AND source IN ('firecrawl', 'scrape-nba');
-```
-
----
-
-## Technical Files to Modify
-
-| File | Changes |
-|------|---------|
-| `supabase/functions/tokenize-market/index.ts` | **NEW** - Multi-extractor tokenization service |
-| `supabase/functions/polymarket-monitor/index.ts` | Add hard gate, funnel counters, fix outlier threshold |
-| `supabase/functions/scrape-polymarket-nba/index.ts` | Add HTML extraction, call tokenizer |
-| `supabase/functions/scrape-polymarket-prices/index.ts` | Add HTML extraction, call tokenizer |
-| `supabase/functions/_shared/canonicalize.ts` | Expand team aliases |
-| Database migration | Add new columns to `polymarket_h2h_cache` |
-
+1. Run sync → Verify `bookmaker_commence_time` populated for NHL games
+2. Run monitor → Verify signals use bookmaker time, not placeholder
+3. Check for completed games → Verify they're expired/skipped, not signaled
+4. Check for 50¢ prices → Verify no signals created with stale cache prices
