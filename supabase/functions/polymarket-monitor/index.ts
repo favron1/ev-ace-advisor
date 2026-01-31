@@ -777,13 +777,39 @@ async function fetchBookmakerOdds(sport: string, markets: string, apiKey: string
 }
 
 // Match Polymarket event to bookmaker game
+// Enhanced return type for H2H markets - includes BOTH team indices
+interface H2HMatchResult {
+  game: any;
+  marketKey: string;
+  // For H2H: both indices so we can calculate both fair probs
+  yesTeamIndex: number;  // Index in bookmaker outcomes for YES team (first in Polymarket title)
+  noTeamIndex: number;   // Index in bookmaker outcomes for NO team (second in Polymarket title)
+  yesTeamName: string;   // Full name of YES team
+  noTeamName: string;    // Full name of NO team
+  // Legacy fields for non-H2H markets
+  targetIndex: number;
+  teamName: string;
+}
+
 function findBookmakerMatch(
   eventName: string,
   question: string,
   marketType: string,
   bookmakerGames: any[]
-): { game: any; targetIndex: number; marketKey: string; teamName: string } | null {
+): H2HMatchResult | null {
   const eventNorm = normalizeName(`${eventName} ${question}`);
+  
+  // Parse Polymarket title to get YES/NO teams
+  // In Polymarket H2H: "Team A vs Team B" → YES = Team A, NO = Team B
+  const titleParts = eventName.match(/^(.+?)\s+vs\.?\s+(.+?)(?:\s*-\s*.*)?$/i);
+  const polyYesTeam = titleParts?.[1]?.trim() || '';
+  const polyNoTeam = titleParts?.[2]?.trim() || '';
+  const polyYesNorm = normalizeName(polyYesTeam);
+  const polyNoNorm = normalizeName(polyNoTeam);
+  
+  // Extract nicknames (last word) for matching
+  const yesNickname = polyYesNorm.split(' ').pop() || '';
+  const noNickname = polyNoNorm.split(' ').pop() || '';
   
   for (const game of bookmakerGames) {
     const homeNorm = normalizeName(game.home_team);
@@ -806,10 +832,67 @@ function findBookmakerMatch(
     
     if (!market || !market.outcomes) continue;
     
+    // For H2H markets, find indices for BOTH Polymarket teams in bookmaker outcomes
+    if (targetMarketKey === 'h2h') {
+      // Find bookmaker outcome that matches Polymarket YES team
+      const yesOutcomeIndex = market.outcomes.findIndex((o: any) => {
+        const outcomeNorm = normalizeName(o.name);
+        const outcomeNickname = outcomeNorm.split(' ').pop() || '';
+        // Match by nickname (last word)
+        return yesNickname && outcomeNickname && 
+          (outcomeNickname.includes(yesNickname) || yesNickname.includes(outcomeNickname));
+      });
+      
+      // Find bookmaker outcome that matches Polymarket NO team  
+      const noOutcomeIndex = market.outcomes.findIndex((o: any) => {
+        const outcomeNorm = normalizeName(o.name);
+        const outcomeNickname = outcomeNorm.split(' ').pop() || '';
+        return noNickname && outcomeNickname && 
+          (outcomeNickname.includes(noNickname) || noNickname.includes(outcomeNickname));
+      });
+      
+      // CRITICAL: We need BOTH teams to match for valid H2H comparison
+      if (yesOutcomeIndex === -1 || noOutcomeIndex === -1) {
+        console.log(`[POLY-MONITOR] H2H partial match skipped: yesIdx=${yesOutcomeIndex}, noIdx=${noOutcomeIndex} for "${eventName}"`);
+        continue;
+      }
+      
+      // Ensure they're different outcomes (not matching same team twice)
+      if (yesOutcomeIndex === noOutcomeIndex) {
+        console.log(`[POLY-MONITOR] H2H same-team match skipped: both indices=${yesOutcomeIndex} for "${eventName}"`);
+        continue;
+      }
+      
+      const yesTeamName = market.outcomes[yesOutcomeIndex]?.name || polyYesTeam;
+      const noTeamName = market.outcomes[noOutcomeIndex]?.name || polyNoTeam;
+      
+      console.log(`[POLY-MONITOR] H2H DIRECT MATCH: "${eventName}" → YES=${yesTeamName}(idx${yesOutcomeIndex}), NO=${noTeamName}(idx${noOutcomeIndex})`);
+      
+      return { 
+        game, 
+        marketKey: targetMarketKey, 
+        yesTeamIndex: yesOutcomeIndex,
+        noTeamIndex: noOutcomeIndex,
+        yesTeamName,
+        noTeamName,
+        // Legacy fields (use YES team as default)
+        targetIndex: yesOutcomeIndex, 
+        teamName: yesTeamName 
+      };
+    }
+    
+    // Non-H2H markets (totals, spreads) - use original logic
     let targetIndex = 0;
     let teamName = '';
     
-    if (targetMarketKey === 'h2h') {
+    if (targetMarketKey === 'totals') {
+      const isOver = /\bover\b/i.test(question);
+      targetIndex = market.outcomes.findIndex((o: any) => 
+        isOver ? o.name.toLowerCase().includes('over') : o.name.toLowerCase().includes('under')
+      );
+      teamName = isOver ? 'Over' : 'Under';
+    } else {
+      // Spreads or other - original fallback
       if (containsHome && !containsAway) {
         targetIndex = market.outcomes.findIndex((o: any) => normalizeName(o.name).includes(homeNorm.split(' ').pop() || ''));
         teamName = game.home_team;
@@ -817,24 +900,9 @@ function findBookmakerMatch(
         targetIndex = market.outcomes.findIndex((o: any) => normalizeName(o.name).includes(awayNorm.split(' ').pop() || ''));
         teamName = game.away_team;
       } else {
-        const questionNorm = normalizeName(question);
-        if (homeWords.some((w: string) => questionNorm.includes(w))) {
-          targetIndex = 0;
-          teamName = game.home_team;
-        } else if (awayWords.some((w: string) => questionNorm.includes(w))) {
-          targetIndex = 1;
-          teamName = game.away_team;
-        } else {
-          targetIndex = 0;
-          teamName = market.outcomes[0]?.name || game.home_team;
-        }
+        targetIndex = 0;
+        teamName = market.outcomes[0]?.name || game.home_team;
       }
-    } else if (targetMarketKey === 'totals') {
-      const isOver = /\bover\b/i.test(question);
-      targetIndex = market.outcomes.findIndex((o: any) => 
-        isOver ? o.name.toLowerCase().includes('over') : o.name.toLowerCase().includes('under')
-      );
-      teamName = isOver ? 'Over' : 'Under';
     }
     
     if (targetIndex === -1) {
@@ -846,7 +914,16 @@ function findBookmakerMatch(
       teamName = market.outcomes[targetIndex].name;
     }
     
-    return { game, targetIndex, marketKey: targetMarketKey, teamName };
+    return { 
+      game, 
+      marketKey: targetMarketKey, 
+      yesTeamIndex: targetIndex,
+      noTeamIndex: targetIndex === 0 ? 1 : 0,
+      yesTeamName: teamName,
+      noTeamName: market.outcomes[targetIndex === 0 ? 1 : 0]?.name || '',
+      targetIndex, 
+      teamName 
+    };
   }
   
   return null;
@@ -1268,59 +1345,50 @@ Deno.serve(async (req) => {
         }
         // ============= END TIERED MATCHING =============
 
-        let bookmakerFairProb: number | null = null;
-        let teamName: string | null = null;
-        let isMatchedTeamYesSide: boolean = true; // Track which side the matched team is on
+        // ========== NEW DIRECT H2H EDGE CALCULATION ==========
+        // Calculate fair probabilities for BOTH YES and NO teams directly
+        // This eliminates the fragile isMatchedTeamYesSide inversion logic
+        let yesFairProb: number | null = null;
+        let noFairProb: number | null = null;
+        let yesTeamName: string | null = null;
+        let noTeamName: string | null = null;
         
         if (match) {
-          // Pass sport to handle NHL 3-way to 2-way conversion
-          // bookmakerFairProb here is for the MATCHED TEAM
-          bookmakerFairProb = calculateConsensusFairProb(match.game, match.marketKey, match.targetIndex, sport);
-          teamName = match.teamName;
+          // Calculate fair prob for YES team (first in Polymarket title)
+          yesFairProb = calculateConsensusFairProb(match.game, match.marketKey, match.yesTeamIndex, sport);
+          // Calculate fair prob for NO team (second in Polymarket title)
+          noFairProb = calculateConsensusFairProb(match.game, match.marketKey, match.noTeamIndex, sport);
           
-          // FIXED: Determine YES/NO by comparing matched team to the POLYMARKET title order
-          // Parse the Polymarket event name to get the YES team (first team in "Team A vs. Team B")
-          const titleParts = event.event_name.match(/^(.+?)\s+vs\.?\s+(.+?)(?:\s*-\s*.*)?$/i);
-          const polyYesTeam = titleParts?.[1]?.trim()?.toLowerCase() || '';
-          const polyNoTeam = titleParts?.[2]?.trim()?.toLowerCase() || '';
-          const matchedTeamNorm = normalizeName(teamName || '');
-
-          // Get last word of each team (the nickname: "Wild", "Oilers", "Kings", etc.)
-          const matchedNickname = matchedTeamNorm.split(' ').pop() || '';
-          const yesNickname = polyYesTeam.split(' ').pop() || '';
-          const noNickname = polyNoTeam.split(' ').pop() || '';
-
-          // Check if matched team's nickname appears in the YES team name
-          const matchesYes = yesNickname && matchedNickname && 
-            (matchedNickname.includes(yesNickname) || yesNickname.includes(matchedNickname));
-          const matchesNo = noNickname && matchedNickname && 
-            (matchedNickname.includes(noNickname) || noNickname.includes(matchedNickname));
-
-          // Assign based on which side matched
-          if (matchesYes && !matchesNo) {
-            isMatchedTeamYesSide = true;
-          } else if (matchesNo && !matchesYes) {
-            isMatchedTeamYesSide = false;
-          } else {
-            // Fallback: Log ambiguity and skip this event
-            console.log(`[POLY-MONITOR] AMBIGUOUS SIDE: "${teamName}" unclear in "${event.event_name}" - skipping`);
-            continue;
+          yesTeamName = match.yesTeamName;
+          noTeamName = match.noTeamName;
+          
+          // SANITY CHECK: Fair probs should sum to ~100% for H2H markets
+          if (yesFairProb !== null && noFairProb !== null) {
+            const probSum = yesFairProb + noFairProb;
+            if (Math.abs(probSum - 1.0) > 0.05) {
+              console.log(`[POLY-MONITOR] PROBABILITY MISMATCH: ${(probSum * 100).toFixed(1)}% (YES=${(yesFairProb * 100).toFixed(1)}% + NO=${(noFairProb * 100).toFixed(1)}%) for "${event.event_name}" - skipping`);
+              continue;
+            }
           }
-
-          console.log(`[POLY-MONITOR] Side mapping: matched="${teamName}" → ${isMatchedTeamYesSide ? 'YES' : 'NO'} side (polyYes="${polyYesTeam}", polyNo="${polyNoTeam}")`);
           
-          // CRITICAL FIX #1: Team participant validation
-          // Validate that matched team is actually in the Polymarket event name
-          // This prevents cross-sport mismatches (e.g., "Blackhawks vs. Penguins" matching "Atlanta Hawks")
-          if (teamName) {
-            const eventNorm = normalizeName(event.event_name);
-            const teamNorm = normalizeName(teamName);
-            const teamWords = teamNorm.split(' ').filter(w => w.length > 2);
-            const lastWord = teamWords[teamWords.length - 1] || '';
-            
-            // Team's last word (e.g., "Lightning", "Oilers", "Hawks") must appear in event name
-            if (lastWord && !eventNorm.includes(lastWord)) {
-              console.log(`[POLY-MONITOR] INVALID MATCH: "${teamName}" not found in event "${event.event_name}" - DROPPING`);
+          console.log(`[POLY-MONITOR] DIRECT FAIR PROBS: YES=${yesTeamName}=${yesFairProb !== null ? (yesFairProb * 100).toFixed(1) : '?'}%, NO=${noTeamName}=${noFairProb !== null ? (noFairProb * 100).toFixed(1) : '?'}%`);
+          
+          // CRITICAL FIX: Team participant validation
+          // Validate that BOTH matched teams are in the Polymarket event name
+          const eventNorm = normalizeName(event.event_name);
+          
+          if (yesTeamName) {
+            const yesLastWord = normalizeName(yesTeamName).split(' ').filter(w => w.length > 2).pop() || '';
+            if (yesLastWord && !eventNorm.includes(yesLastWord)) {
+              console.log(`[POLY-MONITOR] INVALID MATCH: YES team "${yesTeamName}" not found in event "${event.event_name}" - DROPPING`);
+              continue;
+            }
+          }
+          
+          if (noTeamName) {
+            const noLastWord = normalizeName(noTeamName).split(' ').filter(w => w.length > 2).pop() || '';
+            if (noLastWord && !eventNorm.includes(noLastWord)) {
+              console.log(`[POLY-MONITOR] INVALID MATCH: NO team "${noTeamName}" not found in event "${event.event_name}" - DROPPING`);
               continue;
             }
           }
@@ -1335,8 +1403,8 @@ Deno.serve(async (req) => {
             polymarket_yes_price: livePolyPrice,
             polymarket_volume: liveVolume,
             last_poly_refresh: now.toISOString(),
-            polymarket_matched: bookmakerFairProb !== null,
-            current_probability: bookmakerFairProb,
+            polymarket_matched: yesFairProb !== null && noFairProb !== null,
+            current_probability: yesFairProb, // Store YES team's fair prob
             updated_at: now.toISOString(),
           })
           .eq('id', event.id);
@@ -1354,51 +1422,47 @@ Deno.serve(async (req) => {
             .eq('condition_id', event.polymarket_condition_id);
         }
 
-        // Check for edge
-        if (bookmakerFairProb !== null && liveVolume >= 5000) {
+        // Check for edge - now uses BOTH fair probs directly
+        if (yesFairProb !== null && noFairProb !== null && liveVolume >= 5000) {
           // SKIP if we can't determine the bet side
-          if (!teamName) {
-            teamName = cache?.extracted_entity || null;
-          }
-          
-          if (!teamName) {
-            console.log(`[POLY-MONITOR] SKIPPING signal for ${event.event_name} - no team name could be determined`);
+          if (!yesTeamName || !noTeamName) {
+            console.log(`[POLY-MONITOR] SKIPPING signal for ${event.event_name} - team names could not be determined`);
             continue;
           }
           
-          // Generate event key for movement detection
-          const eventKey = generateEventKey(event.event_name, teamName);
+          // Generate event key for movement detection (use YES team)
+          const eventKey = generateEventKey(event.event_name, yesTeamName);
           
           // ========== MOVEMENT DETECTION GATE ==========
-          const movement = await detectSharpMovement(supabase, eventKey, teamName);
+          const movement = await detectSharpMovement(supabase, eventKey, yesTeamName);
           
-          // ========== BIDIRECTIONAL EDGE CALCULATION (CRITICAL FIX #2) ==========
-          // bookmakerFairProb is for the MATCHED TEAM. We need to normalize to YES side for correct edge calculation.
-          // In Polymarket H2H: YES = home team (first in "Team A vs Team B")
-          // If matched team is away (NO side), we need to flip to get YES-side probability
-          const yesSideFairProb = isMatchedTeamYesSide ? bookmakerFairProb : (1 - bookmakerFairProb);
-          
-          // Now calculate edges correctly
+          // ========== DIRECT EDGE CALCULATION (NO INVERSION NEEDED) ==========
           // yesEdge = what YES is worth (fair prob) - what we pay (Poly YES price)
-          // noEdge = what NO is worth (1 - yesSideFairProb) - what we pay (1 - Poly YES price)
-          const yesEdge = yesSideFairProb - livePolyPrice;  // Edge if buying YES
-          const noEdge = (1 - yesSideFairProb) - (1 - livePolyPrice);  // Edge if buying NO
+          // noEdge = what NO is worth (fair prob) - what we pay (Poly NO price = 1 - YES price)
+          const yesEdge = yesFairProb - livePolyPrice;
+          const noEdge = noFairProb - (1 - livePolyPrice);
           
           // Pick the side with the positive edge
           let betSide: 'YES' | 'NO';
           let rawEdge: number;
+          let recommendedOutcome: string;
+          let recommendedFairProb: number;
           
           if (yesEdge > 0 && yesEdge >= noEdge) {
             // Polymarket underpricing YES - BUY YES
             betSide = 'YES';
             rawEdge = yesEdge;
+            recommendedOutcome = yesTeamName;
+            recommendedFairProb = yesFairProb;
           } else if (noEdge > 0) {
-            // Polymarket overpricing YES (underpricing NO) - BUY NO
+            // Polymarket underpricing NO - BUY NO
             betSide = 'NO';
             rawEdge = noEdge;
+            recommendedOutcome = noTeamName;
+            recommendedFairProb = noFairProb;
           } else {
             // No positive edge on either side - skip
-            console.log(`[POLY-MONITOR] No edge on either side for ${event.event_name}: YES=${(yesEdge * 100).toFixed(1)}%, NO=${(noEdge * 100).toFixed(1)}% (matched=${isMatchedTeamYesSide ? 'YES' : 'NO'})`);
+            console.log(`[POLY-MONITOR] No edge on either side for ${event.event_name}: YES=${yesTeamName}=${(yesEdge * 100).toFixed(1)}%, NO=${noTeamName}=${(noEdge * 100).toFixed(1)}%`);
             continue;
           }
           
@@ -1408,32 +1472,19 @@ Deno.serve(async (req) => {
               // Bookies shortened (prob UP) + there's a YES edge - prefer BUY YES
               betSide = 'YES';
               rawEdge = yesEdge;
+              recommendedOutcome = yesTeamName;
+              recommendedFairProb = yesFairProb;
             } else if (movement.direction === 'drifting' && noEdge > 0.01) {
               // Bookies drifted (prob DOWN) + there's a NO edge - prefer BUY NO
               betSide = 'NO';
               rawEdge = noEdge;
+              recommendedOutcome = noTeamName;
+              recommendedFairProb = noFairProb;
             }
           }
           
-          console.log(`[POLY-MONITOR] Edge calc for ${event.event_name}: YES_edge=${(yesEdge * 100).toFixed(1)}%, NO_edge=${(noEdge * 100).toFixed(1)}% -> ${betSide} ${(rawEdge * 100).toFixed(1)}%`);
-          
-          // ========== CRITICAL FIX: Parse home/away teams and align recommendation with bet side ==========
-          // In Polymarket H2H: "Team A vs Team B" → YES = Team A (home), NO = Team B (away)
-          const eventParts = event.event_name.match(/^(.+?)\s+vs\.?\s+(.+?)(?:\s*-\s*.*)?$/i);
-          const homeTeamFromEvent = eventParts?.[1]?.trim() || teamName;
-          const awayTeamFromEvent = eventParts?.[2]?.trim() || teamName;
-          
-          // CRITICAL: recommended_outcome must match betSide, not the matched team used for bookmaker lookup
-          // YES = bet on home team (first in title), NO = bet on away team (second in title)
-          const recommendedOutcome = betSide === 'YES' ? homeTeamFromEvent : awayTeamFromEvent;
-          
-          // CRITICAL: bookmaker_prob_fair should be for the RECOMMENDED team, not the matched team
-          // If betSide is YES, we want the YES-side fair prob (home team's win prob)
-          // If betSide is NO, we want the NO-side fair prob (away team's win prob = 1 - yesSideFairProb)
-          const recommendedFairProb = betSide === 'YES' ? yesSideFairProb : (1 - yesSideFairProb);
-          
-          console.log(`[POLY-MONITOR] Recommendation aligned: betSide=${betSide}, matched=${teamName}, recommended=${recommendedOutcome}, fairProb=${(recommendedFairProb * 100).toFixed(1)}%`);
-          // ========== END BIDIRECTIONAL EDGE CALCULATION ==========
+          console.log(`[POLY-MONITOR] EDGE CALC: ${event.event_name} | YES=${yesTeamName}=${(yesEdge * 100).toFixed(1)}%, NO=${noTeamName}=${(noEdge * 100).toFixed(1)}% -> ${betSide} ${recommendedOutcome} (${(rawEdge * 100).toFixed(1)}% edge)`);
+          // ========== END DIRECT EDGE CALCULATION ==========
           
           if (rawEdge >= 0.02) {
             // CRITICAL FIX #3: Staleness & high-prob edge gating
@@ -1442,14 +1493,14 @@ Deno.serve(async (req) => {
             const stalenessMinutes = staleness / 60000;
             
             // High probability + stale = likely artifact
-            if (bookmakerFairProb >= 0.85 && stalenessMinutes > 3) {
-              console.log(`[POLY-MONITOR] Skipping high-prob edge for ${event.event_name} - stale price (${stalenessMinutes.toFixed(0)}m old, ${(bookmakerFairProb * 100).toFixed(0)}% fair prob)`);
+            if (recommendedFairProb >= 0.85 && stalenessMinutes > 3) {
+              console.log(`[POLY-MONITOR] Skipping high-prob edge for ${event.event_name} - stale price (${stalenessMinutes.toFixed(0)}m old, ${(recommendedFairProb * 100).toFixed(0)}% fair prob)`);
               continue;
             }
             
             // Cap extreme edges on very high probability outcomes
-            if (bookmakerFairProb >= 0.90 && rawEdge > 0.40) {
-              console.log(`[POLY-MONITOR] Capping artifact edge for ${event.event_name} - raw ${(rawEdge * 100).toFixed(1)}% on ${(bookmakerFairProb * 100).toFixed(0)}% prob`);
+            if (recommendedFairProb >= 0.90 && rawEdge > 0.40) {
+              console.log(`[POLY-MONITOR] Capping artifact edge for ${event.event_name} - raw ${(rawEdge * 100).toFixed(1)}% on ${(recommendedFairProb * 100).toFixed(0)}% prob`);
               rawEdge = 0.40; // Cap at 40%
             }
             
@@ -1522,7 +1573,7 @@ Deno.serve(async (req) => {
 
             const signalData = {
               polymarket_price: livePolyPrice,
-              bookmaker_probability: bookmakerFairProb,
+              bookmaker_probability: recommendedFairProb, // Use recommended team's fair prob
               bookmaker_prob_fair: recommendedFairProb,
               edge_percent: rawEdge * 100,
               confidence_score: Math.min(85, 50 + Math.floor(netEdge * 500)),
@@ -1543,7 +1594,7 @@ Deno.serve(async (req) => {
                 market_type: marketType,
                 sport: sport,
                 volume: liveVolume,
-                team_name: teamName,
+                team_name: recommendedOutcome, // Use recommended outcome (the team we're betting on)
                 hours_until_event: Math.floor((eventStart.getTime() - now.getTime()) / 3600000),
                 time_label: `${Math.floor((eventStart.getTime() - now.getTime()) / 3600000)}h`,
                 // Dual trigger system data
@@ -1622,8 +1673,8 @@ Deno.serve(async (req) => {
             if (!signalError && signal && !existingSignal) {
               console.log(`[POLY-MONITOR] New signal created - sending SMS: tier=${signalTier}, rawEdge=${(rawEdge * 100).toFixed(1)}%`);
               const alertSent = await sendSmsAlert(
-                supabase, event, livePolyPrice, bookmakerFairProb,
-                rawEdge, netEdge, liveVolume, stakeAmount, marketType, teamName,
+                supabase, event, livePolyPrice, recommendedFairProb,
+                rawEdge, netEdge, liveVolume, stakeAmount, marketType, recommendedOutcome,
                 signalTier, movement.velocity, betSide, movement.direction
               );
               
