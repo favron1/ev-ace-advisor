@@ -35,6 +35,21 @@ export default function Stats() {
 
   const formatPercent = (value: number) => `${value.toFixed(1)}%`;
 
+  // Extract the picked team from event name based on side
+  // Event format: "Team A vs Team B" - YES = Team A (home), NO = Team B (away)
+  const getPickedTeam = (eventName: string, side: string): string => {
+    const vsMatch = eventName.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
+    if (!vsMatch) return side; // Fallback to YES/NO if can't parse
+    
+    const [, teamA, teamB] = vsMatch;
+    // YES = home team (Team A), NO = away team (Team B)
+    if (side === 'YES') {
+      return teamA.trim();
+    } else {
+      return teamB.trim();
+    }
+  };
+
   // Calculate unrealized P/L for in-play bets based on current price
   const formatUnrealizedPL = (entryPrice: number, currentPrice: number, stake: number, side: string) => {
     if (!stake) return '--';
@@ -101,14 +116,9 @@ export default function Stats() {
       
       <div className="flex items-center justify-between text-xs">
         <div className="flex items-center gap-2">
-          <span className={`px-1.5 py-0.5 rounded font-medium ${
-            log.side === 'YES' ? 'bg-green-500/20 text-green-500' : 'bg-red-500/20 text-red-500'
-          }`}>
-            {log.side}
+          <span className="px-1.5 py-0.5 rounded font-medium bg-primary/20 text-primary truncate max-w-[120px]" title={getPickedTeam(log.event_name, log.side)}>
+            {getPickedTeam(log.event_name, log.side)}
           </span>
-          {log.recommended_outcome && (
-            <span className="text-muted-foreground truncate max-w-[100px]">{log.recommended_outcome}</span>
-          )}
         </div>
         <div className="flex items-center gap-3 text-muted-foreground font-mono">
           <span>{(log.entry_price * 100).toFixed(0)}¢</span>
@@ -308,18 +318,9 @@ export default function Stats() {
                                 {log.event_name}
                               </TableCell>
                               <TableCell>
-                                <div className="flex items-center gap-1.5">
-                                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                                    log.side === 'YES' ? 'bg-green-500/20 text-green-500' : 'bg-red-500/20 text-red-500'
-                                  }`}>
-                                    {log.side}
-                                  </span>
-                                  {log.recommended_outcome && (
-                                    <span className="text-xs text-muted-foreground truncate max-w-[120px]" title={log.recommended_outcome}>
-                                      {log.recommended_outcome}
-                                    </span>
-                                  )}
-                                </div>
+                                <span className="px-2 py-0.5 rounded text-xs font-medium bg-primary/20 text-primary truncate max-w-[150px] inline-block" title={getPickedTeam(log.event_name, log.side)}>
+                                  {getPickedTeam(log.event_name, log.side)}
+                                </span>
                               </TableCell>
                               <TableCell className="text-right font-mono">
                                 {(log.entry_price * 100).toFixed(0)}¢

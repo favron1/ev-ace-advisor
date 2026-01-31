@@ -23,7 +23,6 @@ export function EditBetDialog({ bet, open, onOpenChange, onSave, onDelete }: Edi
   const [edgeAtSignal, setEdgeAtSignal] = useState('');
   const [outcome, setOutcome] = useState<'pending' | 'in_play' | 'win' | 'loss' | 'void'>('pending');
   const [profitLoss, setProfitLoss] = useState('');
-  const [isAutoCalculating, setIsAutoCalculating] = useState(true);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -37,19 +36,19 @@ export function EditBetDialog({ bet, open, onOpenChange, onSave, onDelete }: Edi
       setEdgeAtSignal(bet.edge_at_signal.toFixed(1));
       setOutcome((bet.outcome as 'pending' | 'in_play' | 'win' | 'loss' | 'void') || 'pending');
       setProfitLoss(bet.profit_loss?.toFixed(2) || '');
-      setIsAutoCalculating(bet.profit_loss === null);
     }
   }, [bet]);
 
-  // Auto-calculate P/L when outcome changes
+  // Auto-calculate P/L when outcome, stake, or entry price changes
   useEffect(() => {
-    if (!isAutoCalculating || !stakeAmount || !entryPrice) return;
+    if (!stakeAmount || !entryPrice) return;
 
     const stake = parseFloat(stakeAmount);
     const price = parseFloat(entryPrice) / 100;
 
     if (isNaN(stake) || isNaN(price) || price <= 0 || price >= 1) return;
 
+    // Always recalculate P/L when stake or entry price changes (for settled bets)
     if (outcome === 'win') {
       const pl = stake * (1 - price) / price;
       setProfitLoss(pl.toFixed(2));
@@ -62,7 +61,7 @@ export function EditBetDialog({ bet, open, onOpenChange, onSave, onDelete }: Edi
     } else {
       setProfitLoss('');
     }
-  }, [outcome, stakeAmount, entryPrice, isAutoCalculating]);
+  }, [outcome, stakeAmount, entryPrice]);
 
   const handleSave = async () => {
     if (!bet) return;
@@ -109,7 +108,6 @@ export function EditBetDialog({ bet, open, onOpenChange, onSave, onDelete }: Edi
 
   const handleProfitLossChange = (value: string) => {
     setProfitLoss(value);
-    setIsAutoCalculating(false);
   };
 
   if (!bet) return null;
@@ -204,7 +202,7 @@ export function EditBetDialog({ bet, open, onOpenChange, onSave, onDelete }: Edi
           {/* P/L */}
           <div className="grid gap-2">
             <Label htmlFor="profitLoss">
-              P/L ($) {isAutoCalculating && outcome !== 'pending' && <span className="text-xs text-muted-foreground">(auto-calculated)</span>}
+              P/L ($) <span className="text-xs text-muted-foreground">(auto-calculated from stake & entry)</span>
             </Label>
             <Input
               id="profitLoss"
