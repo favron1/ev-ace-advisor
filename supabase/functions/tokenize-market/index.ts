@@ -485,7 +485,13 @@ Deno.serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseKey);
 
     const body = await req.json();
-    const { conditionId, marketUrl, teamHome, teamAway, sport, updateCache } = body;
+    // Support both camelCase and snake_case params
+    const conditionId = body.conditionId || body.condition_id;
+    const marketUrl = body.marketUrl || body.market_url;
+    const teamHome = body.teamHome || body.team_home;
+    const teamAway = body.teamAway || body.team_away;
+    const sport = body.sport;
+    const updateCache = body.updateCache || body.update_cache;
 
     console.log('[TOKENIZE] Request:', { conditionId, marketUrl, teamHome, teamAway, sport });
 
