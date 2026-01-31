@@ -12,7 +12,11 @@ import {
   detectSportFromText,
   SPORTS_CONFIG,
   getSportCodeFromLeague,
+  SportCode,
 } from '../_shared/sports-config.ts';
+import { indexBookmakerEvents, BookEvent } from '../_shared/book-index.ts';
+import { matchPolyMarket, MatchResult } from '../_shared/match-poly-to-book.ts';
+import { splitTeams } from '../_shared/canonicalize.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -1368,6 +1372,20 @@ Deno.serve(async (req) => {
       allBookmakerData.set(sport, games);
       console.log(`[POLY-MONITOR] Loaded ${games.length} ${sport} games`);
     }
+    
+    // ============= BUILD CANONICAL BOOK INDEXES (ONCE PER SPORT) =============
+    // This is the key optimization: O(1) lookups instead of O(n) per market
+    const bookIndexes = new Map<string, Map<string, BookEvent[]>>();
+    for (const [sport, games] of allBookmakerData) {
+      const sportCode = getSportCodeFromLeague(sport);
+      if (sportCode) {
+        const teamMap = SPORTS_CONFIG[sportCode].teamMap;
+        const bookIndex = indexBookmakerEvents(games as BookEvent[], sportCode, teamMap);
+        bookIndexes.set(sport, bookIndex);
+        console.log(`[POLY-MONITOR] Built book index for ${sport}: ${bookIndex.size} unique matchups`);
+      }
+    }
+    console.log(`[POLY-MONITOR] Built book indexes for ${bookIndexes.size} sports`);
 
     // Get stake amount
     const { data: scanConfig } = await supabase
@@ -1394,10 +1412,19 @@ Deno.serve(async (req) => {
       skipped_expired: 0,
       skipped_date_mismatch: 0,
       skipped_time_window: 0,
+      // NEW: Canonical matching stats
+      poly_team_resolved: 0,      // Both teams resolved via teamMap
+      poly_team_partial: 0,       // One team resolved
+      poly_team_failed: 0,        // Neither team resolved
+      canonical_exact: 0,         // Key found, best by time
+      canonical_time_fallback: 0, // Found via time proximity
+      canonical_key_missing: 0,   // Key not in index
+      // Legacy tier stats (for comparison)
       tier1_direct: 0,
       tier2_nickname: 0,
       tier3_fuzzy: 0,
       tier4_ai: 0,
+      fuzzy_last_resort: 0,       // Track fuzzy fallback usage
       matched_total: 0,
       edges_calculated: 0,
       edges_over_threshold: 0,
@@ -1518,32 +1545,134 @@ Deno.serve(async (req) => {
           }
         }
 
-        // ============= TIERED MATCHING STRATEGY =============
-        // (sport already defined above from cache?.extracted_league)
+        // ============= CANONICAL MATCHING STRATEGY (V2) =============
+        // Uses deterministic team resolution + indexed O(1) lookups
+        // Replaces the 4-tier fuzzy matching with canonical matching as primary
         
         // Get Polymarket event date for cross-game validation
         const polyEventDate = cache?.event_date ? new Date(cache.event_date) : 
                               event.commence_time ? new Date(event.commence_time) : null;
         const polySlug = cache?.polymarket_slug || null;
+        const isPlaceholder = polyEventDate ? isPlaceholderPolymarketTime(polyEventDate) : false;
         
-        // TIER 1: Direct string matching (fastest)
-        let match = findBookmakerMatch(
-          event.event_name,
-          event.polymarket_question || '',
-          marketType,
-          bookmakerGames,
-          polyEventDate,  // Pass date for cross-game validation
-          polySlug        // Pass slug for secondary date validation
-        );
-        let matchMethod = 'direct';
-        if (match) funnelStats.tier1_direct++;
+        // Get the canonical book index for this sport
+        const sportCode = getSportCodeFromLeague(sport);
+        const teamMap = sportCode ? SPORTS_CONFIG[sportCode].teamMap : {};
+        const bookIndex = bookIndexes.get(sport);
+        
+        // Parse Polymarket title for team names
+        const titleParts = splitTeams(event.event_name);
+        const polyYesTeam = titleParts?.a || cache?.team_home || '';
+        const polyNoTeam = titleParts?.b || cache?.team_away || '';
+        
+        let match: H2HMatchResult | null = null;
+        let matchMethod = 'none';
+        let canonicalResult: MatchResult | null = null;
+        
+        // ============= PRIMARY: CANONICAL MATCHING =============
+        if (bookIndex && polyYesTeam && polyNoTeam) {
+          canonicalResult = matchPolyMarket(
+            bookIndex,
+            sport,
+            polyYesTeam,
+            polyNoTeam,
+            polyEventDate,
+            teamMap,
+            isPlaceholder
+          );
+          
+          // Track resolution stats
+          const [res1, res2] = canonicalResult.debug.resolvedTeams;
+          if (res1 && res2) {
+            funnelStats.poly_team_resolved++;
+          } else if (res1 || res2) {
+            funnelStats.poly_team_partial++;
+          } else {
+            funnelStats.poly_team_failed++;
+          }
+          
+          if (canonicalResult.match) {
+            // Convert BookEvent to H2HMatchResult format for compatibility
+            const bookEvent = canonicalResult.match;
+            
+            // Find market data for H2H matching
+            const bookmaker = bookEvent.bookmakers?.[0];
+            const h2hMarket = bookmaker?.markets?.find((m: any) => m.key === 'h2h');
+            
+            if (h2hMarket?.outcomes) {
+              // Determine which outcome is YES team vs NO team
+              const outcomes = h2hMarket.outcomes.filter((o: any) => {
+                const name = (o.name || '').toLowerCase();
+                return !name.includes('draw') && name !== 'tie';
+              });
+              
+              // Match by resolved team names
+              const yesTeamResolved = canonicalResult.debug.resolvedTeams[0] || polyYesTeam;
+              const noTeamResolved = canonicalResult.debug.resolvedTeams[1] || polyNoTeam;
+              
+              const yesIdx = outcomes.findIndex((o: any) => {
+                const oNorm = normalizeName(o.name);
+                const yesNorm = normalizeName(yesTeamResolved);
+                const yesNickname = yesNorm.split(' ').pop() || '';
+                return oNorm === yesNorm || (yesNickname.length > 2 && oNorm.includes(yesNickname));
+              });
+              
+              const noIdx = outcomes.findIndex((o: any, i: number) => {
+                if (i === yesIdx) return false;
+                const oNorm = normalizeName(o.name);
+                const noNorm = normalizeName(noTeamResolved);
+                const noNickname = noNorm.split(' ').pop() || '';
+                return oNorm === noNorm || (noNickname.length > 2 && oNorm.includes(noNickname));
+              });
+              
+              if (yesIdx !== -1 && noIdx !== -1) {
+                match = {
+                  game: bookEvent,
+                  marketKey: 'h2h',
+                  yesTeamIndex: yesIdx,
+                  noTeamIndex: noIdx,
+                  yesTeamName: outcomes[yesIdx].name,
+                  noTeamName: outcomes[noIdx].name,
+                  targetIndex: yesIdx,
+                  teamName: outcomes[yesIdx].name,
+                };
+                
+                matchMethod = canonicalResult.method || 'canonical_exact';
+                
+                if (canonicalResult.method === 'canonical_exact') {
+                  funnelStats.canonical_exact++;
+                } else if (canonicalResult.method === 'canonical_time') {
+                  funnelStats.canonical_time_fallback++;
+                }
+                
+                console.log(`[POLY-MONITOR] CANONICAL MATCH: "${event.event_name}" → ${match.yesTeamName} vs ${match.noTeamName} (method=${matchMethod}, timeDiff=${canonicalResult.debug.timeDiffHours?.toFixed(1)}h)`);
+              }
+            }
+          } else if (canonicalResult.debug.lookupKey) {
+            funnelStats.canonical_key_missing++;
+          }
+        }
+        
+        // ============= FALLBACK 1: Legacy direct string matching =============
+        if (!match && bookmakerGames.length > 0) {
+          match = findBookmakerMatch(
+            event.event_name,
+            event.polymarket_question || '',
+            marketType,
+            bookmakerGames,
+            polyEventDate,
+            polySlug
+          );
+          if (match) {
+            matchMethod = 'direct';
+            funnelStats.tier1_direct++;
+          }
+        }
 
-        // TIER 2: Local nickname expansion (fast, no API)
-        // FIX: Always use original event.event_name to preserve Polymarket YES/NO order
+        // ============= FALLBACK 2: Local nickname expansion =============
         if (!match && bookmakerGames.length > 0) {
           const expanded = expandTeamNamesLocally(event.event_name, sport);
           if (expanded) {
-            // Filter bookmaker games to only include the matched game
             const matchedGames = bookmakerGames.filter(g => {
               const gameNorm = normalizeName(`${g.home_team} ${g.away_team}`);
               return gameNorm.includes(normalizeName(expanded.homeTeam).split(' ').pop() || '') ||
@@ -1551,7 +1680,7 @@ Deno.serve(async (req) => {
             });
             
             match = findBookmakerMatch(
-              event.event_name,  // ← Always use original Polymarket title
+              event.event_name,
               event.polymarket_question || '',
               marketType,
               matchedGames.length > 0 ? matchedGames : bookmakerGames,
@@ -1566,57 +1695,99 @@ Deno.serve(async (req) => {
           }
         }
 
-        // TIER 3: Direct Odds API fuzzy matching (fast, no AI overhead)
-        // FIX: Pass only the matched game, but use original event_name to preserve YES/NO order
+        // ============= FALLBACK 3: Fuzzy matching (last resort) =============
         if (!match && bookmakerGames.length > 0) {
           const fuzzyResult = findDirectOddsApiMatch(event.event_name, bookmakerGames, 0.5);
           if (fuzzyResult) {
             match = findBookmakerMatch(
-              event.event_name,  // ← Always use original Polymarket title
+              event.event_name,
               event.polymarket_question || '',
               marketType,
-              [fuzzyResult.game],  // ← Pass only the matched game
+              [fuzzyResult.game],
               polyEventDate,
               polySlug
             );
             if (match) {
-              console.log(`[POLY-MONITOR] FUZZY MATCH SUCCESS: "${event.event_name}" found via ${fuzzyResult.homeTeam} vs ${fuzzyResult.awayTeam}`);
-              matchMethod = 'fuzzy';
-              funnelStats.tier3_fuzzy++;
+              console.log(`[POLY-MONITOR] FUZZY LAST RESORT: "${event.event_name}" found via ${fuzzyResult.homeTeam} vs ${fuzzyResult.awayTeam}`);
+              matchMethod = 'fuzzy_last_resort';
+              funnelStats.fuzzy_last_resort++;
             }
           }
         }
 
-        // TIER 4: AI resolution (slower, but handles edge cases)
-        // FIX: AI only identifies which game - use original event_name to preserve YES/NO order
+        // ============= FALLBACK 4: AI resolution (slowest) =============
         if (!match && bookmakerGames.length > 0) {
           const resolved = await resolveTeamNamesWithAI(event.event_name, sport);
           
           if (resolved) {
-            // Filter to games that contain the AI-resolved teams
-            const matchedGames = bookmakerGames.filter(g => {
-              const gameNorm = normalizeName(`${g.home_team} ${g.away_team}`);
-              return gameNorm.includes(normalizeName(resolved.homeTeam).split(' ').pop() || '') ||
-                     gameNorm.includes(normalizeName(resolved.awayTeam).split(' ').pop() || '');
-            });
+            // First try canonical matching with AI-resolved names
+            if (bookIndex) {
+              const aiCanonicalResult = matchPolyMarket(
+                bookIndex,
+                sport,
+                resolved.homeTeam,
+                resolved.awayTeam,
+                polyEventDate,
+                teamMap,
+                isPlaceholder
+              );
+              
+              if (aiCanonicalResult.match) {
+                const bookEvent = aiCanonicalResult.match;
+                const bookmaker = bookEvent.bookmakers?.[0];
+                const h2hMarket = bookmaker?.markets?.find((m: any) => m.key === 'h2h');
+                
+                if (h2hMarket?.outcomes) {
+                  const outcomes = h2hMarket.outcomes.filter((o: any) => {
+                    const name = (o.name || '').toLowerCase();
+                    return !name.includes('draw') && name !== 'tie';
+                  });
+                  
+                  if (outcomes.length >= 2) {
+                    match = {
+                      game: bookEvent,
+                      marketKey: 'h2h',
+                      yesTeamIndex: 0,
+                      noTeamIndex: 1,
+                      yesTeamName: outcomes[0].name,
+                      noTeamName: outcomes[1].name,
+                      targetIndex: 0,
+                      teamName: outcomes[0].name,
+                    };
+                    matchMethod = 'ai_resolve';
+                    funnelStats.tier4_ai++;
+                    console.log(`[POLY-MONITOR] AI+CANONICAL MATCH: "${event.event_name}" found via ${resolved.homeTeam} vs ${resolved.awayTeam}`);
+                  }
+                }
+              }
+            }
             
-            match = findBookmakerMatch(
-              event.event_name,  // ← Always use original Polymarket title
-              event.polymarket_question || '',
-              marketType,
-              matchedGames.length > 0 ? matchedGames : bookmakerGames,
-              polyEventDate,
-              polySlug
-            );
-            
-            if (match) {
-              console.log(`[POLY-MONITOR] AI MATCH: "${event.event_name}" found via ${resolved.homeTeam} vs ${resolved.awayTeam}`);
-              matchMethod = 'ai';
-              funnelStats.tier4_ai++;
+            // If AI canonical didn't work, try legacy matching
+            if (!match) {
+              const matchedGames = bookmakerGames.filter(g => {
+                const gameNorm = normalizeName(`${g.home_team} ${g.away_team}`);
+                return gameNorm.includes(normalizeName(resolved.homeTeam).split(' ').pop() || '') ||
+                       gameNorm.includes(normalizeName(resolved.awayTeam).split(' ').pop() || '');
+              });
+              
+              match = findBookmakerMatch(
+                event.event_name,
+                event.polymarket_question || '',
+                marketType,
+                matchedGames.length > 0 ? matchedGames : bookmakerGames,
+                polyEventDate,
+                polySlug
+              );
+              
+              if (match) {
+                console.log(`[POLY-MONITOR] AI LEGACY MATCH: "${event.event_name}" found via ${resolved.homeTeam} vs ${resolved.awayTeam}`);
+                matchMethod = 'ai';
+                funnelStats.tier4_ai++;
+              }
             }
           }
         }
-        // ============= END TIERED MATCHING =============
+        // ============= END CANONICAL MATCHING STRATEGY =============
         
         // Track matched total
         if (match) {
