@@ -1,6 +1,16 @@
-
-
 # Implementation Plan: Deterministic Canonical Matching System (V2)
+
+## ✅ IMPLEMENTATION COMPLETE (2026-01-31)
+
+**New Files Created:**
+- `supabase/functions/_shared/canonicalize.ts` - Team resolution + canonical ID generation
+- `supabase/functions/_shared/book-index.ts` - O(1) indexed lookup by `league|teamSetKey`  
+- `supabase/functions/_shared/match-poly-to-book.ts` - Core matcher with time proximity filter
+
+**Updated Files:**
+- `supabase/functions/polymarket-monitor/index.ts` - Uses new canonical system with fallback chain
+
+---
 
 ## Problem Summary
 
