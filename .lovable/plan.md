@@ -1,77 +1,139 @@
 
 
-# Simplify Signal Display: "BET ON [TEAM] TO WIN"
+# Fix: Polymarket Direct Links Not Working
 
-## What You Want
+## Problem Identified
 
-Show which team sharp books favor and recommend betting on them - period. No mention of "YES shares", "NO shares", "BUY YES", or "BUY NO". The system still calculates edges for both sides, but the display is purely team-centric.
+The "Trade on Poly" button links are redirecting to the Polymarket homepage instead of the correct market. This is happening because:
 
-## Changes Required
+1. **Wrong URL format**: The current code constructs URLs like:
+   ```
+   https://polymarket.com/sports/nhl/games/week/17/nhl-det-col-2026-01-31
+   ```
+   This format doesn't exist on Polymarket.
 
-### 1. SignalCard.tsx - Main Display
+2. **Correct format is**: `https://polymarket.com/event/[slug]`
+   - The Gamma API provides a `slug` field (e.g., "nhl-red-wings-vs-avalanche-january-31")
+   - This slug is NOT currently being stored in the database
 
-**Current (lines 453-468):**
-```tsx
-<Badge>BET: {teamToBetOn} TO WIN</Badge>
-<Badge>{signal.side === 'YES' ? 'YES shares' : 'NO shares'}</Badge>
+3. **Missing data flow**: The `polymarket_h2h_cache` table doesn't have a `slug` column, so even if fetched, it's not persisted.
+
+---
+
+## Solution Overview
+
+### Phase 1: Database - Add slug column
+Add a `polymarket_slug` column to store the event/market slug from Gamma API.
+
+### Phase 2: Backend - Capture and store slug
+Update `polymarket-sync-24h` to extract and save the `slug` field from Gamma API responses.
+
+### Phase 3: Frontend - Use correct URL format
+Update `SignalCard.tsx` to use `polymarket.com/event/[slug]` when available, with fallbacks.
+
+---
+
+## Technical Details
+
+### 1. Database Migration
+
+```sql
+ALTER TABLE polymarket_h2h_cache 
+ADD COLUMN polymarket_slug TEXT;
 ```
 
-**After:**
-```tsx
-<Badge>BET ON {signal.recommended_outcome} TO WIN</Badge>
-// Remove the YES/NO shares badge entirely
+Also add to `signal_opportunities` for easy access:
+```sql
+ALTER TABLE signal_opportunities 
+ADD COLUMN polymarket_slug TEXT;
 ```
 
-The `recommended_outcome` field already contains the correct team (we fixed that in the previous update). We just need to:
-1. Use it directly instead of re-parsing the event name
-2. Remove the "YES shares" / "NO shares" badge completely
+### 2. Backend Changes (`polymarket-sync-24h/index.ts`)
 
-### 2. SMS Alert Formatting (polymarket-monitor/index.ts)
+When processing Gamma API events, extract the slug:
+```typescript
+// Current: Only stores conditionId
+const conditionId = market.conditionId || market.id || event.id;
 
-**Current (lines 692-705):**
-```
-🎯 STRONG: Utah vs Carolina
-BUY YES: Utah
-Poly YES: 45¢ ($50K)
+// Add: Also extract slug
+const eventSlug = event.slug || null; // Gamma API returns this
 ```
 
-**After:**
+Then include in the upsert:
+```typescript
+.upsert({
+  condition_id: conditionId,
+  polymarket_slug: eventSlug, // NEW
+  // ... rest of fields
+})
 ```
-🎯 STRONG: Utah vs Carolina
-BET ON Utah TO WIN
-Poly: 45¢ ($50K)
+
+Also update `polymarket-monitor/index.ts` to copy the slug when creating signals.
+
+### 3. Frontend Changes (`SignalCard.tsx`)
+
+Replace the current URL generation logic:
+
+**Current (broken - lines 242-262):**
+```typescript
+const getPolymarketDirectUrl = (): string | null => {
+  // Constructs wrong format like /sports/nhl/games/week/17/...
+  return `https://polymarket.com/sports/${sport}/.../`;
+};
 ```
 
-Remove `BUY YES`/`BUY NO` labeling and `Poly YES`/`Poly NO` - just show "BET ON [team]" and "Poly: [price]".
+**New (correct):**
+```typescript
+const getPolymarketDirectUrl = (): string | null => {
+  // Use slug from backend (new field)
+  const slug = (signal as any).polymarket_slug;
+  if (slug) {
+    return `https://polymarket.com/event/${slug}`;
+  }
+  
+  // Fallback: Use condition_id for direct market access
+  const conditionId = (signal as any).polymarket_condition_id;
+  if (conditionId && conditionId.startsWith('0x')) {
+    // Polymarket also accepts /markets?conditionId=0x...
+    return `https://polymarket.com/markets?conditionId=${conditionId}`;
+  }
+  
+  return null; // Fall through to search
+};
+```
 
-### 3. FiltersBar.tsx - Remove BUY YES Filter
+**Remove**: All the TEAM_CODES mapping and week calculation logic (lines 31-117) - no longer needed.
 
-Since all signals will now just show "BET ON [team]", the "BUY YES Only" filter becomes meaningless. We'll either:
-- Remove it entirely, OR
-- Rename it to "Shortening Only" (sharps moving price up = higher confidence edge)
+---
 
-I'll remove it for simplicity since the user hasn't expressed interest in filtering by technical side.
+## URL Fallback Strategy
 
-### 4. Terminal.tsx + useSignals.ts - Remove Filter Logic
+After the fix, the dropdown will work as:
 
-Remove the `showBuyYesOnly` / `buyYesOnly` state and filter logic.
+| Priority | URL Format | When Used |
+|----------|------------|-----------|
+| 1 | `polymarket.com/event/[slug]` | When slug is available from Gamma API |
+| 2 | `polymarket.com/markets?conditionId=[id]` | When condition_id is a valid 0x hash |
+| 3 | `polymarket.com/search?query=[team]` | Fallback for unmatched/scraped events |
 
-## Summary of Files to Update
+---
 
-| File | Change |
-|------|--------|
-| `src/components/terminal/SignalCard.tsx` | Remove "YES/NO shares" badge, simplify bet display to use `recommended_outcome` directly |
-| `supabase/functions/polymarket-monitor/index.ts` | Change SMS from "BUY YES: [team]" to "BET ON [team] TO WIN" |
-| `src/components/terminal/FiltersBar.tsx` | Remove the "BUY YES Only" filter toggle |
-| `src/pages/Terminal.tsx` | Remove `showBuyYesOnly` state |
-| `src/hooks/useSignals.ts` | Remove `buyYesOnly` filter logic |
+## Files to Update
 
-## After This Change
+| File | Changes |
+|------|---------|
+| **Database** | Add `polymarket_slug` column to `polymarket_h2h_cache` and `signal_opportunities` |
+| `supabase/functions/polymarket-sync-24h/index.ts` | Extract `event.slug` from Gamma API and store it |
+| `supabase/functions/polymarket-monitor/index.ts` | Copy slug when creating signals |
+| `src/components/terminal/SignalCard.tsx` | Use new slug-based URL generation, remove broken team-code logic |
 
-Every signal will display:
-- **Badge:** "BET ON Utah TO WIN" (always green, team-centric)
-- **Explanation:** "Sharp books value Utah at 67% to win"
-- **No technical jargon:** No YES/NO/shares anywhere visible
+---
 
-The system still knows internally which Polymarket token to buy, but that's an implementation detail hidden from you.
+## Expected Outcome
+
+After implementation:
+- "Open Market Directly" will link to `polymarket.com/event/nhl-red-wings-vs-avalanche-january-31`
+- Links will work for all Gamma-API sourced markets
+- Firecrawl-scraped markets will fallback to search (no slug available)
+- Condition ID fallback provides secondary option for edge cases
 
