@@ -1473,6 +1473,9 @@ Deno.serve(async (req) => {
           yesTeamName = match.yesTeamName;
           noTeamName = match.noTeamName;
           
+          // DETAILED DEBUG: Log match mapping to trace side inversions
+          console.log(`[POLY-MONITOR] MATCH_DEBUG: "${event.event_name}" | yesTeamName="${yesTeamName}" (idx=${match.yesTeamIndex}), noTeamName="${noTeamName}" (idx=${match.noTeamIndex}) | yesFairProb=${yesFairProb?.toFixed(3)}, noFairProb=${noFairProb?.toFixed(3)}, livePolyPrice=${livePolyPrice.toFixed(3)}`);
+          
           // SANITY CHECK: Fair probs should sum to ~100% for H2H markets
           if (yesFairProb !== null && noFairProb !== null) {
             const probSum = yesFairProb + noFairProb;
