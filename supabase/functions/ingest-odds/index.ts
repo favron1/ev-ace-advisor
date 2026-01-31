@@ -147,6 +147,26 @@ Deno.serve(async (req) => {
       );
     }
 
+    // NEW: Test API key validity with a lightweight call before proceeding
+    const testUrl = `https://api.the-odds-api.com/v4/sports/?apiKey=${oddsApiKey}`;
+    const testResponse = await fetch(testUrl);
+    const remainingRequests = testResponse.headers.get('x-requests-remaining');
+    const usedRequests = testResponse.headers.get('x-requests-used');
+    
+    if (!testResponse.ok) {
+      console.error(`[INGEST-ODDS] API_KEY_INVALID: Status ${testResponse.status}`);
+      return new Response(
+        JSON.stringify({ 
+          error: 'ODDS_API_KEY invalid or quota exceeded',
+          status: testResponse.status,
+          remaining_requests: remainingRequests,
+          used_requests: usedRequests,
+        }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+    console.log(`[INGEST-ODDS] API key valid. Remaining: ${remainingRequests}, Used: ${usedRequests}`);
+
     // Parse request body for configuration
     let body: RequestBody = {};
     try {
