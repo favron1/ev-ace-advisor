@@ -1331,7 +1331,14 @@ Deno.serve(async (req) => {
         }
         
         // Fallback to single market fetch if no batch data
-        if (!tokenIdYes || !clobPrices.has(tokenIdYes)) {
+        // SAFETY RAIL #1: Use tokenIdYes for explicit token matching - never rely on array ordering
+        if (!clobPrices.has(tokenIdYes || '')) {
+          if (!tokenIdYes) {
+            // No token ID = cannot safely determine YES price, skip this market
+            console.log(`[POLY-MONITOR] No tokenIdYes for "${event.event_name}" - SKIPPING (untradeable without token ID)`);
+            continue;
+          }
+          
           if (event.polymarket_condition_id) {
             try {
               const clobUrl = `${CLOB_API_BASE}/markets/${event.polymarket_condition_id}`;
@@ -1339,7 +1346,16 @@ Deno.serve(async (req) => {
               
               if (clobResponse.ok) {
                 const marketData = await clobResponse.json();
-                livePolyPrice = parseFloat(marketData.tokens?.[0]?.price || livePolyPrice);
+                
+                // Find YES token explicitly using stored token ID - NEVER use tokens[0]
+                const yesToken = marketData.tokens?.find((t: any) => t.token_id === tokenIdYes);
+                if (yesToken?.price) {
+                  livePolyPrice = parseFloat(yesToken.price);
+                  console.log(`[POLY-MONITOR] Fallback CLOB: Found YES token for "${event.event_name}" price=${livePolyPrice.toFixed(3)}`);
+                } else {
+                  console.log(`[POLY-MONITOR] Fallback CLOB: Could not find token_id=${tokenIdYes} in response for "${event.event_name}" - using cached price`);
+                }
+                
                 liveVolume = parseFloat(marketData.volume || liveVolume);
               }
             } catch {
@@ -1523,6 +1539,26 @@ Deno.serve(async (req) => {
           const yesEdge = yesFairProb - livePolyPrice;
           const noEdge = noFairProb - (1 - livePolyPrice);
           
+          // ========== SAFETY RAIL #2: DUAL-MAPPING EV GATE ==========
+          // Prevents inverted signals by computing EV under both possible mappings
+          // If swapped mapping looks better, our team mapping is likely wrong
+          const yesEdge_A = yesEdge;  // Current mapping
+          const noEdge_A = noEdge;
+          
+          // Swapped mapping (assume livePolyPrice actually belongs to NO team)
+          const yesEdge_B = yesFairProb - (1 - livePolyPrice);
+          const noEdge_B = noFairProb - livePolyPrice;
+          
+          const bestA = Math.max(yesEdge_A, noEdge_A);
+          const bestB = Math.max(yesEdge_B, noEdge_B);
+          
+          const MAPPING_MARGIN = 0.02; // 2% edge margin
+          if (bestB > bestA + MAPPING_MARGIN) {
+            console.log(`[POLY-MONITOR] MAPPING_INVERSION_DETECTED: "${event.event_name}" | bestA=${(bestA * 100).toFixed(1)}%, bestB=${(bestB * 100).toFixed(1)}% (swapped wins by ${((bestB - bestA) * 100).toFixed(1)}%) - SKIPPING to prevent wrong-side bet`);
+            continue;
+          }
+          // ========== END DUAL-MAPPING EV GATE ==========
+          
           // Pick the side with the positive edge
           let betSide: 'YES' | 'NO';
           let rawEdge: number;
@@ -1548,15 +1584,17 @@ Deno.serve(async (req) => {
           }
           
           // Movement direction can OVERRIDE if strong directional signal
+          // SAFETY RAIL #3: Require 3% edge (not 1%) for movement to override side selection
+          // This prevents movement from forcing wrong side on marginal/inverted edges
           if (movement.triggered) {
-            if (movement.direction === 'shortening' && yesEdge > 0.01) {
-              // Bookies shortened (prob UP) + there's a YES edge - prefer BUY YES
+            if (movement.direction === 'shortening' && yesEdge > 0.03) {
+              // Bookies shortened (prob UP) + there's a meaningful YES edge - prefer BUY YES
               betSide = 'YES';
               rawEdge = yesEdge;
               recommendedOutcome = yesTeamName;
               recommendedFairProb = yesFairProb;
-            } else if (movement.direction === 'drifting' && noEdge > 0.01) {
-              // Bookies drifted (prob DOWN) + there's a NO edge - prefer BUY NO
+            } else if (movement.direction === 'drifting' && noEdge > 0.03) {
+              // Bookies drifted (prob DOWN) + there's a meaningful NO edge - prefer BUY NO
               betSide = 'NO';
               rawEdge = noEdge;
               recommendedOutcome = noTeamName;
