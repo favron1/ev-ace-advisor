@@ -303,6 +303,7 @@ export type Database = {
           monitoring_status: string | null
           no_price: number
           orderbook_depth: number | null
+          polymarket_slug: string | null
           question: string
           source: string | null
           sport_category: string | null
@@ -335,6 +336,7 @@ export type Database = {
           monitoring_status?: string | null
           no_price: number
           orderbook_depth?: number | null
+          polymarket_slug?: string | null
           question: string
           source?: string | null
           sport_category?: string | null
@@ -367,6 +369,7 @@ export type Database = {
           monitoring_status?: string | null
           no_price?: number
           orderbook_depth?: number | null
+          polymarket_slug?: string | null
           question?: string
           source?: string | null
           sport_category?: string | null
@@ -717,6 +720,7 @@ export type Database = {
           polymarket_market_id: string | null
           polymarket_match_confidence: number | null
           polymarket_price: number
+          polymarket_slug: string | null
           polymarket_updated_at: string | null
           polymarket_volume: number | null
           polymarket_yes_price: number | null
@@ -745,6 +749,7 @@ export type Database = {
           polymarket_market_id?: string | null
           polymarket_match_confidence?: number | null
           polymarket_price: number
+          polymarket_slug?: string | null
           polymarket_updated_at?: string | null
           polymarket_volume?: number | null
           polymarket_yes_price?: number | null
@@ -773,6 +778,7 @@ export type Database = {
           polymarket_market_id?: string | null
           polymarket_match_confidence?: number | null
           polymarket_price?: number
+          polymarket_slug?: string | null
           polymarket_updated_at?: string | null
           polymarket_volume?: number | null
           polymarket_yes_price?: number | null

@@ -722,6 +722,9 @@ Deno.serve(async (req) => {
       // Extract threshold for totals/spreads/props
       const extractedThreshold = extractThreshold(question);
 
+      // Extract event slug from Gamma API response (for direct Polymarket URLs)
+      const eventSlug = event.slug || null;
+      
       // Upsert to polymarket_h2h_cache
       const { error: cacheError } = await supabase
         .from('polymarket_h2h_cache')
@@ -745,6 +748,7 @@ Deno.serve(async (req) => {
           extracted_threshold: extractedThreshold,
           token_id_yes: tokenIdYes,
           token_id_no: tokenIdNo,
+          polymarket_slug: eventSlug, // NEW: Store event slug for direct URLs
           status: 'active',
           monitoring_status: 'watching', // NEW: Mark for continuous monitoring
           last_price_update: now.toISOString(),
