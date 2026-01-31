@@ -998,61 +998,71 @@ function findBookmakerMatch(
   return null;
 }
 
-// Calculate fair probability from all bookmakers
-// CRITICAL FIX: For NHL, filter out Draw outcomes and renormalize to 2-way market
-// CRITICAL FIX #2: Outlier protection - reject extreme probabilities from data glitches
-function calculateConsensusFairProb(
+// Calculate fair probability from all bookmakers BY TEAM NAME
+// CRITICAL FIX: Match by team name instead of index to avoid position-dependent bugs
+// This handles 3-way to 2-way conversion for NHL and other sports with draws
+function calculateConsensusFairProbByName(
   game: any, 
   marketKey: string, 
-  targetIndex: number,
-  sport: string = '' // Pass sport to handle 3-way to 2-way conversion
+  targetTeamName: string,  // Changed: Use team name instead of index
+  sport: string = ''
 ): number | null {
   let totalWeight = 0;
   let weightedProb = 0;
   
-  // NHL uses 3-way markets (Home/Draw/Away) but Polymarket is 2-way
-  const isIceHockey = sport.toUpperCase() === 'NHL';
+  // Normalize target team name for matching
+  const targetNorm = targetTeamName.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+  const targetWords = targetNorm.split(' ').filter(w => w.length > 2);
+  const targetNickname = targetWords[targetWords.length - 1] || ''; // Last word = nickname
   
   for (const bookmaker of game.bookmakers || []) {
     const market = bookmaker.markets?.find((m: any) => m.key === marketKey);
     if (!market?.outcomes || market.outcomes.length < 2) continue;
     
-    let outcomes = [...market.outcomes]; // Clone to avoid mutation
-    let adjustedTargetIndex = targetIndex;
+    // Filter out Draw/Tie outcomes for any sport
+    let outcomes = market.outcomes.filter((o: any) => {
+      const name = (o.name || '').toLowerCase();
+      return !name.includes('draw') && name !== 'tie';
+    });
     
-    // CRITICAL FIX #1: For NHL, filter out Draw/Tie and renormalize to 2-way
-    if (isIceHockey && outcomes.length >= 3) {
-      // Find Draw/Tie index before filtering
-      const drawIndex = outcomes.findIndex((o: any) => 
-        o.name.toLowerCase().includes('draw') || o.name.toLowerCase() === 'tie'
-      );
+    if (outcomes.length < 2) continue;
+    
+    // Find the target team by NAME, not by index
+    const findTeamIndex = (teamName: string): number => {
+      const norm = teamName.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+      const words = norm.split(' ').filter(w => w.length > 2);
+      const nickname = words[words.length - 1] || '';
       
-      // Filter out Draw/Tie outcomes
-      outcomes = outcomes.filter((o: any) => 
-        !o.name.toLowerCase().includes('draw') && o.name.toLowerCase() !== 'tie'
-      );
+      // Exact match first
+      let idx = outcomes.findIndex((o: any) => {
+        const oNorm = (o.name || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+        return oNorm === norm;
+      });
       
-      // Adjust target index if Draw was before our target
-      if (drawIndex !== -1 && drawIndex < targetIndex) {
-        adjustedTargetIndex = Math.max(0, targetIndex - 1);
+      // Fallback: nickname match
+      if (idx === -1 && nickname) {
+        idx = outcomes.findIndex((o: any) => {
+          const oNorm = (o.name || '').toLowerCase().replace(/[^a-z0-9\s]/g, '');
+          return oNorm.includes(nickname);
+        });
       }
       
-      // Ensure we still have 2 outcomes after filtering
-      if (outcomes.length < 2) continue;
-    }
+      return idx;
+    };
+    
+    const targetIdx = findTeamIndex(targetTeamName);
+    if (targetIdx === -1) continue; // Team not found in this bookmaker's outcomes
     
     const odds = outcomes.map((o: any) => o.price);
     if (odds.some((o: number) => isNaN(o) || o <= 1)) continue;
     
-    // calculateFairProb already normalizes to 100%, so this handles renormalization
-    const fairProb = calculateFairProb(odds, Math.min(adjustedTargetIndex, odds.length - 1));
+    // Calculate fair prob for the target team
+    const fairProb = calculateFairProb(odds, targetIdx);
     
     // OUTLIER PROTECTION: Reject extreme probabilities (>92% or <8%)
-    // Real H2H sporting events rarely have 12+ to 1 favorites
-    // This protects against data glitches like Betfair showing 99% for a 50/50 game
     if (fairProb > 0.92 || fairProb < 0.08) {
-      console.log(`[POLY-MONITOR] OUTLIER REJECTED: ${bookmaker.key} fairProb=${(fairProb * 100).toFixed(1)}% for ${game.home_team} vs ${game.away_team}`);
-      continue; // Skip this bookmaker's data point
+      console.log(`[POLY-MONITOR] OUTLIER REJECTED: ${bookmaker.key} fairProb=${(fairProb * 100).toFixed(1)}% for ${targetTeamName}`);
+      continue;
     }
     
     const weight = SHARP_BOOKS.includes(bookmaker.key) ? 1.5 : 1.0;
@@ -1062,6 +1072,22 @@ function calculateConsensusFairProb(
   }
   
   return totalWeight > 0 ? weightedProb / totalWeight : null;
+}
+
+// Legacy wrapper for backwards compatibility - converts index to name and calls new function
+function calculateConsensusFairProb(
+  game: any, 
+  marketKey: string, 
+  targetIndex: number,
+  sport: string = ''
+): number | null {
+  // Find the team name at the given index in the first bookmaker's market
+  const firstBookmaker = game.bookmakers?.[0];
+  const market = firstBookmaker?.markets?.find((m: any) => m.key === marketKey);
+  if (!market?.outcomes?.[targetIndex]) return null;
+  
+  const targetTeamName = market.outcomes[targetIndex].name;
+  return calculateConsensusFairProbByName(game, marketKey, targetTeamName, sport);
 }
 
 Deno.serve(async (req) => {
@@ -1466,16 +1492,15 @@ Deno.serve(async (req) => {
         let noTeamName: string | null = null;
         
         if (match) {
-          // Calculate fair prob for YES team (first in Polymarket title)
-          yesFairProb = calculateConsensusFairProb(match.game, match.marketKey, match.yesTeamIndex, sport);
-          // Calculate fair prob for NO team (second in Polymarket title)
-          noFairProb = calculateConsensusFairProb(match.game, match.marketKey, match.noTeamIndex, sport);
-          
           yesTeamName = match.yesTeamName;
           noTeamName = match.noTeamName;
           
+          // Calculate fair prob BY TEAM NAME directly - avoids index-based bugs
+          yesFairProb = calculateConsensusFairProbByName(match.game, match.marketKey, yesTeamName, sport);
+          noFairProb = calculateConsensusFairProbByName(match.game, match.marketKey, noTeamName, sport);
+          
           // DETAILED DEBUG: Log match mapping to trace side inversions
-          console.log(`[POLY-MONITOR] MATCH_DEBUG: "${event.event_name}" | yesTeamName="${yesTeamName}" (idx=${match.yesTeamIndex}), noTeamName="${noTeamName}" (idx=${match.noTeamIndex}) | yesFairProb=${yesFairProb?.toFixed(3)}, noFairProb=${noFairProb?.toFixed(3)}, livePolyPrice=${livePolyPrice.toFixed(3)}`);
+          console.log(`[POLY-MONITOR] MATCH_DEBUG: "${event.event_name}" | yesTeamName="${yesTeamName}", noTeamName="${noTeamName}" | yesFairProb=${yesFairProb?.toFixed(3)}, noFairProb=${noFairProb?.toFixed(3)}, livePolyPrice=${livePolyPrice.toFixed(3)}`);
           
           // SANITY CHECK: Fair probs should sum to ~100% for H2H markets
           if (yesFairProb !== null && noFairProb !== null) {
