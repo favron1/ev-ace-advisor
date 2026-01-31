@@ -55,26 +55,31 @@ function formatTimeAgo(dateStr: string | null | undefined): string {
 }
 
 // Format countdown to kickoff
-function formatCountdown(hoursUntil: number | null | undefined): { text: string; urgent: boolean } {
-  if (!hoursUntil || hoursUntil <= 0) return { text: 'Started', urgent: true };
+function formatCountdown(hoursUntil: number | null | undefined, hasStarted: boolean): { text: string; urgent: boolean; isLive: boolean } {
+  // Event has already started
+  if (hasStarted || (hoursUntil !== undefined && hoursUntil !== null && hoursUntil <= 0)) {
+    return { text: 'LIVE', urgent: true, isLive: true };
+  }
+  
+  if (!hoursUntil) return { text: 'Unknown', urgent: false, isLive: false };
   
   if (hoursUntil < 1) {
     const mins = Math.round(hoursUntil * 60);
-    return { text: `${mins}m`, urgent: true };
+    return { text: `${mins}m`, urgent: true, isLive: false };
   }
   
   if (hoursUntil < 24) {
     const hours = Math.floor(hoursUntil);
     const mins = Math.round((hoursUntil - hours) * 60);
     if (mins > 0) {
-      return { text: `${hours}h ${mins}m`, urgent: hoursUntil < 2 };
+      return { text: `${hours}h ${mins}m`, urgent: hoursUntil < 2, isLive: false };
     }
-    return { text: `${hours}h`, urgent: hoursUntil < 2 };
+    return { text: `${hours}h`, urgent: hoursUntil < 2, isLive: false };
   }
   
   const days = Math.floor(hoursUntil / 24);
   const hours = Math.round(hoursUntil % 24);
-  return { text: `${days}d ${hours}h`, urgent: false };
+  return { text: `${days}d ${hours}h`, urgent: false, isLive: false };
 }
 
 // Check if Polymarket data is stale (>2h)
@@ -196,7 +201,13 @@ export function SignalCard({
   const hoursUntilEvent = signal.expires_at 
     ? (new Date(signal.expires_at).getTime() - Date.now()) / (1000 * 60 * 60)
     : signalFactors?.hours_until_event as number | undefined;
-  const countdown = formatCountdown(hoursUntilEvent);
+  
+  // Determine if event has already started
+  const hasStarted = signal.expires_at 
+    ? new Date(signal.expires_at) <= new Date() 
+    : false;
+  
+  const countdown = formatCountdown(hoursUntilEvent, hasStarted);
   
   // Determine display state
   const displayState = watchState || (isTrueArbitrage ? 'confirmed' : 'signal');
@@ -205,6 +216,11 @@ export function SignalCard({
 
   // HARD EXECUTION GATES - Enforced safety controls
   const canExecuteSignal = (): { allowed: boolean; reason: string } => {
+    // Gate 0: Event already started - cannot execute
+    if (hasStarted) {
+      return { allowed: false, reason: 'Game started' };
+    }
+    
     // Gate 1: Must have team name present in event name
     if (betTarget) {
       const teamLastWord = betTarget.split(' ').pop()?.toLowerCase() || '';
@@ -311,19 +327,25 @@ export function SignalCard({
               )}
               
               
-              {/* Countdown timer to kickoff */}
-              {hoursUntilEvent !== undefined && (
+              {/* Countdown timer to kickoff / LIVE indicator */}
+              {(hoursUntilEvent !== undefined || hasStarted) && (
                 <Badge 
                   variant="outline" 
                   className={cn(
                     "flex items-center gap-1",
-                    countdown.urgent 
-                      ? "bg-red-500/10 text-red-500 border-red-500/30 animate-pulse" 
-                      : "bg-muted text-muted-foreground"
+                    countdown.isLive 
+                      ? "bg-red-500/20 text-red-400 border-red-500/50 animate-pulse font-semibold" 
+                      : countdown.urgent 
+                        ? "bg-red-500/10 text-red-500 border-red-500/30 animate-pulse" 
+                        : "bg-muted text-muted-foreground"
                   )}
                 >
-                  <Clock className="h-3 w-3" />
-                  {countdown.text} to kickoff
+                  {countdown.isLive ? (
+                    <Activity className="h-3 w-3" />
+                  ) : (
+                    <Clock className="h-3 w-3" />
+                  )}
+                  {countdown.isLive ? 'LIVE' : `${countdown.text} to kickoff`}
                 </Badge>
               )}
             </div>
