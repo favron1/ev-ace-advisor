@@ -1,170 +1,151 @@
 
-# Fix Plan: Fuzzy Match Team Ordering Bug
+
+# Implementation Plan: DATE MISMATCH Fix for Placeholder Times
 
 ## Problem Summary
 
-The backend is mapping the wrong team to YES/NO when the fuzzy match fallback is used. The bug occurs because:
+The system is skipping valid matches because Polymarket uses placeholder times (`23:59:59` or `00:00:00`) when exact game times are unknown. The current strict `>24h` validation between Polymarket and bookmaker dates causes false rejections.
 
-1. Polymarket title says "Canadiens vs. Sabres" → YES=Canadiens, NO=Sabres
-2. Fuzzy match finds the bookmaker game "Buffalo Sabres vs Montréal Canadiens" (home/away order)
-3. The code **reconstructs** the event name using bookmaker's home/away order
-4. `findBookmakerMatch` then parses "Buffalo Sabres vs Montréal Canadiens" and sets YES=Sabres, NO=Canadiens
-5. Result: Completely inverted mapping
-
-### Evidence from logs:
+**Example from logs:**
 ```
-MATCH: failed for "Canadiens vs. Sabres" → YES="Canadiens", NO="Sabres" (yesIdx=-1, noIdx=-1)
-FUZZY MATCH: "Canadiens vs. Sabres" → Buffalo Sabres vs Montréal Canadiens (100% sim)
-MATCH: exact for "Buffalo Sabres vs Montréal Canadiens" → YES=Buffalo Sabres(idx0), NO=Montréal Canadiens(idx1)
+DATE MISMATCH: "Wild vs. Oilers" poly=2026-01-31T23:59:59.000Z vs book=2026-02-02T02:30:00.000Z (27h diff) - SKIPPING
 ```
 
-## The Fix
+This blocks a valid game because the placeholder time creates an artificial 27-hour gap.
 
-The fuzzy match result should **only provide the matched bookmaker game** - not determine team order. The YES/NO assignment must ALWAYS come from the original Polymarket title.
+## Solution Overview
 
-### Technical Changes
+Add placeholder time detection and use a relaxed day-level check (same day or next day) instead of the strict 24-hour validation for placeholder times. The existing "game within 24h of NOW" check (lines 831-843) continues to provide the real gating.
 
-**File**: `supabase/functions/polymarket-monitor/index.ts`
+## Technical Changes
 
-#### Change 1: Pass Original Event Name to `findBookmakerMatch`
+### File: `supabase/functions/polymarket-monitor/index.ts`
 
-Update the fuzzy match code path (lines 1447-1461) to pass the **original** Polymarket event name, not the reconstructed bookmaker order:
+### Change 1: Add Helper Functions (after line 36)
 
-**Current (buggy)**:
+Add three utility functions for placeholder detection and date handling:
+
 ```typescript
-if (fuzzyResult) {
-  match = findBookmakerMatch(
-    `${fuzzyResult.homeTeam} vs ${fuzzyResult.awayTeam}`,  // ← Uses bookmaker order!
-    event.polymarket_question || '',
-    ...
+// ============= PLACEHOLDER TIME DETECTION =============
+// Polymarket sometimes stores placeholder times when exact game time is unknown
+
+function isPlaceholderPolymarketTime(d: Date): boolean {
+  const h = d.getUTCHours();
+  const m = d.getUTCMinutes();
+  const s = d.getUTCSeconds();
+  return (
+    (h === 23 && m === 59 && s === 59) || // end-of-day placeholder
+    (h === 0 && m === 0 && s === 0)       // midnight placeholder
   );
+}
+
+function dateOnlyUTC(d: Date): Date {
+  const x = new Date(d);
+  x.setUTCHours(0, 0, 0, 0);
+  return x;
+}
+
+function daysDiffUTC(a: Date, b: Date): number {
+  const ad = dateOnlyUTC(a).getTime();
+  const bd = dateOnlyUTC(b).getTime();
+  return Math.abs(ad - bd) / (1000 * 60 * 60 * 24);
 }
 ```
 
-**Fixed**:
+### Change 2: Update DATE MISMATCH Logic (lines 817-827)
+
+Replace the strict date validation with placeholder-aware logic:
+
+**Before:**
 ```typescript
-if (fuzzyResult) {
-  match = findBookmakerMatch(
-    event.event_name,  // ← Always use original Polymarket title
-    event.polymarket_question || '',
-    marketType,
-    [fuzzyResult.game],  // ← Pass only the matched game
-    polyEventDate,
-    polySlug
-  );
-  if (match) {
-    matchMethod = 'fuzzy';
-  }
-}
-```
-
-#### Change 2: Apply Same Fix to AI Resolution Path (lines 1468-1482)
-
-**Current (buggy)**:
-```typescript
-match = findBookmakerMatch(
-  `${resolved.homeTeam} vs ${resolved.awayTeam}`,  // ← Uses AI-resolved order!
-  ...
-);
-```
-
-**Fixed**:
-```typescript
-// AI resolution should just find which game - not determine order
-match = findBookmakerMatch(
-  event.event_name,  // ← Always use original Polymarket title
-  event.polymarket_question || '',
-  marketType,
-  bookmakerGames.filter(g => 
-    normalizeName(`${g.home_team} ${g.away_team}`).includes(normalizeName(resolved.homeTeam)) ||
-    normalizeName(`${g.home_team} ${g.away_team}`).includes(normalizeName(resolved.awayTeam))
-  ),
-  polyEventDate,
-  polySlug
-);
-```
-
-#### Change 3: Apply Same Fix to Nickname Expansion Path (lines 1430-1443)
-
-**Current (buggy)**:
-```typescript
-match = findBookmakerMatch(
-  `${expanded.homeTeam} vs ${expanded.awayTeam}`,  // ← Uses expanded order!
-  ...
-);
-```
-
-**Fixed**:
-```typescript
-match = findBookmakerMatch(
-  event.event_name,  // ← Always use original Polymarket title
-  event.polymarket_question || '',
-  marketType,
-  bookmakerGames,
-  polyEventDate,
-  polySlug
-);
-```
-
-#### Change 4: Improve `findBookmakerMatch` Team Matching
-
-The token-overlap matching at lines 885-920 needs to handle partial names (like "Canadiens" matching "Montréal Canadiens"). Update the token overlap to also check substring containment:
-
-```typescript
-// TIER 2: Token overlap OR substring containment
-if (yesOutcomeIndex === -1 || noOutcomeIndex === -1) {
-  // First try substring matching (handles "Canadiens" in "Montréal Canadiens")
-  const substringMatch = (needle: string, haystack: string) => {
-    const n = norm(needle);
-    return market.outcomes.findIndex((o: any) => {
-      const h = norm(o.name);
-      return h.includes(n) || n.includes(h);
-    });
-  };
+// DATE VALIDATION: Prevent cross-game matching
+if (polymarketEventDate && game.commence_time) {
+  const bookmakerDate = new Date(game.commence_time);
+  const hoursDiff = Math.abs(polymarketEventDate.getTime() - bookmakerDate.getTime()) / (1000 * 60 * 60);
   
-  if (yesOutcomeIndex === -1) {
-    yesOutcomeIndex = substringMatch(polyYesTeam, '');
-    if (yesOutcomeIndex !== -1) matchMethod = 'substring';
+  if (hoursDiff > 24) {
+    console.log(`[POLY-MONITOR] DATE MISMATCH: ...`);
+    continue;
   }
-  if (noOutcomeIndex === -1) {
-    noOutcomeIndex = substringMatch(polyNoTeam, '');
-    // Ensure not same as YES match
-    if (noOutcomeIndex === yesOutcomeIndex) {
-      noOutcomeIndex = market.outcomes.findIndex((o: any, i: number) => 
-        i !== yesOutcomeIndex && norm(o.name).includes(norm(polyNoTeam))
-      );
+}
+```
+
+**After:**
+```typescript
+// DATE VALIDATION: Prevent cross-game matching
+// NOTE: Polymarket sometimes stores placeholder times (23:59:59 or 00:00:00).
+// For placeholder times, skip strict hours-based comparison and use day-level check instead.
+if (polymarketEventDate && game.commence_time) {
+  const bookmakerDate = new Date(game.commence_time);
+  const isPlaceholder = isPlaceholderPolymarketTime(polymarketEventDate);
+
+  if (!isPlaceholder) {
+    // Strict check: dates must be within 24h
+    const hoursDiff = Math.abs(polymarketEventDate.getTime() - bookmakerDate.getTime()) / (1000 * 60 * 60);
+    
+    if (hoursDiff > 24) {
+      console.log(`[POLY-MONITOR] DATE MISMATCH: "${eventName}" poly=${polymarketEventDate.toISOString()} vs book=${bookmakerDate.toISOString()} (${hoursDiff.toFixed(0)}h diff) - SKIPPING`);
+      continue;
     }
-    if (noOutcomeIndex !== -1 && matchMethod !== 'substring') matchMethod = 'substring';
+  } else {
+    // Placeholder time detected - use softer day-level check
+    console.log(`[POLY-MONITOR] PLACEHOLDER_TIME: "${eventName}" poly=${polymarketEventDate.toISOString()} - using day-level + NOW-based validation`);
+    
+    // Only allow same day or next day to prevent far-future mismatches
+    const dd = daysDiffUTC(polymarketEventDate, bookmakerDate);
+    if (dd > 1) {
+      console.log(`[POLY-MONITOR] DATE_DAY_MISMATCH: "${eventName}" poly=${dateOnlyUTC(polymarketEventDate).toISOString()} vs book=${dateOnlyUTC(bookmakerDate).toISOString()} (${dd.toFixed(0)} days) - SKIPPING`);
+      continue;
+    }
   }
-  
-  // Fall back to token overlap if substring didn't work
-  // ... existing token overlap code ...
+}
+```
+
+### Change 3: Add Placeholder Stats Logging (after line 1336)
+
+Add summary logging to track how many events have placeholder times:
+
+```typescript
+// Log placeholder time stats for debugging
+try {
+  let placeholderCount = 0;
+  for (const e of eventsToProcess) {
+    const cache = cacheMap.get(e.polymarket_condition_id);
+    const rawDate = cache?.event_date || e.commence_time;
+    if (!rawDate) continue;
+    const d = new Date(rawDate);
+    if (!isNaN(d.getTime()) && isPlaceholderPolymarketTime(d)) {
+      placeholderCount++;
+    }
+  }
+  console.log(`[POLY-MONITOR] Events with placeholder times: ${placeholderCount}/${eventsToProcess.length}`);
+} catch (err) {
+  console.log(`[POLY-MONITOR] Placeholder stats error: ${(err as Error)?.message || err}`);
 }
 ```
 
 ## Summary of Changes
 
-| Location | Change |
-|----------|--------|
-| Line 1451 | Use `event.event_name` instead of `fuzzyResult.homeTeam vs fuzzyResult.awayTeam` |
-| Line 1469-1470 | Use `event.event_name` instead of `resolved.homeTeam vs resolved.awayTeam` |
-| Line 1439-1440 | Use `event.event_name` instead of `expanded.homeTeam vs expanded.awayTeam` |
-| Lines 885-920 | Add substring containment as intermediate tier before token overlap |
+| Location | Description |
+|----------|-------------|
+| After line 36 | Add 3 helper functions: `isPlaceholderPolymarketTime`, `dateOnlyUTC`, `daysDiffUTC` |
+| Lines 817-827 | Replace strict 24h check with placeholder-aware logic |
+| After line 1336 | Add placeholder stats logging for debugging |
 
-## Expected Results
+## Expected Behavior After Fix
 
-After this fix:
-- "Canadiens vs. Sabres" will always parse as YES=Canadiens, NO=Sabres
-- Fuzzy/AI/Nickname matching will find the right **game** but preserve Polymarket **order**
-- The signal will correctly show "Bet on Canadiens" when YES side has edge
-- No more inverted mappings
+| Scenario | Before | After |
+|----------|--------|-------|
+| Poly `23:59:59` + Book tomorrow 2:30 AM | SKIPPED (27h > 24h) | ALLOWED (same/next day) |
+| Poly `23:59:59` + Book Feb 15 | N/A | SKIPPED (day diff > 1) |
+| Poly real time + Book 30h apart | SKIPPED | SKIPPED (unchanged) |
+| Game within 24h of NOW | Allowed | Allowed (unchanged) |
 
-## Database Cleanup
+## Testing After Deployment
 
-After deployment, run this query to expire the incorrectly-mapped signals:
+1. Deploy the updated `polymarket-monitor` function
+2. Run a fresh monitor scan
+3. Check logs for `PLACEHOLDER_TIME:` messages
+4. Verify `DATE MISMATCH` count decreases
+5. Confirm new signals are created for previously-blocked games
 
-```sql
-UPDATE signal_opportunities 
-SET status = 'expired' 
-WHERE event_name ILIKE '%canadiens%' AND status = 'active'
-```
