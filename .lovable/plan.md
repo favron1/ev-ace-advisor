@@ -1,181 +1,181 @@
 
+# Implementing Enhanced Logging + Movement Tier-Only Upgrade
 
-# Implementing Anti-Inversion Safety Rails
+## Overview
 
-## Analysis Summary
+Two targeted refinements to eliminate the last inversion vector and make debugging instant:
 
-The external review correctly identified 3 critical inversion vectors in the current code:
-
-### Issue #1: `tokens[0]` Not Guaranteed to be YES Token
-
-**Location**: `polymarket-monitor/index.ts` lines 1341-1343
-
-```typescript
-// CURRENT (DANGEROUS):
-livePolyPrice = parseFloat(marketData.tokens?.[0]?.price || livePolyPrice);
-```
-
-**Problem**: When the CLOB batch fetch fails and we fallback to a single market fetch, we blindly assume `tokens[0]` is the YES token. Polymarket doesn't guarantee token ordering.
-
-**Evidence from DB**: We correctly store `token_id_yes` in the cache, but the fallback code ignores it.
+1. **Enhanced Logging** - Full context on every blocked/skipped signal
+2. **Movement Logic Refactor** - Movement upgrades tier, never overrides side
 
 ---
 
-### Issue #2: Title-Based YES/NO Team Assignment
+## Change #1: Enhanced Logging for MAPPING_INVERSION_DETECTED
 
-**Location**: `polymarket-monitor/index.ts` lines 806-808
+**File:** `supabase/functions/polymarket-monitor/index.ts`
+**Location:** Lines 1556-1558
 
+### Current Code
 ```typescript
-// CURRENT:
-const titleParts = eventName.match(/^(.+?)\s+vs\.?\s+(.+?)(?:\s*-\s*.*)?$/i);
-const polyYesTeam = titleParts?.[1]?.trim() || '';  // Assumed YES
-const polyNoTeam = titleParts?.[2]?.trim() || '';   // Assumed NO
-```
-
-**Problem**: We assume "first team in title = YES token". But Polymarket's YES token might actually correspond to the second team or a different outcome entirely. We should validate this against the actual outcome labels in the CLOB response.
-
----
-
-### Issue #3: Movement Override Can Force Wrong Side
-
-**Location**: `polymarket-monitor/index.ts` lines 1551-1564
-
-```typescript
-if (movement.direction === 'shortening' && yesEdge > 0.01) {
-  betSide = 'YES';  // Can force wrong side if mapping inverted
-  ...
-}
-```
-
-**Problem**: If our YES/NO mapping is already inverted, `yesEdge > 0.01` could be a false positive based on wrong data.
-
----
-
-## Proposed Solution: 3 Safety Rails
-
-### Safety Rail #1: Use `tokenIdYes` for Fallback Price Lookup
-
-Replace the dangerous `tokens[0]` fallback with explicit token ID matching:
-
-```typescript
-// SAFE:
-if (event.polymarket_condition_id) {
-  try {
-    const clobUrl = `${CLOB_API_BASE}/markets/${event.polymarket_condition_id}`;
-    const clobResponse = await fetch(clobUrl);
-    
-    if (clobResponse.ok) {
-      const marketData = await clobResponse.json();
-      
-      // Find YES token explicitly using stored token ID
-      if (tokenIdYes) {
-        const yesToken = marketData.tokens?.find((t: any) => t.token_id === tokenIdYes);
-        if (yesToken?.price) {
-          livePolyPrice = parseFloat(yesToken.price);
-        }
-      } else {
-        // No token ID = untradeable, skip
-        console.log(`[POLY-MONITOR] No tokenIdYes for ${event.event_name} - SKIPPING`);
-        continue;
-      }
-    }
-  } catch {
-    // Use cached price
-  }
-}
-```
-
----
-
-### Safety Rail #2: Dual-Mapping EV Gate
-
-This is the "cannot possibly fire wrong side" upgrade. Before creating any signal, compute EV under both possible mappings and reject if the swapped mapping looks better:
-
-```typescript
-// After calculating edges with current mapping:
-const yesEdge_A = yesFairProb - livePolyPrice;
-const noEdge_A  = noFairProb  - (1 - livePolyPrice);
-
-// Compute with SWAPPED mapping (assume livePolyPrice belongs to NO team)
-const yesEdge_B = yesFairProb - (1 - livePolyPrice);
-const noEdge_B  = noFairProb  - livePolyPrice;
-
-// Best edge under each mapping
-const bestA = Math.max(yesEdge_A, noEdge_A);
-const bestB = Math.max(yesEdge_B, noEdge_B);
-
-// Require current mapping to win clearly
-const MAPPING_MARGIN = 0.02; // 2% edge margin
 if (bestB > bestA + MAPPING_MARGIN) {
-  console.log(`[POLY-MONITOR] MAPPING_INVERSION_DETECTED: bestA=${(bestA*100).toFixed(1)}%, bestB=${(bestB*100).toFixed(1)}% - SKIPPING`);
+  console.log(`[POLY-MONITOR] MAPPING_INVERSION_DETECTED: "${event.event_name}" | bestA=${...} - SKIPPING`);
   continue;
 }
 ```
 
-**How This Works**: If we accidentally attached the YES price to the wrong team, the swapped mapping will produce dramatically better EV. We skip the trade instead of firing an inverted signal.
-
----
-
-### Safety Rail #3: Tighten Movement Override Threshold
-
-Movement can only override side selection if there's a substantial edge, not just 1%:
-
+### New Code
 ```typescript
-// CURRENT:
-if (movement.direction === 'shortening' && yesEdge > 0.01) { ... }
-
-// PROPOSED:
-if (movement.direction === 'shortening' && yesEdge > 0.03) { ... }
+if (bestB > bestA + MAPPING_MARGIN) {
+  console.log(`[POLY-MONITOR] MAPPING_INVERSION_DETECTED`, {
+    event: event.event_name,
+    polyPrice: livePolyPrice,
+    yesFairProb,
+    noFairProb,
+    bestA,
+    bestB,
+    margin: MAPPING_MARGIN,
+    tokenIdYes,
+    yesTeamName,
+    noTeamName,
+    spreadPct,
+    volume: liveVolume,
+    bestBid,
+    bestAsk,
+  });
+  continue;
+}
 ```
 
-Raising to 3% ensures movement only overrides when there's meaningful edge that's less likely to be an artifact of inversion.
+---
+
+## Change #2: Enhanced Logging for No TokenIdYes Skip
+
+**File:** `supabase/functions/polymarket-monitor/index.ts`
+**Location:** Lines 1336-1339
+
+### Current Code
+```typescript
+if (!tokenIdYes) {
+  console.log(`[POLY-MONITOR] No tokenIdYes for "${event.event_name}" - SKIPPING`);
+  continue;
+}
+```
+
+### New Code
+```typescript
+if (!tokenIdYes) {
+  console.log(`[POLY-MONITOR] NO_TOKEN_ID_SKIP`, {
+    event: event.event_name,
+    conditionId: event.polymarket_condition_id,
+    cachedPrice: event.polymarket_yes_price,
+    cachedVolume: event.polymarket_volume,
+  });
+  continue;
+}
+```
 
 ---
 
-## Technical Implementation
+## Change #3: Movement Never Overrides Side - Only Upgrades Tier
 
-### File to Modify
+**File:** `supabase/functions/polymarket-monitor/index.ts`
+**Location:** Lines 1586-1603
 
-**`supabase/functions/polymarket-monitor/index.ts`**
+### Current Code (Dangerous - can force wrong side)
+```typescript
+// Movement direction can OVERRIDE if strong directional signal
+if (movement.triggered) {
+  if (movement.direction === 'shortening' && yesEdge > 0.03) {
+    betSide = 'YES';
+    rawEdge = yesEdge;
+    recommendedOutcome = yesTeamName;
+    recommendedFairProb = yesFairProb;
+  } else if (movement.direction === 'drifting' && noEdge > 0.03) {
+    betSide = 'NO';
+    rawEdge = noEdge;
+    recommendedOutcome = noTeamName;
+    recommendedFairProb = noFairProb;
+  }
+}
+```
 
-### Changes
+### New Code (Safe - tier boost only)
+```typescript
+// SAFETY RAIL #3: Movement NEVER overrides side selection
+// It only boosts tier/confidence when there's already meaningful edge on chosen side
+let movementBoost = 0;
 
-| Line | Current | Proposed |
-|------|---------|----------|
-| 1334-1349 | `tokens[0]` fallback | Use `tokenIdYes` to find correct token |
-| ~1520 | After edge calculation | Add dual-mapping EV gate |
-| 1552, 1558 | `> 0.01` threshold | `> 0.03` threshold |
+if (movement.triggered) {
+  // Only boost if there's already meaningful edge on the chosen side
+  if (rawEdge >= 0.05) {
+    movementBoost = 2;
+  } else if (rawEdge >= 0.03) {
+    movementBoost = 1;
+  }
+  
+  console.log(`[POLY-MONITOR] MOVEMENT_CONFIRMED`, {
+    event: event.event_name,
+    direction: movement.direction,
+    chosenSide: betSide,
+    rawEdge,
+    movementBoost,
+    booksConfirming: movement.booksConfirming,
+  });
+}
+```
 
 ---
 
-## Why These 3 Rails Work Together
+## Change #4: Apply Movement Boost to Tier Calculation
 
-| Rail | Protects Against |
-|------|------------------|
-| Token ID lookup | Array ordering issues in CLOB response |
-| Dual-mapping gate | All title→team mapping mistakes |
-| Higher movement threshold | Movement forcing wrong side on marginal edges |
+**File:** `supabase/functions/polymarket-monitor/index.ts`
+**Location:** Lines 1644-1645
 
-The dual-mapping gate is the **critical** safety rail. Even if rails #1 and #3 fail, the dual-mapping gate mathematically prevents firing inverted signals.
+### Current Code
+```typescript
+const signalTier = calculateSignalTier(movementTriggered, netEdge);
+```
+
+### New Code
+```typescript
+// Calculate base tier, then apply movement boost
+let signalTier = calculateSignalTier(movementTriggered, netEdge);
+
+// Movement boost can upgrade tier: STATIC -> STRONG -> ELITE
+if (movementBoost >= 2 && signalTier === 'static') {
+  signalTier = 'strong';
+} else if (movementBoost >= 2 && signalTier === 'strong') {
+  signalTier = 'elite';
+} else if (movementBoost >= 1 && signalTier === 'static') {
+  signalTier = 'strong';
+}
+```
 
 ---
 
-## Expected Outcome
+## Summary of Changes
 
-After implementing these changes:
+| Location | Change | Purpose |
+|----------|--------|---------|
+| Lines 1336-1339 | Enhanced NO_TOKEN_ID_SKIP log | Debugging oracle for missing tokens |
+| Lines 1556-1558 | Enhanced MAPPING_INVERSION_DETECTED log | Full context on every blocked inversion |
+| Lines 1586-1603 | Remove side override, add movementBoost | Eliminate last "force wrong side" risk |
+| Lines 1644-1645 | Apply movementBoost to tier | Movement upgrades tier instead of overriding side |
 
-1. **Zero inverted signals** from token array ordering
-2. **Automatic rejection** of signals where mapping looks wrong
-3. **Logging visibility** into `MAPPING_INVERSION_DETECTED` events for debugging
-4. **Movement overrides** only on confident 3%+ edges
+---
+
+## Why This Matters
+
+- **Logging**: Every skipped signal becomes self-explaining in one log line
+- **Movement Safety**: Side selection is now purely based on edge calculation, making it mathematically impossible for movement to force an inverted signal
+- **Tier Upgrade**: Movement still matters - it boosts confidence/tier, just doesn't touch side selection
 
 ---
 
 ## Testing Plan
 
-1. Deploy changes
-2. Run `polymarket-monitor` and check logs for:
-   - `MAPPING_INVERSION_DETECTED` entries (signals correctly blocked)
-   - Normal `EDGE CALC` entries (signals correctly passed)
-3. Verify no signals appear with suspicious favorite/underdog flips
-
+After deployment:
+1. Run `polymarket-monitor` 
+2. Check logs for structured JSON output on `MAPPING_INVERSION_DETECTED` and `NO_TOKEN_ID_SKIP`
+3. Verify `MOVEMENT_CONFIRMED` logs show boost without side changes
+4. Confirm no inverted signals appear in `signal_opportunities`
