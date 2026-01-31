@@ -528,8 +528,43 @@ Deno.serve(async (req) => {
     let firecrawlUpserted = 0;
     let firecrawlVolumeEnriched = 0;
     
-    // Set a default event_date for scraped games (today + 12 hours since we don't know exact time)
-    const defaultEventDate = new Date(now.getTime() + 12 * 60 * 60 * 1000);
+    // FALLBACK: Default event_date for scraped games if we can't match to Odds API (now + 12h)
+    const fallbackEventDate = new Date(now.getTime() + 12 * 60 * 60 * 1000);
+    
+    // Helper: Find matching game in Odds API data to get accurate commence_time
+    function findOddsApiCommenceTime(team1Name: string, team2Name: string): Date | null {
+      const team1Norm = normalizeForMatch(team1Name);
+      const team2Norm = normalizeForMatch(team2Name);
+      const team1Last = team1Name.split(' ').pop()?.toLowerCase() || '';
+      const team2Last = team2Name.split(' ').pop()?.toLowerCase() || '';
+      
+      for (const game of oddsApiGames) {
+        const homeNorm = normalizeForMatch(game.home_team);
+        const awayNorm = normalizeForMatch(game.away_team);
+        const homeLast = game.home_team.split(' ').pop()?.toLowerCase() || '';
+        const awayLast = game.away_team.split(' ').pop()?.toLowerCase() || '';
+        
+        // Match by full name OR last word (nickname)
+        const matches1Home = team1Norm.includes(homeNorm) || homeNorm.includes(team1Norm) || 
+                            (team1Last.length > 3 && (team1Last === homeLast || team1Last === awayLast));
+        const matches2Home = team2Norm.includes(homeNorm) || homeNorm.includes(team2Norm) ||
+                            (team2Last.length > 3 && (team2Last === homeLast || team2Last === awayLast));
+        const matches1Away = team1Norm.includes(awayNorm) || awayNorm.includes(team1Norm) ||
+                            (team1Last.length > 3 && (team1Last === homeLast || team1Last === awayLast));
+        const matches2Away = team2Norm.includes(awayNorm) || awayNorm.includes(team2Norm) ||
+                            (team2Last.length > 3 && (team2Last === homeLast || team2Last === awayLast));
+        
+        // Either team1=home & team2=away, OR team1=away & team2=home
+        if ((matches1Home && matches2Away) || (matches1Away && matches2Home)) {
+          const commenceTime = new Date(game.commence_time);
+          if (!isNaN(commenceTime.getTime())) {
+            return commenceTime;
+          }
+        }
+      }
+      
+      return null;
+    }
     
     // OPTIMIZED: Pre-fetch ALL sports events from Gamma API ONCE for volume enrichment
     // This avoids calling the API 39 times (once per Firecrawl game) - major perf fix
@@ -608,6 +643,15 @@ Deno.serve(async (req) => {
           }
         }
         
+        // CRITICAL FIX: Use Odds API commence_time for accurate event dates
+        // This fixes the "11h to kickoff" bug when games are actually LIVE
+        const actualCommenceTime = findOddsApiCommenceTime(game.team1Name, game.team2Name);
+        const eventDate = actualCommenceTime || fallbackEventDate;
+        
+        if (actualCommenceTime) {
+          console.log(`[FIRECRAWL] Matched ${game.team1Name} vs ${game.team2Name} -> Kickoff: ${actualCommenceTime.toISOString()}`);
+        }
+        
         const { error: fcError } = await supabase
           .from('polymarket_h2h_cache')
           .upsert({
@@ -622,7 +666,7 @@ Deno.serve(async (req) => {
             no_price: game.team2Price,
             volume: volume,
             liquidity: liquidity,
-            event_date: defaultEventDate.toISOString(),
+            event_date: eventDate.toISOString(),
             sport_category: sport,
             extracted_league: sport,
             market_type: 'h2h',
