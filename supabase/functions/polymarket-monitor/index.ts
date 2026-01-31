@@ -1875,6 +1875,9 @@ Deno.serve(async (req) => {
               polymarket_updated_at: now.toISOString(),
               signal_strength: netEdge * 100,
               expires_at: event.commence_time,
+              // CRITICAL FIX: Always include recommended_outcome and side to fix stale mappings
+              recommended_outcome: recommendedOutcome,
+              side: betSide,
               // NEW: Movement detection fields
               movement_confirmed: movementTriggered,
               movement_velocity: movement.velocity,
@@ -1925,8 +1928,7 @@ Deno.serve(async (req) => {
               const { data, error } = await supabase
                 .from('signal_opportunities')
                 .update({
-                  ...signalData,
-                  side: betSide, // Update side based on movement direction
+                  ...signalData, // includes recommended_outcome and side
                   polymarket_slug: polymarketSlug, // Copy slug for direct Polymarket URLs
                 })
                 .eq('id', existingSignal.id)
@@ -1935,7 +1937,7 @@ Deno.serve(async (req) => {
 
               signal = data;
               signalError = error;
-              console.log(`[POLY-MONITOR] Updated ${signalTier} ${betSide} signal for ${event.event_name}`);
+              console.log(`[POLY-MONITOR] Updated ${signalTier} ${betSide} ${recommendedOutcome} signal for ${event.event_name}`);
             } else {
               // INSERT new signal - include slug from cache for direct Polymarket URLs
               const polymarketSlug = cache?.polymarket_slug || null;
@@ -1944,13 +1946,11 @@ Deno.serve(async (req) => {
                 .from('signal_opportunities')
                 .insert({
                   event_name: event.event_name,
-                  recommended_outcome: recommendedOutcome,
-                  side: betSide, // NEW: Use calculated bet side
                   is_true_arbitrage: true,
                   status: 'active',
                   polymarket_condition_id: event.polymarket_condition_id,
-                  polymarket_slug: polymarketSlug, // NEW: Copy slug for direct URLs
-                  ...signalData,
+                  polymarket_slug: polymarketSlug, // Copy slug for direct URLs
+                  ...signalData, // includes recommended_outcome and side
                 })
                 .select()
                 .single();
