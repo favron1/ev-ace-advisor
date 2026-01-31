@@ -48,7 +48,7 @@ interface ClobPriceRequest {
 }
 
 interface ClobPriceResponse {
-  [tokenId: string]: string; // price as string
+  [tokenId: string]: { BUY?: string; SELL?: string } | string; // CLOB returns object with BUY/SELL keys
 }
 
 // Calculate fair probability by removing vig (2-way markets)
@@ -415,8 +415,13 @@ Deno.serve(async (req) => {
         const oppositeTokenId = signal.side === 'YES' ? cache.token_id_no : cache.token_id_yes;
         
         if (tokenId && clobPrices[tokenId]) {
-          // Use live CLOB price (Gamma API sourced)
-          livePrice = parseFloat(clobPrices[tokenId]);
+          // CLOB returns object format: { BUY: "0.50", SELL: "0.48" }
+          const priceData = clobPrices[tokenId];
+          if (typeof priceData === 'object' && priceData !== null) {
+            livePrice = parseFloat(priceData.BUY || priceData.SELL || '0');
+          } else if (typeof priceData === 'string') {
+            livePrice = parseFloat(priceData);
+          }
         } else {
           // Fallback: Use cached price from polymarket_h2h_cache (Firecrawl sourced)
           livePrice = signal.side === 'YES' ? cache.yes_price : cache.no_price;
@@ -424,7 +429,12 @@ Deno.serve(async (req) => {
         
         // Also get opposite side price for validation
         if (oppositeTokenId && clobPrices[oppositeTokenId]) {
-          oppositePrice = parseFloat(clobPrices[oppositeTokenId]);
+          const priceData = clobPrices[oppositeTokenId];
+          if (typeof priceData === 'object' && priceData !== null) {
+            oppositePrice = parseFloat(priceData.BUY || priceData.SELL || '0');
+          } else if (typeof priceData === 'string') {
+            oppositePrice = parseFloat(priceData);
+          }
         } else {
           oppositePrice = signal.side === 'YES' ? cache.no_price : cache.yes_price;
         }
