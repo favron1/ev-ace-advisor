@@ -1,125 +1,62 @@
 
 
-# Plan: Fix Inverted Edge Calculations for H2H Signals
+# Fix: Signal Created for Wrong Game Date
 
-## Problem Summary
+## Problem Identified
 
-The Avalanche vs. Red Wings and Hurricanes vs. Capitals signals are showing **inverted fair probabilities**:
+The "Red Wings vs. Avalanche" signal showing 41.8% fair probability is mixing data from **two different games**:
 
-| Signal | DB Shows | Bookmaker Reality |
-|--------|----------|-------------------|
-| Red Wings | 58.2% fair | **33.3%** fair (should be the underdog) |
-| Capitals | 60.2% fair | **31.6%** fair (should be the underdog) |
+| Data Source | Game Date | Details |
+|-------------|-----------|---------|
+| Polymarket market | **Feb 2, 2026** | Condition `0x91194...`, slug `nhl-det-col-2026-02-02` |
+| Bookmaker odds | **Jan 31, 2026** | Colorado @ Detroit TODAY |
+| Cache `event_date` | Jan 31 (WRONG) | Should be Feb 2 |
 
-This causes the system to recommend betting on underdogs as if they were favorites, creating false "high-edge" signals.
+**Result**: System calculates bookmaker fair probability for **today's game** but applies it to **Feb 2nd's Polymarket market**, creating a phantom signal.
 
 ---
 
-## Root Cause Analysis
+## Root Cause
 
-I traced through the entire matching and calculation pipeline. The bug is in `findBookmakerMatch()` (lines 812-831).
+The cache entry for `0x91194...` has `event_date: 2026-01-31 18:00:00` but the CLOB data says `game_start_time: 2026-02-03T02:00:00Z` (Feb 2nd 9PM ET).
 
-### The Fallback Bug
-
-When **BOTH teams are found** in the Polymarket event name (common for H2H markets), the code falls into a fallback:
-
-```javascript
-} else {
-  // Both teams found - try question, then fallback
-  if (homeWords.some(w => questionNorm.includes(w))) {
-    targetIndex = 0;
-    teamName = game.home_team;
-  } else if (awayWords.some(w => questionNorm.includes(w))) {
-    targetIndex = 1;
-    teamName = game.away_team;
-  } else {
-    // BUG: Always picks index 0 (first bookmaker outcome)
-    targetIndex = 0;
-    teamName = market.outcomes[0]?.name || game.home_team;
-  }
-}
-```
-
-**Why this fails:**
-- Bookmaker data: "Detroit Red Wings vs Colorado Avalanche" → Index 0 = Colorado (46.6%)
-- Polymarket title: "Avalanche vs. Red Wings" (different order)
-- System sets `targetIndex = 0` and gets **Colorado's probability (46.6%)**
-- After 3-way to 2-way conversion: 46.6% / 79.9% = **58.3%**
-- System **thinks** this is Detroit's probability (because `teamName = Detroit`)
-- Edge calculation uses wrong probability → **inverted recommendation**
+This date mismatch causes the bookmaker matching to find "Avalanche vs Red Wings" (the Jan 31 game) and use those odds for the Feb 2nd Polymarket market.
 
 ---
 
 ## Solution
 
-### Fix 1: Use Polymarket Title Order to Determine Target Team
+### Fix 1: Parse Game Date from CLOB `game_start_time`
 
-Instead of relying on bookmaker outcome order, determine which team to track based on **which Polymarket side** we're calculating:
+When syncing markets to the cache, use the CLOB `game_start_time` field (not inferred from question text) as the authoritative event date:
 
-```javascript
-// When both teams are found in event name:
-// Parse Polymarket title to get YES/NO teams
-const titleParts = eventName.match(/^(.+?)\s+vs\.?\s+(.+?)$/i);
-const polyYesTeamNorm = normalizeName(titleParts?.[1] || '');
-const polyNoTeamNorm = normalizeName(titleParts?.[2] || '');
-
-// Match each Polymarket team to bookmaker outcomes
-const yesOutcomeIndex = market.outcomes.findIndex(o => {
-  const outcomeNorm = normalizeName(o.name);
-  const yesNickname = polyYesTeamNorm.split(' ').pop();
-  return outcomeNorm.includes(yesNickname);
-});
-
-const noOutcomeIndex = market.outcomes.findIndex(o => {
-  const outcomeNorm = normalizeName(o.name);
-  const noNickname = polyNoTeamNorm.split(' ').pop();
-  return outcomeNorm.includes(noNickname);
-});
-
-// Calculate fair probability for BOTH sides directly
-const yesFairProb = calculateConsensusFairProb(..., yesOutcomeIndex, ...);
-const noFairProb = calculateConsensusFairProb(..., noOutcomeIndex, ...);
-
-// Now edge calculation uses correct probabilities
-```
-
-### Fix 2: Simplify Edge Calculation
-
-Since we can calculate both YES and NO fair probabilities directly:
-
-```javascript
-// Direct comparison - no inversions needed
-const yesEdge = yesFairProb - livePolyPrice;
-const noEdge = noFairProb - (1 - livePolyPrice);
-
-// Pick the positive edge side
-if (yesEdge > 0 && yesEdge >= noEdge) {
-  betSide = 'YES';
-  recommendedOutcome = polyYesTeam;
-  recommendedFairProb = yesFairProb;
-  rawEdge = yesEdge;
-} else if (noEdge > 0) {
-  betSide = 'NO';
-  recommendedOutcome = polyNoTeam;
-  recommendedFairProb = noFairProb;
-  rawEdge = noEdge;
+```typescript
+// In sync function
+const gameStartTime = clobMarket.game_start_time;
+if (gameStartTime) {
+  eventDate = new Date(gameStartTime);
 }
 ```
 
-### Fix 3: Add Validation Logging
+### Fix 2: Add Date Validation to Bookmaker Matching
 
-Add explicit probability sanity checks:
+Before matching a Polymarket market to bookmaker odds, validate the dates are within 24 hours:
 
-```javascript
-// Sanity check: Fair prob should match roughly with bookmaker consensus
-console.log(`[POLY-MONITOR] Fair probs: YES=${polyYesTeam}=${(yesFairProb*100).toFixed(1)}%, NO=${polyNoTeam}=${(noFairProb*100).toFixed(1)}%`);
+```typescript
+// In findBookmakerMatch()
+const polyDate = new Date(event.event_date);
+const bookDate = new Date(game.commence_time);
+const hoursDiff = Math.abs(polyDate.getTime() - bookDate.getTime()) / 36e5;
 
-// Block if probabilities don't sum to ~100%
-if (Math.abs(yesFairProb + noFairProb - 1.0) > 0.05) {
-  console.log(`[POLY-MONITOR] PROBABILITY MISMATCH: ${yesFairProb + noFairProb} - skipping`);
+if (hoursDiff > 24) {
+  console.log(`[POLY-MONITOR] DATE MISMATCH: Poly=${polyDate.toISOString()}, Book=${bookDate.toISOString()} - skipping`);
   continue;
 }
 ```
+
+### Fix 3: Expire the Current Bad Signal
+
+The active "Red Wings vs. Avalanche" signal (ID `1a2329a0...`) is based on wrong data and should be expired immediately.
 
 ---
 
@@ -127,37 +64,20 @@ if (Math.abs(yesFairProb + noFairProb - 1.0) > 0.05) {
 
 ### Files to Modify
 
-1. **`supabase/functions/polymarket-monitor/index.ts`**
-   - Refactor `findBookmakerMatch()` to return both YES and NO team mappings
-   - Modify edge calculation section (lines 1375-1436) to use direct team-to-probability mapping
-   - Add probability validation logging
-   - Remove the fragile `isMatchedTeamYesSide` inversion logic
+1. **`supabase/functions/polymarket-sync-24h/index.ts`** (or similar sync function)
+   - Update event_date parsing to use CLOB `game_start_time` field
 
-### Changes Summary
+2. **`supabase/functions/polymarket-monitor/index.ts`**
+   - Add date validation in `findBookmakerMatch()` to prevent cross-game matching
+   - Log warning when Polymarket and bookmaker event dates don't align
 
-```
-Current flow:
-1. Match ONE team → get its probability
-2. Determine if matched team is YES or NO side
-3. Invert probability if needed
-4. Calculate edge with inverted values
-
-New flow:
-1. Parse Polymarket title → get YES team and NO team names
-2. Find bookmaker probability for YES team directly
-3. Find bookmaker probability for NO team directly  
-4. Calculate yesEdge = yesFairProb - polyYesPrice
-5. Calculate noEdge = noFairProb - polyNoPrice
-6. Pick the side with positive edge
-```
+3. **Database**: Fix the cache entry for `0x91194...` to have correct event_date
 
 ---
 
-## Immediate Action
+## Immediate Actions
 
-Before implementing the full fix, I can **expire the current bad signals** and they won't resurface until the code is fixed (because the edge calculation would produce the same wrong result).
-
-Should I proceed with:
-1. Expiring the Avalanche/Red Wings and Hurricanes/Capitals signals now
-2. Implementing the fix to prevent future inversions
+1. Expire the bad signal (`1a2329a0...`)
+2. Update cache entry for `0x91194...` to correct event_date (Feb 2nd)
+3. Implement date validation in matching logic
 
