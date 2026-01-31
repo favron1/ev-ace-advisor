@@ -854,6 +854,7 @@ function findBookmakerMatch(
 
 // Calculate fair probability from all bookmakers
 // CRITICAL FIX: For NHL, filter out Draw outcomes and renormalize to 2-way market
+// CRITICAL FIX #2: Outlier protection - reject extreme probabilities from data glitches
 function calculateConsensusFairProb(
   game: any, 
   marketKey: string, 
@@ -899,6 +900,15 @@ function calculateConsensusFairProb(
     
     // calculateFairProb already normalizes to 100%, so this handles renormalization
     const fairProb = calculateFairProb(odds, Math.min(adjustedTargetIndex, odds.length - 1));
+    
+    // OUTLIER PROTECTION: Reject extreme probabilities (>92% or <8%)
+    // Real H2H sporting events rarely have 12+ to 1 favorites
+    // This protects against data glitches like Betfair showing 99% for a 50/50 game
+    if (fairProb > 0.92 || fairProb < 0.08) {
+      console.log(`[POLY-MONITOR] OUTLIER REJECTED: ${bookmaker.key} fairProb=${(fairProb * 100).toFixed(1)}% for ${game.home_team} vs ${game.away_team}`);
+      continue; // Skip this bookmaker's data point
+    }
+    
     const weight = SHARP_BOOKS.includes(bookmaker.key) ? 1.5 : 1.0;
     
     weightedProb += fairProb * weight;
