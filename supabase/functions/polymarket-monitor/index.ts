@@ -1326,7 +1326,9 @@ Deno.serve(async (req) => {
           if (clobSpreads.has(tokenIdYes)) {
             spreadPct = clobSpreads.get(tokenIdYes)!;
           } else if (bestBid > 0 && bestAsk > 0) {
-            spreadPct = bestAsk - bestBid;
+            // Convert to percentage-of-mid for consistent units with calculateNetEdge()
+            const mid = (bestAsk + bestBid) / 2;
+            spreadPct = mid > 0 ? (bestAsk - bestBid) / mid : null;
           }
         }
         
@@ -1358,7 +1360,13 @@ Deno.serve(async (req) => {
                   livePolyPrice = parseFloat(yesToken.price);
                   console.log(`[POLY-MONITOR] Fallback CLOB: Found YES token for "${event.event_name}" price=${livePolyPrice.toFixed(3)}`);
                 } else {
-                  console.log(`[POLY-MONITOR] Fallback CLOB: Could not find token_id=${tokenIdYes} in response for "${event.event_name}" - using cached price`);
+                  console.log(`[POLY-MONITOR] FALLBACK_TOKEN_MISSING`, {
+                    event: event.event_name,
+                    conditionId: event.polymarket_condition_id,
+                    tokenIdYes,
+                    tokensInResponse: marketData.tokens?.map((t: any) => t.token_id) || [],
+                  });
+                  continue; // Cannot safely price trade without confirmed YES token
                 }
                 
                 liveVolume = parseFloat(marketData.volume || liveVolume);
@@ -1532,11 +1540,16 @@ Deno.serve(async (req) => {
             continue;
           }
           
-          // Generate event key for movement detection (use YES team)
-          const eventKey = generateEventKey(event.event_name, yesTeamName);
-          
-          // ========== MOVEMENT DETECTION GATE ==========
-          const movement = await detectSharpMovement(supabase, eventKey, yesTeamName);
+          // ========== MOVEMENT DETECTION FOR BOTH TEAMS ==========
+          // Generate keys for both outcomes to ensure movement is captured regardless of final side
+          const eventKeyYes = generateEventKey(event.event_name, yesTeamName);
+          const eventKeyNo = generateEventKey(event.event_name, noTeamName);
+
+          // Run movement detection in parallel for both teams
+          const [moveYes, moveNo] = await Promise.all([
+            detectSharpMovement(supabase, eventKeyYes, yesTeamName),
+            detectSharpMovement(supabase, eventKeyNo, noTeamName),
+          ]);
           
           // ========== DIRECT EDGE CALCULATION (NO INVERSION NEEDED) ==========
           // yesEdge = what YES is worth (fair prob) - what we pay (Poly YES price)
@@ -1604,6 +1617,9 @@ Deno.serve(async (req) => {
           }
           
           // SAFETY RAIL #3: Movement NEVER overrides side selection
+          // Use movement from the side we're actually betting on
+          const movement = betSide === 'YES' ? moveYes : moveNo;
+          
           // It only boosts tier/confidence when there's already meaningful edge on chosen side
           let movementBoost = 0;
 
@@ -1727,7 +1743,7 @@ Deno.serve(async (req) => {
               bookmaker_probability: recommendedFairProb, // Use recommended team's fair prob
               bookmaker_prob_fair: recommendedFairProb,
               edge_percent: rawEdge * 100,
-              confidence_score: Math.min(85, 50 + Math.floor(netEdge * 500)),
+              confidence_score: Math.min(95, 50 + Math.floor(netEdge * 500) + (movementBoost * 10)),
               urgency: eventStart.getTime() - now.getTime() < 3600000 ? 'critical' : 
                       eventStart.getTime() - now.getTime() < 14400000 ? 'high' : 'normal',
               polymarket_yes_price: livePolyPrice,
