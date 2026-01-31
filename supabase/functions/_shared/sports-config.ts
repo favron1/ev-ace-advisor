@@ -52,12 +52,12 @@ export const SPORTS_CONFIG: Record<string, SportConfig> = {
     ],
   },
 
-  // NBA
+  // NBA - H2H and Totals
   nba: {
     name: 'NBA',
     polymarketUrl: 'https://polymarket.com/sports/nba/games',
     oddsApiSport: 'basketball_nba',
-    oddsApiMarkets: 'h2h',
+    oddsApiMarkets: 'h2h,totals', // Added totals for over/under
     oddsApiOutright: 'basketball_nba_championship_winner',
     teamMap: {
       'atl': 'Atlanta Hawks', 'bos': 'Boston Celtics', 'bkn': 'Brooklyn Nets',
