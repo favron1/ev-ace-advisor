@@ -579,6 +579,10 @@ serve(async (req) => {
       
       if (tokenIdYes) h2hWithTokens++;
 
+      // Determine tradeability based on token presence
+      const isTradeable = !!tokenIdYes;
+      const untradeableReason = isTradeable ? null : 'MISSING_TOKENS';
+
       const { error } = await supabase
         .from('polymarket_h2h_cache')
         .upsert({
@@ -598,6 +602,9 @@ serve(async (req) => {
           market_type: 'h2h',
           token_id_yes: tokenIdYes,
           token_id_no: tokenIdNo,
+          token_source: tokenIdYes ? (gammaData.tokenIdYes ? 'gamma' : 'clob') : null,
+          tradeable: isTradeable,
+          untradeable_reason: untradeableReason,
           polymarket_slug: slug,
           status: 'active',
           monitoring_status: 'watching',
@@ -634,6 +641,10 @@ serve(async (req) => {
       
       if (tokenIdYes) totalWithTokens++;
 
+      // Determine tradeability for totals
+      const isTradeable = !!tokenIdYes;
+      const untradeableReason = isTradeable ? null : 'MISSING_TOKENS';
+
       const { error } = await supabase
         .from('polymarket_h2h_cache')
         .upsert({
@@ -654,6 +665,9 @@ serve(async (req) => {
           extracted_threshold: total.threshold,
           token_id_yes: tokenIdYes,
           token_id_no: tokenIdNo,
+          token_source: tokenIdYes ? 'gamma' : null,
+          tradeable: isTradeable,
+          untradeable_reason: untradeableReason,
           polymarket_slug: slug,
           status: 'active',
           monitoring_status: 'watching',

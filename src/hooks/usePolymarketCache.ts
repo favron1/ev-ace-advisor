@@ -21,6 +21,13 @@ export interface PolymarketCacheEntry {
   last_price_update: string;
   last_bulk_sync: string;
   created_at: string;
+  // NEW: Tokenization fields
+  token_id_yes?: string | null;
+  token_id_no?: string | null;
+  tradeable?: boolean;
+  untradeable_reason?: string | null;
+  token_source?: string | null;
+  token_confidence?: number | null;
 }
 
 export function usePolymarketCache() {

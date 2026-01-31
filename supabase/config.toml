@@ -47,3 +47,9 @@ verify_jwt = false
 
 [functions.scrape-polymarket-nba]
 verify_jwt = false
+
+[functions.tokenize-market]
+verify_jwt = false
+
+[functions.scrape-polymarket-soccer]
+verify_jwt = false

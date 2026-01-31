@@ -298,6 +298,7 @@ export type Database = {
           id: string
           last_bulk_sync: string | null
           last_price_update: string | null
+          last_token_repair_at: string | null
           liquidity: number | null
           market_type: string | null
           monitoring_status: string | null
@@ -313,8 +314,12 @@ export type Database = {
           team_away_normalized: string | null
           team_home: string | null
           team_home_normalized: string | null
+          token_confidence: number | null
           token_id_no: string | null
           token_id_yes: string | null
+          token_source: string | null
+          tradeable: boolean | null
+          untradeable_reason: string | null
           volume: number | null
           yes_price: number
         }
@@ -331,6 +336,7 @@ export type Database = {
           id?: string
           last_bulk_sync?: string | null
           last_price_update?: string | null
+          last_token_repair_at?: string | null
           liquidity?: number | null
           market_type?: string | null
           monitoring_status?: string | null
@@ -346,8 +352,12 @@ export type Database = {
           team_away_normalized?: string | null
           team_home?: string | null
           team_home_normalized?: string | null
+          token_confidence?: number | null
           token_id_no?: string | null
           token_id_yes?: string | null
+          token_source?: string | null
+          tradeable?: boolean | null
+          untradeable_reason?: string | null
           volume?: number | null
           yes_price: number
         }
@@ -364,6 +374,7 @@ export type Database = {
           id?: string
           last_bulk_sync?: string | null
           last_price_update?: string | null
+          last_token_repair_at?: string | null
           liquidity?: number | null
           market_type?: string | null
           monitoring_status?: string | null
@@ -379,8 +390,12 @@ export type Database = {
           team_away_normalized?: string | null
           team_home?: string | null
           team_home_normalized?: string | null
+          token_confidence?: number | null
           token_id_no?: string | null
           token_id_yes?: string | null
+          token_source?: string | null
+          tradeable?: boolean | null
+          untradeable_reason?: string | null
           volume?: number | null
           yes_price?: number
         }
