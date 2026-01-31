@@ -244,11 +244,19 @@ Deno.serve(async (req) => {
         : null;
 
       // Get live price from CLOB based on signal side
+      // For Firecrawl-sourced signals (no token IDs), fall back to cached prices
       let livePrice: number | null = null;
       if (cache) {
         const tokenId = signal.side === 'YES' ? cache.token_id_yes : cache.token_id_no;
         if (tokenId && clobPrices[tokenId]) {
+          // Use live CLOB price (Gamma API sourced)
           livePrice = parseFloat(clobPrices[tokenId]);
+        } else {
+          // Fallback: Use cached price from polymarket_h2h_cache (Firecrawl sourced)
+          livePrice = signal.side === 'YES' ? cache.yes_price : cache.no_price;
+          if (livePrice !== null) {
+            console.log(`[REFRESH] Using cached price for ${signal.polymarket_condition_id}: ${livePrice}`);
+          }
         }
       }
 
