@@ -1452,20 +1452,32 @@ Deno.serve(async (req) => {
             console.log(`[POLY-MONITOR] TRIGGER: ${triggerReason.toUpperCase()} | ${signalTier.toUpperCase()} (${betSide}): ${event.event_name} - Raw: ${(rawEdge * 100).toFixed(1)}%, Books: ${movement.booksConfirming || 0}`);
             // ========== END DUAL TRIGGER SYSTEM ==========
             
+            // CRITICAL GATE: Block signals for games that have already started
+            if (eventStart <= now) {
+              console.log(`[POLY-MONITOR] Skipping ${event.event_name} - game already started (${eventStart.toISOString()} <= ${now.toISOString()})`);
+              continue;
+            }
+            
             edgesFound++;
 
-            // Check for existing active/executed signal for this event+outcome
+            // Check for existing active/executed/dismissed signal for this event+outcome
+            // Including 'dismissed' prevents recreating signals user explicitly dismissed
             const { data: existingSignals } = await supabase
               .from('signal_opportunities')
               .select('id, status')
               .eq('event_name', event.event_name)
               .eq('recommended_outcome', recommendedOutcome)
-              .in('status', ['active', 'executed']);
+              .in('status', ['active', 'executed', 'dismissed']);
 
             const existingSignal = existingSignals?.[0];
 
             if (existingSignal?.status === 'executed') {
               console.log(`[POLY-MONITOR] Skipping ${event.event_name} - already executed`);
+              continue;
+            }
+            
+            if (existingSignal?.status === 'dismissed') {
+              console.log(`[POLY-MONITOR] Skipping ${event.event_name} - user dismissed this signal`);
               continue;
             }
 
