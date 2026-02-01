@@ -1409,6 +1409,95 @@ Deno.serve(async (req) => {
 
     const stakeAmount = scanConfig?.default_stake_amount || 100;
 
+    // ============= SELF-HEALING TOKEN REPAIR =============
+    // Before main processing, attempt to repair untokenized Firecrawl markets
+    // This calls the CLOB API directly using team names to find token IDs
+    const untokenizedMarkets = watchedMarkets.filter(m => 
+      m.source === 'firecrawl' && 
+      !m.token_id_yes && 
+      m.team_home && 
+      m.team_away
+    );
+    
+    let repaired = 0;
+    const REPAIR_BATCH_SIZE = 15; // Repair up to 15 markets per cycle
+    
+    if (untokenizedMarkets.length > 0) {
+      console.log(`[POLY-MONITOR] SELF-HEALING: Attempting repair for ${Math.min(untokenizedMarkets.length, REPAIR_BATCH_SIZE)}/${untokenizedMarkets.length} untokenized Firecrawl markets`);
+      
+      // Repair in batches to avoid timeout
+      for (const market of untokenizedMarkets.slice(0, REPAIR_BATCH_SIZE)) {
+        try {
+          // Use direct CLOB API search to find matching H2H market by team names
+          const clobSearchUrl = `https://clob.polymarket.com/markets?limit=200`;
+          const clobResponse = await fetch(clobSearchUrl);
+          
+          if (clobResponse.ok) {
+            const clobData = await clobResponse.json();
+            const clobMarkets = Array.isArray(clobData) ? clobData : (clobData.data || []);
+            
+            // Normalize team names for matching
+            const homeNorm = (market.team_home || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            const awayNorm = (market.team_away || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            const homeNick = (market.team_home || '').split(' ').pop()?.toLowerCase() || '';
+            const awayNick = (market.team_away || '').split(' ').pop()?.toLowerCase() || '';
+            
+            for (const clobMarket of clobMarkets) {
+              const question = (clobMarket.question || '').toLowerCase();
+              
+              // Check if both teams appear and it's an H2H market
+              const hasHome = question.includes(homeNorm) || (homeNick.length > 2 && question.includes(homeNick));
+              const hasAway = question.includes(awayNorm) || (awayNick.length > 2 && question.includes(awayNick));
+              const isH2H = (question.includes(' beat ') || question.includes(' win ')) && 
+                           !question.includes('over') && !question.includes('under') && 
+                           !question.includes('championship') && !question.includes('mvp');
+              
+              if (hasHome && hasAway && isH2H && clobMarket.tokens?.length >= 2) {
+                // Found matching market - extract real condition_id and token IDs
+                const realConditionId = clobMarket.condition_id;
+                const tokenIdYes = clobMarket.tokens[0]?.token_id;
+                const tokenIdNo = clobMarket.tokens[1]?.token_id;
+                
+                if (realConditionId && tokenIdYes && tokenIdNo) {
+                  // Update cache with real data
+                  const { error: updateError } = await supabase
+                    .from('polymarket_h2h_cache')
+                    .update({
+                      condition_id: realConditionId,
+                      token_id_yes: tokenIdYes,
+                      token_id_no: tokenIdNo,
+                      tradeable: true,
+                      untradeable_reason: null,
+                      token_source: 'clob_search',
+                      token_confidence: 90,
+                    })
+                    .eq('condition_id', market.condition_id);
+                  
+                  if (!updateError) {
+                    repaired++;
+                    console.log(`[POLY-MONITOR] REPAIRED: "${market.event_title}" → condition=${realConditionId.slice(0, 16)}... tokens found!`);
+                    
+                    // Update local cache for this cycle
+                    market.condition_id = realConditionId;
+                    market.token_id_yes = tokenIdYes;
+                    market.token_id_no = tokenIdNo;
+                    market.tradeable = true;
+                    cacheMap.set(realConditionId, market);
+                  }
+                }
+                break; // Found match, move to next market
+              }
+            }
+          }
+        } catch (repairError) {
+          console.log(`[POLY-MONITOR] REPAIR_ERROR: ${market.event_title} - ${(repairError as Error).message}`);
+        }
+      }
+      
+      console.log(`[POLY-MONITOR] SELF-HEALING: Repaired ${repaired}/${Math.min(untokenizedMarkets.length, REPAIR_BATCH_SIZE)} markets`);
+    }
+    // ============= END SELF-HEALING =============
+
     // Process each event
     let edgesFound = 0;
     let alertsSent = 0;
