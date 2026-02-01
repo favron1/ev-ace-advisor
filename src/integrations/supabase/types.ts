@@ -662,6 +662,30 @@ export type Database = {
         }
         Relationships: []
       }
+      signal_cooldowns: {
+        Row: {
+          created_at: string | null
+          event_key: string
+          id: string
+          last_signal_at: string
+          sport: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          event_key: string
+          id?: string
+          last_signal_at?: string
+          sport?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          event_key?: string
+          id?: string
+          last_signal_at?: string
+          sport?: string | null
+        }
+        Relationships: []
+      }
       signal_logs: {
         Row: {
           actual_result: boolean | null
@@ -745,6 +769,7 @@ export type Database = {
           recommended_outcome: string | null
           side: string
           signal_factors: Json | null
+          signal_state: string | null
           signal_strength: number | null
           signal_tier: string | null
           status: string | null
@@ -774,6 +799,7 @@ export type Database = {
           recommended_outcome?: string | null
           side: string
           signal_factors?: Json | null
+          signal_state?: string | null
           signal_strength?: number | null
           signal_tier?: string | null
           status?: string | null
@@ -803,6 +829,7 @@ export type Database = {
           recommended_outcome?: string | null
           side?: string
           signal_factors?: Json | null
+          signal_state?: string | null
           signal_strength?: number | null
           signal_tier?: string | null
           status?: string | null
@@ -818,6 +845,30 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      signal_rate_limits: {
+        Row: {
+          created_at: string | null
+          hour_bucket: string
+          id: string
+          s2_count: number | null
+          sport: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          hour_bucket: string
+          id?: string
+          s2_count?: number | null
+          sport?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          hour_bucket?: string
+          id?: string
+          s2_count?: number | null
+          sport?: string | null
+        }
+        Relationships: []
       }
     }
     Views: {
