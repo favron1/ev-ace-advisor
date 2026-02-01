@@ -1421,6 +1421,7 @@ Deno.serve(async (req) => {
       tokenized_total: 0,
       // Previous stats
       skipped_no_tokens: 0,
+      skipped_no_price: 0,          // PHASE 2c: Track price fallback skips
       skipped_no_bookmaker_data: 0,
       skipped_expired: 0,
       skipped_date_mismatch: 0,
@@ -1575,11 +1576,23 @@ Deno.serve(async (req) => {
 
         // Get price from CLOB batch results (preferred) or fallback to cache/event_watch_state
         // CRITICAL: Use cache.yes_price first (more frequently updated), then event_watch_state
-        let livePolyPrice = cache?.yes_price || event.polymarket_yes_price || 0.5;
+        // PHASE 2b: Remove 0.5 fallback - null price triggers explicit skip
+        let livePolyPrice: number | null = cache?.yes_price || event.polymarket_yes_price || null;
         let liveVolume = cache?.volume || event.polymarket_volume || 0;
         let bestBid: number | null = null;
         let bestAsk: number | null = null;
         let spreadPct: number | null = null;
+        
+        // PHASE 2c: Skip markets with no valid price (prevents false 50% edges)
+        if (livePolyPrice === null) {
+          console.log(`[POLY-MONITOR] NO_VALID_PRICE_SKIP`, {
+            event: event.event_name,
+            conditionId: event.polymarket_condition_id,
+            reason: 'no_clob_or_cache_price'
+          });
+          funnelStats.skipped_no_price = (funnelStats.skipped_no_price || 0) + 1;
+          continue;
+        }
         
         // PRICE SANITY BOUNDS: Reject obviously garbage CLOB prices
         // For sports H2H markets, no team should be priced below 5% or above 95%
@@ -2357,7 +2370,7 @@ Deno.serve(async (req) => {
               polymarket_volume: liveVolume,
               polymarket_updated_at: now.toISOString(),
               signal_strength: netEdge * 100,
-              expires_at: event.commence_time,
+              expires_at: cache?.bookmaker_commence_time || event.commence_time, // PHASE 2a: Use bookmaker authoritative time
               // CRITICAL FIX: Always include recommended_outcome and side to fix stale mappings
               recommended_outcome: recommendedOutcome,
               side: betSide,

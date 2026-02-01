@@ -288,6 +288,7 @@ export type Database = {
         Row: {
           best_ask: number | null
           best_bid: number | null
+          bookmaker_commence_time: string | null
           condition_id: string
           created_at: string | null
           event_date: string | null
@@ -326,6 +327,7 @@ export type Database = {
         Insert: {
           best_ask?: number | null
           best_bid?: number | null
+          bookmaker_commence_time?: string | null
           condition_id: string
           created_at?: string | null
           event_date?: string | null
@@ -364,6 +366,7 @@ export type Database = {
         Update: {
           best_ask?: number | null
           best_bid?: number | null
+          bookmaker_commence_time?: string | null
           condition_id?: string
           created_at?: string | null
           event_date?: string | null
