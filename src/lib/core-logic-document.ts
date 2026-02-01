@@ -34,7 +34,7 @@ import {
 // All new signals will be tagged with this version.
 // ============================================================================
 
-export const ACTIVE_CORE_LOGIC_VERSION = "v1.1";
+export const ACTIVE_CORE_LOGIC_VERSION = "v1.3";
 
 // ============================================================================
 // AVAILABLE VERSIONS
@@ -55,13 +55,13 @@ export const VERSION_METADATA: Record<CoreLogicVersion, {
     description: "Baseline version - immutable reference for backtesting",
   },
   "v1.1": {
-    label: "v1.1 (experimental)",
-    status: "active",
-    description: "Tuned thresholds for increased signal volume",
+    label: "v1.1 (frozen)",
+    status: "frozen",
+    description: "Tuned thresholds - frozen for comparison",
   },
   "v1.3": {
-    label: "v1.3 (experimental)",
-    status: "experimental",
+    label: "v1.3 (active)",
+    status: "active",
     description: "Match Failure Flip - observable team resolution",
   },
 };
