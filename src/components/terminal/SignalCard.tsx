@@ -5,12 +5,12 @@
 // Safe to modify for UI improvements, styling, and UX changes.
 // ============================================================================
 
-import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle, Eye, Zap, DollarSign, Timer, ExternalLink, Copy, ChevronDown, Search, Link } from 'lucide-react';
+import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle, Eye, Zap, DollarSign, Timer, ExternalLink, Copy, ChevronDown, Search, Link, FlaskConical, Lock } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import type { EnrichedSignal } from '@/types/arbitrage';
+import type { EnrichedSignal, CoreLogicVersion } from '@/types/arbitrage';
 import type { SignalState } from '@/types/scan-config';
 import { ExecutionDecision } from './ExecutionDecision';
 import { ManualPriceInput } from './ManualPriceInput';
@@ -403,6 +403,25 @@ export function SignalCard({
                 </span>
               )}
               
+              {/* Core Logic Version badge */}
+              {signal.core_logic_version && (
+                <Badge 
+                  variant="outline" 
+                  className={cn(
+                    "flex items-center gap-1 text-[10px] px-1.5 py-0",
+                    signal.core_logic_version === 'v1.0' 
+                      ? "bg-amber-500/10 text-amber-500 border-amber-500/30" 
+                      : "bg-purple-500/10 text-purple-400 border-purple-500/30"
+                  )}
+                >
+                  {signal.core_logic_version === 'v1.0' ? (
+                    <Lock className="h-2.5 w-2.5" />
+                  ) : (
+                    <FlaskConical className="h-2.5 w-2.5" />
+                  )}
+                  {signal.core_logic_version}
+                </Badge>
+              )}
               
               {/* Countdown timer to kickoff / LIVE indicator */}
               {(hoursUntilEvent !== undefined || hasStarted) && (

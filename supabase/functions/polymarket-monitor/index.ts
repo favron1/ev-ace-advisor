@@ -35,6 +35,10 @@ const SPORT_ENDPOINTS = buildSportEndpoints();
 // Sharp books for weighting
 const SHARP_BOOKS = ['pinnacle', 'betfair', 'betfair_ex_eu'];
 
+// ============= CORE LOGIC VERSION =============
+// This version tag is attached to all signals for tracking and comparison
+const CORE_LOGIC_VERSION = 'v1.1';
+
 // AI resolution cache - persists across poll cycles
 const aiResolvedNames = new Map<string, { homeTeam: string; awayTeam: string } | null>();
 
@@ -2378,6 +2382,8 @@ Deno.serve(async (req) => {
               movement_confirmed: movementTriggered,
               movement_velocity: movement.velocity,
               signal_tier: signalTier,
+              // Version tracking
+              core_logic_version: CORE_LOGIC_VERSION,
               signal_factors: {
                 raw_edge: rawEdge * 100,
                 net_edge: netEdge * 100,
@@ -2398,6 +2404,8 @@ Deno.serve(async (req) => {
                 signal_tier: signalTier,
                 // Directional labeling
                 bet_direction: betSide === 'YES' ? 'BUY_YES' : 'BUY_NO',
+                // Version tracking in factors for querying
+                core_logic_version: CORE_LOGIC_VERSION,
               },
             };
             
