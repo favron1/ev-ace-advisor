@@ -1,212 +1,328 @@
 
 
-# Align System with Core Logic Document v1.0
+# Core Logic Versioning System
 
 ## Overview
 
-The current implementation **does NOT** fully match the Core Logic document. This plan brings the system into compliance with the 5-Stage Flow specification.
-
-## Gap Analysis Summary
-
-| Requirement | Doc Spec | Current Status | Action |
-|-------------|----------|----------------|--------|
-| Secondary Polymarket Analytics | Required for redundancy | ❌ Missing | Add secondary provider option |
-| Movement Trigger | ≥6.0% absolute | Uses relative threshold | Update to fixed 6.0% |
-| Velocity Trigger | ≥0.4%/min | Not checked explicitly | Add velocity calculation |
-| Signal State Machine | S1/S2/WATCH/REJECT | Uses tier system | Implement full state machine |
-| Per-Event Cooldown | 30-60 min | Not implemented | Add cooldown tracking |
-| Rate Limiting | 12 S2/hour, 4/sport/hour | Not implemented | Add throttle logic |
-| Degradation Mode | Gamma down → books-only | Not implemented | Add fallback handling |
-| Auto-Promotion | S1 → S2 over time | Not implemented | Add promotion logic |
+This plan implements a version-controlled Core Logic system that:
+1. **Freezes v1.0** as the immutable canonical baseline
+2. **Creates v1.1** as an experimental variant with documented changes
+3. **Tags all signals** with `core_logic_version` for comparative analysis
+4. **Enables side-by-side evaluation** of signal quality between versions
 
 ---
 
-## Implementation Plan
+## Current State
 
-### Phase 1: Movement Engine Alignment (Stage 2)
-
-**File:** `supabase/functions/polymarket-monitor/index.ts`
-
-Update movement detection to match Core Logic thresholds:
-
-```text
-Current (polymarket-monitor):
-  threshold = max(0.02, 0.12 * baselineProb)
-
-Core Logic Doc requires:
-  absolute_move >= 6.0% (0.06)
-  velocity >= 0.4%/min (0.004)
-  consensus >= 2 sharp books
-```
-
-Changes:
-1. Replace `getMovementThreshold()` to use fixed 6.0% minimum
-2. Add explicit velocity calculation (change / time_minutes)
-3. Ensure velocity check ≥0.4%/min is enforced
-
-### Phase 2: Signal State Machine (Stage 3.5)
-
-**Files to modify:**
-- `supabase/functions/polymarket-monitor/index.ts`
-- `src/types/arbitrage.ts`
-- Database migration for `signal_state` column
-
-Add new signal states:
-
-```typescript
-type SignalState = 'REJECT' | 'WATCH' | 'S1_PROMOTE' | 'S2_EXECUTION_ELIGIBLE';
-```
-
-**S2_EXECUTION_ELIGIBLE gates:**
-- confidence ≥ 60
-- sharp consensus ≥ 2 books
-- book implied probability ≥ 52%
-- time to start ≥ 10 minutes
-- Polymarket data available
-
-**S1_PROMOTE (not execution-eligible):**
-- confidence 45-59 OR
-- book prob 48-51.9% OR
-- time to start 5-9 min
-
-**Hard REJECT:**
-- draw-capable markets
-- missing teams/league
-- no sharp books (0)
-- stale/duplicate events
-
-### Phase 3: Rate Limiting & Cooldowns (Stage 3)
-
-**File:** `supabase/functions/polymarket-monitor/index.ts`
-
-Add:
-1. Per-event cooldown tracking (30-60 min)
-2. Global throttle: max 12 S2 per hour
-3. Per-sport throttle: max 4 S2 per sport per hour
-
-Implementation:
-```text
--- New table or in-memory tracking
-signal_cooldowns: { event_key, last_signal_at }
-signal_counts: { hour_bucket, sport, count }
-```
-
-### Phase 4: Degradation Mode (Failure Rules)
-
-**File:** `supabase/functions/polymarket-monitor/index.ts`
-
-Add fallback handling:
-
-```text
-IF Gamma API fails:
-  - Set poly_data_status = 'DEGRADED'
-  - Cap confidence at 65
-  - Continue with books-only mode
-
-IF <2 sharp books available:
-  - Force signal to WATCH state only
-
-IF partial book scrape:
-  - Require at least Pinnacle OR Betfair
-  - Otherwise WATCH only
-```
-
-### Phase 5: Secondary Polymarket Analytics (Stage 1)
-
-**Question for you:** The Core Logic doc specifies a "Secondary Polymarket analytics provider" for redundancy. Options include:
-
-1. **Use a second Polymarket data source** (e.g., alternative API endpoint or web scraping)
-2. **Mark as optional** - Continue with Gamma-only but log `poly_data_status = SINGLE_SOURCE`
-3. **Defer** - Implement later when a suitable secondary source is identified
-
-Which approach would you prefer?
-
-### Phase 6: Auto-Promotion Logic (Stage 3.6)
-
-**File:** New edge function or cron job
-
-Create `auto-promote-signals` function that:
-1. Scans S1_PROMOTE signals every 5 minutes
-2. Checks if any now qualify for S2:
-   - Confidence rose to ≥60
-   - Polymarket liquidity rose to ≥$10K
-   - 3rd sharp book joined same direction
-3. Promotes with logged reason and timestamp
+| Component | Status |
+|-----------|--------|
+| Core Logic v1.0 Document | Exists in `src/lib/core-logic-document.ts` |
+| Implementation | Matches v1.0 thresholds in `polymarket-monitor/index.ts` |
+| Version Tracking | NOT IMPLEMENTED - signals don't record which version generated them |
+| Multiple Versions | NOT SUPPORTED - single document only |
 
 ---
 
-## Database Changes Required
+## Architecture
+
+```text
++----------------------------------+
+|     Core Logic Documents         |
++----------------------------------+
+|                                  |
+|  +-----------+   +-----------+   |
+|  |   v1.0    |   |   v1.1    |   |
+|  | (frozen)  |   | (active)  |   |
+|  +-----------+   +-----------+   |
+|        |               |         |
++--------|---------------|--------+
+         |               |
+         v               v
++----------------------------------+
+|   polymarket-monitor/index.ts    |
+|   (imports active version)       |
++----------------------------------+
+         |
+         v
++----------------------------------+
+|  signal_opportunities table      |
+|  +core_logic_version column      |
++----------------------------------+
+```
+
+---
+
+## Phase 1: Database Schema Change
+
+Add `core_logic_version` column to track signal origin:
 
 ```sql
--- Add signal_state enum/column
+-- Add version tracking column
 ALTER TABLE signal_opportunities 
-ADD COLUMN signal_state TEXT 
-CHECK (signal_state IN ('REJECT', 'WATCH', 'S1_PROMOTE', 'S2_EXECUTION_ELIGIBLE'));
+ADD COLUMN core_logic_version TEXT DEFAULT 'v1.0';
 
--- Add cooldown tracking
-CREATE TABLE IF NOT EXISTS signal_cooldowns (
-  event_key TEXT PRIMARY KEY,
-  last_signal_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  sport TEXT
-);
-
--- Add rate limit tracking
-CREATE TABLE IF NOT EXISTS signal_rate_limits (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  hour_bucket TIMESTAMPTZ NOT NULL,
-  sport TEXT,
-  s2_count INT DEFAULT 0,
-  UNIQUE(hour_bucket, sport)
-);
+-- Add version to signal_logs for settlement tracking
+ALTER TABLE signal_logs 
+ADD COLUMN core_logic_version TEXT;
 ```
 
 ---
 
-## UI Impact
+## Phase 2: Create Versioned Document Structure
 
-The frontend already filters by `is_true_arbitrage = true` and shows `signal_tier`. After implementation:
+### File: `src/lib/core-logic-v1.0.ts` (NEW - FROZEN)
 
-1. **New filter option:** "S2 Only" (execution-eligible signals)
-2. **Visual badge:** Show S1/S2 state alongside tier
-3. **WATCH signals:** Could be shown in a separate "Watching" tab (optional)
+Move current document to dedicated frozen file:
+- Exact copy of current v1.0 content
+- Header comment: `// FROZEN - DO NOT MODIFY`
+- Export: `CORE_LOGIC_V1_0_DOCUMENT`
+
+### File: `src/lib/core-logic-v1.1.ts` (NEW - EXPERIMENTAL)
+
+Create experimental version with:
+- "Changes from v1.0" section at top
+- Same structure as v1.0
+- Tunable parameters clearly marked
+
+Example changes for v1.1:
+```markdown
+## Changes from v1.0
+
+### Modified Thresholds (Experimental)
+- Movement trigger: 6.0% -> **5.0%** (increased sensitivity)
+- Velocity trigger: 0.4%/min -> **0.3%/min** (lower bar)
+- S1 confidence floor: 45 -> **40** (capture more marginal signals)
+
+### New Features
+- Sport-specific threshold overrides
+- Enhanced degradation modes
+```
+
+### File: `src/lib/core-logic-document.ts` (MODIFIED)
+
+Refactor to:
+1. Import both versions
+2. Export `ACTIVE_CORE_LOGIC_VERSION = 'v1.1'`
+3. Export version-aware accessors
+
+```typescript
+import { CORE_LOGIC_V1_0_DOCUMENT } from './core-logic-v1.0';
+import { CORE_LOGIC_V1_1_DOCUMENT, CORE_LOGIC_V1_1_CONSTANTS } from './core-logic-v1.1';
+
+export const ACTIVE_CORE_LOGIC_VERSION = 'v1.1';
+
+export function getCoreLogicDocument(version: string) {
+  return version === 'v1.0' ? CORE_LOGIC_V1_0_DOCUMENT : CORE_LOGIC_V1_1_DOCUMENT;
+}
+
+export function getCoreLogicConstants(version: string) {
+  return version === 'v1.0' ? CORE_LOGIC_V1_0_CONSTANTS : CORE_LOGIC_V1_1_CONSTANTS;
+}
+```
 
 ---
 
-## Implementation Order
+## Phase 3: Extract Programmable Constants
 
-1. Database migration (add columns)
-2. Update `polymarket-monitor` with:
-   - Fixed 6.0% movement threshold
-   - Velocity ≥0.4%/min check
-   - Signal state machine (S1/S2/WATCH/REJECT)
-   - Rate limiting
-3. Add degradation handling
-4. Update types in `src/types/arbitrage.ts`
-5. Update UI to display signal_state
-6. Add auto-promotion cron job
+### File: `src/lib/core-logic-v1.0.ts`
+
+Add typed constants alongside the document:
+
+```typescript
+export const CORE_LOGIC_V1_0_CONSTANTS = {
+  VERSION: 'v1.0',
+  
+  // Stage 2: Movement Engine
+  MOVEMENT_THRESHOLD: 0.06,       // 6.0% absolute
+  VELOCITY_THRESHOLD: 0.004,      // 0.4% per minute
+  SHARP_CONSENSUS_MIN: 2,
+  
+  // Stage 3.5: Signal State Gates
+  S2_CONFIDENCE_MIN: 60,
+  S2_BOOK_PROB_MIN: 0.52,
+  S2_TIME_TO_START_MIN: 10,
+  S1_CONFIDENCE_MIN: 45,
+  S1_BOOK_PROB_MIN: 0.48,
+  
+  // Stage 3: Rate Limiting
+  COOLDOWN_MINUTES: 30,
+  MAX_S2_PER_HOUR: 12,
+  MAX_S2_PER_SPORT_PER_HOUR: 4,
+  
+  // Stage 3.6: Auto-Promotion
+  LIQUIDITY_PREFERENCE: 10000,
+} as const;
+```
+
+### File: `src/lib/core-logic-v1.1.ts`
+
+Experimental constants with adjustments:
+
+```typescript
+export const CORE_LOGIC_V1_1_CONSTANTS = {
+  VERSION: 'v1.1',
+  
+  // Stage 2: Movement Engine (TUNED)
+  MOVEMENT_THRESHOLD: 0.05,       // 5.0% (lowered for sensitivity)
+  VELOCITY_THRESHOLD: 0.003,      // 0.3% per minute (lowered)
+  SHARP_CONSENSUS_MIN: 2,         // unchanged
+  
+  // Stage 3.5: Signal State Gates (TUNED)
+  S2_CONFIDENCE_MIN: 55,          // lowered from 60
+  S2_BOOK_PROB_MIN: 0.50,         // lowered from 52%
+  S2_TIME_TO_START_MIN: 10,       // unchanged
+  S1_CONFIDENCE_MIN: 40,          // lowered from 45
+  S1_BOOK_PROB_MIN: 0.45,         // lowered from 48%
+  
+  // Stage 3: Rate Limiting (INCREASED)
+  COOLDOWN_MINUTES: 20,           // reduced from 30
+  MAX_S2_PER_HOUR: 20,            // increased from 12
+  MAX_S2_PER_SPORT_PER_HOUR: 8,   // increased from 4
+  
+  // Stage 3.6: Auto-Promotion
+  LIQUIDITY_PREFERENCE: 5000,     // lowered from 10K
+} as const;
+```
 
 ---
 
-## Technical Notes
+## Phase 4: Update Edge Function
 
-### Why the current thresholds differ
+### File: `supabase/functions/polymarket-monitor/index.ts`
 
-The existing `max(0.02, 0.12 * baseline)` logic was designed to be probability-relative:
-- A 3% move from 20% is huge (15% relative change)
-- A 3% move from 75% is smaller (4% relative change)
+Replace hardcoded `CORE_LOGIC` object with imported version:
 
-The Core Logic doc uses a fixed 6.0% absolute threshold which is simpler but may miss some edges on high-probability favorites.
+```typescript
+// At top of file
+const ACTIVE_VERSION = 'v1.1';
 
-**Recommendation:** Implement the Core Logic spec exactly (6.0% fixed), then tune later if signal volume drops.
+// Use version-aware constants
+const CORE_LOGIC = getCoreLogicConstants(ACTIVE_VERSION);
+```
+
+Add version to signal creation:
+
+```typescript
+const signalData = {
+  // ... existing fields
+  core_logic_version: ACTIVE_VERSION,  // NEW
+  signal_factors: {
+    // ... existing fields
+    core_logic_version: ACTIVE_VERSION,  // Also in JSON for querying
+  },
+};
+```
+
+---
+
+## Phase 5: Update UI for Version Display
+
+### File: `src/pages/CoreLogic.tsx`
+
+Add version selector:
+- Tabs or dropdown to switch between v1.0 and v1.1
+- v1.0 shows "FROZEN" badge
+- v1.1 shows "EXPERIMENTAL" badge
+- Download respects selected version
+
+### File: `src/components/terminal/SignalCard.tsx`
+
+Display version badge on signals:
+- Small chip showing "v1.0" or "v1.1"
+- Different colors for easy differentiation
+
+---
+
+## Phase 6: Stats Page Version Comparison
+
+### File: `src/pages/Stats.tsx`
+
+Add version comparison section:
+- Filter signals by `core_logic_version`
+- Side-by-side metrics: signal volume, win rate, average edge
+- Helps evaluate which version performs better
+
+---
+
+## Files to Create
+
+| File | Purpose |
+|------|---------|
+| `src/lib/core-logic-v1.0.ts` | Frozen v1.0 document + constants |
+| `src/lib/core-logic-v1.1.ts` | Experimental v1.1 document + constants |
+
+## Files to Modify
+
+| File | Change |
+|------|--------|
+| `src/lib/core-logic-document.ts` | Refactor to import/export versions |
+| `supabase/functions/polymarket-monitor/index.ts` | Import version constants, tag signals |
+| `src/types/arbitrage.ts` | Add `core_logic_version` to types |
+| `src/pages/CoreLogic.tsx` | Add version selector UI |
+| `src/components/terminal/SignalCard.tsx` | Display version badge |
+| Database migration | Add `core_logic_version` column |
+
+---
+
+## Database Migration
+
+```sql
+-- Migration: Add core_logic_version tracking
+ALTER TABLE signal_opportunities 
+ADD COLUMN IF NOT EXISTS core_logic_version TEXT DEFAULT 'v1.0';
+
+ALTER TABLE signal_logs 
+ADD COLUMN IF NOT EXISTS core_logic_version TEXT;
+
+-- Index for version-based queries
+CREATE INDEX IF NOT EXISTS idx_signals_version 
+ON signal_opportunities(core_logic_version);
+
+-- Backfill existing signals as v1.0
+UPDATE signal_opportunities 
+SET core_logic_version = 'v1.0' 
+WHERE core_logic_version IS NULL;
+```
+
+---
+
+## v1.1 Changes Summary (Proposed)
+
+The experimental v1.1 version relaxes constraints to increase signal volume:
+
+| Parameter | v1.0 | v1.1 | Rationale |
+|-----------|------|------|-----------|
+| Movement threshold | 6.0% | 5.0% | Catch smaller but significant moves |
+| Velocity threshold | 0.4%/min | 0.3%/min | Lower bar for sustained moves |
+| S2 confidence | >= 60 | >= 55 | Allow slightly lower confidence |
+| S2 book prob | >= 52% | >= 50% | Include coinflip scenarios |
+| S1 confidence | >= 45 | >= 40 | Wider S1 funnel |
+| Cooldown | 30 min | 20 min | Faster signal refresh |
+| Max S2/hour | 12 | 20 | Higher throughput |
+| Liquidity pref | $10K | $5K | Include smaller markets |
 
 ---
 
 ## Expected Outcome
 
 After implementation:
-- S1_PROMOTE: 8-25 signals per day (monitored, not executed)
-- S2_EXECUTION_ELIGIBLE: 2-8 signals per day (execution-ready)
-- Clear state machine preventing over-firing
-- Rate limits preventing signal spam
-- Graceful degradation when APIs fail
+- **v1.0**: Preserved as immutable baseline, signals tagged `v1.0`
+- **v1.1**: Active experimental version, signals tagged `v1.1`
+- **Auditability**: Every signal shows which logic version generated it
+- **Comparison**: Stats page enables v1.0 vs v1.1 performance analysis
+- **Rollback**: Can revert to v1.0 by changing `ACTIVE_VERSION`
+
+---
+
+## Implementation Order
+
+1. Database migration (add column)
+2. Create `src/lib/core-logic-v1.0.ts` (frozen copy)
+3. Create `src/lib/core-logic-v1.1.ts` (experimental variant)
+4. Refactor `src/lib/core-logic-document.ts` (version switching)
+5. Update `polymarket-monitor/index.ts` (use constants, tag signals)
+6. Update `src/types/arbitrage.ts` (add version type)
+7. Update `CoreLogic.tsx` (version selector)
+8. Update `SignalCard.tsx` (version badge)
+9. Update `Stats.tsx` (version comparison)
 
