@@ -236,6 +236,54 @@ export type Database = {
         }
         Relationships: []
       }
+      match_failures: {
+        Row: {
+          failure_reason: string
+          first_seen_at: string
+          id: string
+          last_seen_at: string
+          occurrence_count: number
+          poly_condition_id: string | null
+          poly_event_title: string
+          poly_team_a: string
+          poly_team_b: string
+          resolution_status: string
+          resolved_at: string | null
+          resolved_mapping: string | null
+          sport_code: string | null
+        }
+        Insert: {
+          failure_reason?: string
+          first_seen_at?: string
+          id?: string
+          last_seen_at?: string
+          occurrence_count?: number
+          poly_condition_id?: string | null
+          poly_event_title: string
+          poly_team_a: string
+          poly_team_b: string
+          resolution_status?: string
+          resolved_at?: string | null
+          resolved_mapping?: string | null
+          sport_code?: string | null
+        }
+        Update: {
+          failure_reason?: string
+          first_seen_at?: string
+          id?: string
+          last_seen_at?: string
+          occurrence_count?: number
+          poly_condition_id?: string | null
+          poly_event_title?: string
+          poly_team_a?: string
+          poly_team_b?: string
+          resolution_status?: string
+          resolved_at?: string | null
+          resolved_mapping?: string | null
+          sport_code?: string | null
+        }
+        Relationships: []
+      }
       movement_logs: {
         Row: {
           actual_outcome: boolean | null
@@ -873,6 +921,36 @@ export type Database = {
           id?: string
           s2_count?: number | null
           sport?: string | null
+        }
+        Relationships: []
+      }
+      team_mappings: {
+        Row: {
+          canonical_name: string
+          confidence: number | null
+          created_at: string
+          id: string
+          source: string | null
+          source_name: string
+          sport_code: string
+        }
+        Insert: {
+          canonical_name: string
+          confidence?: number | null
+          created_at?: string
+          id?: string
+          source?: string | null
+          source_name: string
+          sport_code: string
+        }
+        Update: {
+          canonical_name?: string
+          confidence?: number | null
+          created_at?: string
+          id?: string
+          source?: string | null
+          source_name?: string
+          sport_code?: string
         }
         Relationships: []
       }
