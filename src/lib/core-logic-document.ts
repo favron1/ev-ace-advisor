@@ -20,6 +20,13 @@ import {
   CORE_LOGIC_V1_1_FILENAME,
 } from './core-logic-v1.1';
 
+import { 
+  CORE_LOGIC_V1_3_DOCUMENT, 
+  CORE_LOGIC_V1_3_CONSTANTS, 
+  CORE_LOGIC_V1_3_VERSION,
+  CORE_LOGIC_V1_3_FILENAME,
+} from './core-logic-v1.3';
+
 // ============================================================================
 // ACTIVE VERSION CONFIGURATION
 // ============================================================================
@@ -33,9 +40,9 @@ export const ACTIVE_CORE_LOGIC_VERSION = "v1.1";
 // AVAILABLE VERSIONS
 // ============================================================================
 
-export type CoreLogicVersion = "v1.0" | "v1.1";
+export type CoreLogicVersion = "v1.0" | "v1.1" | "v1.3";
 
-export const AVAILABLE_VERSIONS: CoreLogicVersion[] = ["v1.0", "v1.1"];
+export const AVAILABLE_VERSIONS: CoreLogicVersion[] = ["v1.0", "v1.1", "v1.3"];
 
 export const VERSION_METADATA: Record<CoreLogicVersion, { 
   label: string; 
@@ -52,6 +59,11 @@ export const VERSION_METADATA: Record<CoreLogicVersion, {
     status: "active",
     description: "Tuned thresholds for increased signal volume",
   },
+  "v1.3": {
+    label: "v1.3 (experimental)",
+    status: "experimental",
+    description: "Match Failure Flip - observable team resolution",
+  },
 };
 
 // ============================================================================
@@ -67,6 +79,8 @@ export function getCoreLogicDocument(version: CoreLogicVersion = ACTIVE_CORE_LOG
       return CORE_LOGIC_V1_0_DOCUMENT;
     case "v1.1":
       return CORE_LOGIC_V1_1_DOCUMENT;
+    case "v1.3":
+      return CORE_LOGIC_V1_3_DOCUMENT;
     default:
       return CORE_LOGIC_V1_1_DOCUMENT;
   }
@@ -81,6 +95,8 @@ export function getCoreLogicConstants(version: CoreLogicVersion = ACTIVE_CORE_LO
       return CORE_LOGIC_V1_0_CONSTANTS;
     case "v1.1":
       return CORE_LOGIC_V1_1_CONSTANTS;
+    case "v1.3":
+      return CORE_LOGIC_V1_3_CONSTANTS;
     default:
       return CORE_LOGIC_V1_1_CONSTANTS;
   }
@@ -95,6 +111,8 @@ export function getCoreLogicFilename(version: CoreLogicVersion = ACTIVE_CORE_LOG
       return CORE_LOGIC_V1_0_FILENAME;
     case "v1.1":
       return CORE_LOGIC_V1_1_FILENAME;
+    case "v1.3":
+      return CORE_LOGIC_V1_3_FILENAME;
     default:
       return CORE_LOGIC_V1_1_FILENAME;
   }
