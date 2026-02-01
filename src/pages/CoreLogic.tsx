@@ -130,7 +130,7 @@ export default function CoreLogic() {
           onValueChange={(v) => setSelectedVersion(v as CoreLogicVersion)}
           className="mb-6"
         >
-          <TabsList className="grid w-full max-w-md grid-cols-2">
+          <TabsList className="grid w-full max-w-lg grid-cols-3">
             {AVAILABLE_VERSIONS.map((version) => {
               const meta = getVersionMetadata(version);
               const isActive = version === ACTIVE_CORE_LOGIC_VERSION;
