@@ -728,6 +728,10 @@ Deno.serve(async (req) => {
         const dateStr = eventDate.toISOString().split('T')[0]; // YYYY-MM-DD
         const generatedSlug = `${sportCode}-${game.team1Code}-${game.team2Code}-${dateStr}`.toLowerCase();
         
+        // Determine tradeability based on token presence
+        const isTradeable = !!(clobData.tokenIdYes && clobData.tokenIdNo);
+        const untradeableReason = isTradeable ? null : 'MISSING_TOKENS';
+        
         const { error: fcError } = await supabase
           .from('polymarket_h2h_cache')
           .upsert({
@@ -743,6 +747,7 @@ Deno.serve(async (req) => {
             volume: volume,
             liquidity: liquidity,
             event_date: eventDate.toISOString(),
+            bookmaker_commence_time: actualCommenceTime?.toISOString() || null, // PHASE 1a: Bookmaker authoritative time
             sport_category: sport,
             extracted_league: sport,
             market_type: 'h2h',
@@ -750,8 +755,10 @@ Deno.serve(async (req) => {
             monitoring_status: 'watching',
             source: 'firecrawl',
             polymarket_slug: generatedSlug,
-            token_id_yes: clobData.tokenIdYes,   // NEW: Token IDs from Gamma lookup
-            token_id_no: clobData.tokenIdNo,     // NEW: Token IDs from Gamma lookup
+            token_id_yes: clobData.tokenIdYes,   // Token IDs from Gamma lookup
+            token_id_no: clobData.tokenIdNo,     // Token IDs from Gamma lookup
+            tradeable: isTradeable,              // PHASE 3b: Mark tradeability
+            untradeable_reason: untradeableReason, // PHASE 3b: Reason if untradeable
             last_price_update: now.toISOString(),
             last_bulk_sync: now.toISOString(),
           }, {
@@ -889,6 +896,20 @@ Deno.serve(async (req) => {
       // Extract event slug from Gamma API response (for direct Polymarket URLs)
       const eventSlug = event.slug || null;
       
+      // PHASE 1b: Find bookmaker commence time for Gamma events using team matching
+      let bookmakerCommenceTime: string | null = null;
+      if (teamHome && teamAway) {
+        const matchedTime = findOddsApiCommenceTime(teamHome, teamAway);
+        if (matchedTime) {
+          bookmakerCommenceTime = matchedTime.toISOString();
+          console.log(`[POLY-SYNC-24H] Gamma → Bookmaker time: ${title} → ${bookmakerCommenceTime}`);
+        }
+      }
+      
+      // PHASE 3b: Mark tradeability based on token presence
+      const isTradeable = !!(tokenIdYes && tokenIdNo);
+      const untradeableReason = isTradeable ? null : 'MISSING_TOKENS';
+      
       // Upsert to polymarket_h2h_cache
       const { error: cacheError } = await supabase
         .from('polymarket_h2h_cache')
@@ -901,6 +922,7 @@ Deno.serve(async (req) => {
           team_home_normalized: teamHomeNormalized,
           team_away_normalized: teamAwayNormalized,
           event_date: endDate.toISOString(),
+          bookmaker_commence_time: bookmakerCommenceTime, // PHASE 1b: Bookmaker authoritative time
           yes_price: yesPrice,
           no_price: noPrice,
           volume: volume,
@@ -912,9 +934,11 @@ Deno.serve(async (req) => {
           extracted_threshold: extractedThreshold,
           token_id_yes: tokenIdYes,
           token_id_no: tokenIdNo,
-          polymarket_slug: eventSlug, // NEW: Store event slug for direct URLs
+          tradeable: isTradeable,              // PHASE 3b: Mark tradeability
+          untradeable_reason: untradeableReason, // PHASE 3b: Reason if untradeable
+          polymarket_slug: eventSlug, // Store event slug for direct URLs
           status: 'active',
-          monitoring_status: 'watching', // NEW: Mark for continuous monitoring
+          monitoring_status: 'watching', // Mark for continuous monitoring
           last_price_update: now.toISOString(),
           last_bulk_sync: now.toISOString(),
         }, {
