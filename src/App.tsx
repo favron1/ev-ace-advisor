@@ -7,6 +7,7 @@ import Auth from "./pages/Auth";
 import Terminal from "./pages/Terminal";
 import Settings from "./pages/Settings";
 import Stats from "./pages/Stats";
+import CoreLogic from "./pages/CoreLogic";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -18,6 +19,7 @@ function AppRoutes() {
       <Route path="/auth" element={<Auth />} />
       <Route path="/settings" element={<Settings />} />
       <Route path="/stats" element={<Stats />} />
+      <Route path="/core-logic" element={<CoreLogic />} />
       <Route path="*" element={<NotFound />} />
     </Routes>
   );
