@@ -1,137 +1,142 @@
 
-# Implementation Plan: Fix Bookmaker-First Architecture + Token Resolution
+# Fix Bookmaker Matching: Add Soccer + Fix Event Dates
 
-## Current State Analysis
+## Problem Summary
 
-### Critical Issues Discovered
-
-| Issue | Location | Current State | Impact |
-|-------|----------|---------------|--------|
-| `bookmaker_commence_time` never written | `polymarket-sync-24h` | Column exists but code never populates it | All signals use Polymarket placeholder times (23:59 UTC) |
-| `expires_at` uses wrong time | `polymarket-monitor` line 2360 | `expires_at: event.commence_time` | Games show wrong expiration |
-| `0.5` price fallback active | `polymarket-monitor` line 1578 | `\|\| 0.5` still present | Creates false 50% edges |
-| Token IDs missing | 46 of 49 markets blocked | Gamma API token extraction failing | 94% of markets untradeable |
-
-### Funnel Analysis (from monitor logs)
-```
-49 watching → 3 tokenized (46 blocked) → 3 matched → 0 edges → 0 signals
-```
-
-The **tokenization gate** is the primary blocker - 94% of markets fail before reaching edge calculation.
+The current bookmaker match rate is critically low:
+- **Soccer leagues (79 H2H markets): 0% matched** - Not fetched from Odds API at all
+- **NHL/NBA (71 H2H markets): ~20% matched** - Event dates are broken (using scrape timestamp instead of actual game time)
 
 ---
 
-## Solution Architecture
+## Implementation Details
 
-### Phase 1: Fix Bookmaker Time Population (Sync Function)
+### Part 1: Add Soccer Leagues to Odds API Ingestion
 
-**File:** `supabase/functions/polymarket-sync-24h/index.ts`
+**File: `supabase/functions/ingest-odds/index.ts`**
 
-**Change 1a:** Write `bookmaker_commence_time` when upserting Firecrawl games (after line 753)
-- The sync already calls `findOddsApiCommenceTime()` to get accurate start times
-- Currently stores result in `event_date` but NOT in `bookmaker_commence_time`
-- Add: `bookmaker_commence_time: actualCommenceTime?.toISOString() || null`
+Add soccer league sport keys to the `h2hSports` array (line 198):
 
-**Change 1b:** Write `bookmaker_commence_time` when upserting Gamma events (after line 916)
-- For Gamma-sourced markets, look up bookmaker time using same team matching
-- Add helper to match Gamma event to Odds API game
-- Add: `bookmaker_commence_time: matchedBookmakerTime || null`
-
-### Phase 2: Use Bookmaker Time in Monitor (Monitor Function)
-
-**File:** `supabase/functions/polymarket-monitor/index.ts`
-
-**Change 2a:** Fix `expires_at` at line 2360
 ```typescript
-// BEFORE
-expires_at: event.commence_time,
+// BEFORE: Only 4 US sports
+const h2hSports = [
+  'basketball_nba',
+  'basketball_ncaab',
+  'americanfootball_nfl',
+  'icehockey_nhl',
+];
 
-// AFTER  
-expires_at: cache?.bookmaker_commence_time || event.commence_time,
+// AFTER: Add 5 soccer leagues
+const h2hSports = [
+  'basketball_nba',
+  'basketball_ncaab',
+  'americanfootball_nfl',
+  'icehockey_nhl',
+  // Soccer leagues
+  'soccer_epl',
+  'soccer_spain_la_liga',
+  'soccer_italy_serie_a',
+  'soccer_germany_bundesliga',
+  'soccer_uefa_champs_league',
+];
 ```
 
-**Change 2b:** Remove stale 0.5 fallback at line 1578
-```typescript
-// BEFORE
-let livePolyPrice = cache?.yes_price || event.polymarket_yes_price || 0.5;
+This uses the Odds API sport keys already defined in `sports-config.ts`.
 
-// AFTER
-let livePolyPrice: number | null = cache?.yes_price || event.polymarket_yes_price || null;
+---
+
+### Part 2: Add Soccer to Sync Function's Odds API Pre-Fetch
+
+**File: `supabase/functions/polymarket-sync-24h/index.ts`**
+
+Update the `sportsToFetch` array (line 229) to include soccer leagues:
+
+```typescript
+// BEFORE: Only 4 US sports
+const sportsToFetch = ['basketball_nba', 'basketball_ncaab', 'icehockey_nhl', 'americanfootball_nfl'];
+
+// AFTER: Add 5 soccer leagues from shared config
+const sportsToFetch = [
+  'basketball_nba', 
+  'basketball_ncaab', 
+  'icehockey_nhl', 
+  'americanfootball_nfl',
+  // Soccer leagues (from SPORTS_CONFIG)
+  'soccer_epl',
+  'soccer_spain_la_liga',
+  'soccer_italy_serie_a',
+  'soccer_germany_bundesliga',
+  'soccer_uefa_champs_league',
+];
 ```
 
-**Change 2c:** Add explicit skip for null prices (after line 1650)
+---
+
+### Part 3: Fix Event Date Fallback Logic
+
+**File: `supabase/functions/polymarket-sync-24h/index.ts`**
+
+The fallback date logic (line 551) currently defaults to `now + 12h` when no Odds API match is found. This is problematic because:
+
+1. Scraped games may not match to Odds API due to team name normalization issues
+2. The fallback timestamp becomes the "event_date", which doesn't match bookmaker times
+3. This causes the 24h window filter to reject valid games
+
+**Fix:** When using fallback date, also improve team name matching to increase hit rate:
+
 ```typescript
-// If no valid price from any source, skip market
-if (livePolyPrice === null) {
-  console.log(`[POLY-MONITOR] NO_VALID_PRICE_SKIP`, {
-    event: event.event_name,
-    reason: 'no_clob_or_cache_price'
-  });
-  funnelStats.skipped_no_price++;
-  continue;
+// Enhanced team name matching in findOddsApiCommenceTime:
+// Add common nickname mappings for better matching
+
+// Example: "Man City" should match "Manchester City"
+const nicknameMap: Record<string, string[]> = {
+  'manchester city': ['man city', 'city'],
+  'manchester united': ['man united', 'man utd', 'united'],
+  'tottenham': ['spurs', 'tottenham hotspur'],
+  'inter milan': ['inter', 'internazionale'],
+  'ac milan': ['milan'],
+  // ... add more as needed
+};
+```
+
+Additionally, log warnings when fallback is used so we can track unmatched games:
+
+```typescript
+if (!actualCommenceTime) {
+  console.log(`[FIRECRAWL] NO_BOOKIE_MATCH: ${game.team1Name} vs ${game.team2Name} - using fallback date`);
+  // Track for debugging
+  unmatchedGames.push({ team1: game.team1Name, team2: game.team2Name });
 }
 ```
 
-### Phase 3: Fix Token Resolution (Sync Function)
-
-**File:** `supabase/functions/polymarket-sync-24h/index.ts`
-
-The current token extraction paths are failing for most markets. Need to add:
-
-**Change 3a:** Add CLOB markets lookup fallback for Firecrawl games
-- After failing to find tokens in Gamma event metadata
-- Query CLOB API `/markets` endpoint with team names
-- Extract `clobTokenIds` from response
-
-**Change 3b:** Mark markets as untradeable when tokens unavailable
-- Set `tradeable = false`
-- Set `untradeable_reason = 'MISSING_TOKENS'`
-- Already partially implemented but needs to propagate correctly
-
 ---
 
-## Technical Implementation Details
+## Expected Outcomes
 
-### Files Modified
-
-| File | Changes |
-|------|---------|
-| `supabase/functions/polymarket-sync-24h/index.ts` | Lines ~730-760: Add `bookmaker_commence_time` to Firecrawl upsert |
-| `supabase/functions/polymarket-sync-24h/index.ts` | Lines ~893-920: Add `bookmaker_commence_time` to Gamma upsert |
-| `supabase/functions/polymarket-sync-24h/index.ts` | Add CLOB token fallback function after line 680 |
-| `supabase/functions/polymarket-monitor/index.ts` | Line 1578: Remove `\|\| 0.5` fallback |
-| `supabase/functions/polymarket-monitor/index.ts` | Line ~1655: Add null price skip logic |
-| `supabase/functions/polymarket-monitor/index.ts` | Line 2360: Use `cache?.bookmaker_commence_time` |
-
-### Expected Outcomes After Implementation
-
-| Metric | Before | After |
-|--------|--------|-------|
-| Markets with `bookmaker_commence_time` | 0% | 80%+ |
-| Signals with correct expiry | 0% | 100% |
-| False 50¢ edges | Possible | Eliminated |
-| Tokenization success rate | 6% | 60%+ (with CLOB fallback) |
+| Metric | Current | After Fix |
+|--------|---------|-----------|
+| Soccer bookmaker matches | 0% | 80%+ |
+| NHL/NBA bookmaker matches | ~20% | 60%+ |
+| Total H2H with `bookmaker_commence_time` | 16/211 (8%) | 150+/211 (70%+) |
+| Signals with correct `expires_at` | ~8% | 70%+ |
 
 ---
 
 ## Verification Steps
 
-1. **Deploy sync function** → Run `polymarket-sync-24h`
-2. **Query database** → Verify `bookmaker_commence_time` populated for active markets
-3. **Deploy monitor function** → Run `polymarket-monitor`
-4. **Check signals** → Verify `expires_at` uses bookmaker times
-5. **Check funnel stats** → Verify tokenization rate improved
-6. **Check for 50¢ signals** → Confirm none created
+1. Deploy updated `ingest-odds` function
+2. Run `ingest-odds` to populate `bookmaker_signals` with soccer data
+3. Deploy updated `polymarket-sync-24h` function
+4. Run `polymarket-sync-24h` to populate `bookmaker_commence_time`
+5. Query database to verify match rates improved
+6. Run `polymarket-monitor` to verify signals use authoritative times
 
 ---
 
-## Future Enhancement: Shadow Flow Integration
+## Files Modified
 
-Once the base system is working correctly, the Shadow Flow module can be added as a separate signal type:
-
-1. **New table:** `shadow_flow_signals` for observe-only logging
-2. **New function:** `polymarket-orderbook-monitor` for CLOB depth analysis
-3. **Integration point:** Use shared token resolver from Phase 3
-4. **Execution gate:** `SHADOW_FLOW_OBSERVE_ONLY = true` initially
-
-This is Phase 2 work - first we need the core system working.
+| File | Changes |
+|------|---------|
+| `supabase/functions/ingest-odds/index.ts` | Add 5 soccer leagues to `h2hSports` array |
+| `supabase/functions/polymarket-sync-24h/index.ts` | Add 5 soccer leagues to `sportsToFetch` array |
+| `supabase/functions/polymarket-sync-24h/index.ts` | Add nickname mapping for better team matching |
