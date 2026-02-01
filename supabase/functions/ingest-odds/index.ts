@@ -194,12 +194,18 @@ Deno.serve(async (req) => {
       'icehockey_nhl_championship_winner',
     ];
 
-    // H2H sports for individual match betting - CORE 4 SPORTS ONLY
+    // H2H sports for individual match betting - US sports + major soccer leagues
     const h2hSports = [
       'basketball_nba',
       'basketball_ncaab',
       'americanfootball_nfl',
       'icehockey_nhl',
+      // Soccer leagues
+      'soccer_epl',
+      'soccer_spain_la_liga',
+      'soccer_italy_serie_a',
+      'soccer_germany_bundesliga',
+      'soccer_uefa_champs_league',
     ];
 
     const allSignals: any[] = [];
