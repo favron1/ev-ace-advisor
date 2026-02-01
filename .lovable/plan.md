@@ -1,166 +1,199 @@
 
-# Fix Token Resolution: Restore Signal Pipeline
 
-## Problem Diagnosis
+# Implement Core Logic Document Page
 
-Based on my investigation, I've identified **the critical issue** blocking signals:
+## Overview
 
-### Current State
-| Metric | Value |
-|--------|-------|
-| Watching markets | 281 |
-| Markets with bookmaker time | 24 (8.5%) |
-| Active signals | **0** |
-| Recent bookmaker signals | 44,736 ✅ |
-| Sharp book snapshots (1h) | 2,840 ✅ |
+Create a locked, downloadable "Core Logic" page (`/core-logic`) that serves as the single source of truth for the External Scan & Signal Sourcing pipeline. This document is intentionally isolated from UI so frontend changes cannot break signal generation.
 
-### Pipeline Funnel Analysis
-From the monitor logs:
-```
-48 watching → 3 tokenized (45 blocked) → 3 matched → 0 edges → 0 signals
-```
+## What Will Be Built
 
-**Root Cause: Token Resolution Failure**
+### New Route: `/core-logic`
 
-| Source | Total | With Tokens | Rate |
-|--------|-------|-------------|------|
-| api | 1,231 | 1,231 | 100% ✅ |
-| gamma-api | 75 | 75 | 100% ✅ |
-| firecrawl | 45 | 0 | **0%** ❌ |
+A dedicated page featuring:
+- Full markdown rendering of the v1.0 canonical document
+- **LOCKED status badge** - Visual indicator that this is read-only
+- **Download button** - One-click export as `.md` file
+- **Copy button** - Copy full content to clipboard
+- **Version display** - Shows `v1.0 (canonical)` prominently
+- Terminal-style design matching the app aesthetic
 
-The Firecrawl-scraped games (NBA, NHL) have **0% tokenization**. The backfill logic in `polymarket-sync-24h` uses `lookupClobVolumeFromCache()` which queries the pre-fetched Gamma API data - but **NBA/NHL games often don't have matching Gamma API events** (they use Firecrawl precisely because Gamma doesn't list them).
+### Document as Code
+
+The canonical document stored as a TypeScript constant:
+- Can be imported and referenced from anywhere in the codebase
+- Version tracking built-in
+- Never auto-modified by UI or tooling
 
 ---
 
-## Fix Strategy
+## Files to Create
 
-### Option A: Proactive Token Repair in polymarket-monitor (Recommended)
+### 1. `src/lib/core-logic-document.ts`
 
-Instead of relying on sync-24h backfill (which doesn't work), make the monitor **self-healing** by calling the tokenize-market service for untokenized markets.
-
-**Changes to `polymarket-monitor/index.ts`:**
-
-1. Before the HARD_GATE check, attempt token resolution for markets missing tokens
-2. Call the existing `tokenize-market` edge function which has 4 extractors:
-   - CLOB API direct
-   - Gamma API search
-   - Firecrawl HTML scrape
-   - CLOB search API
-
-This is the most robust approach because:
-- Uses all 4 token extractors in priority order
-- Only runs for markets that need it (not all 48)
-- Self-heals on every poll cycle
-- Existing tokenize-market function is proven to work
-
-### Option B: Batch Token Repair Job (Alternative)
-
-Create a scheduled job that runs independently to repair tokens:
-- Query all `firecrawl` source markets with NULL tokens
-- Call tokenize-market for each
-- Update cache with results
-
-Less ideal because it adds another scheduled task.
-
----
-
-## Implementation Details
-
-### File: `supabase/functions/polymarket-monitor/index.ts`
-
-**Add near line 1536 (before HARD_GATE check):**
+Stores the canonical markdown content:
 
 ```typescript
-// ============= TOKEN REPAIR PATH =============
-// If market has no tokens, try to resolve them via tokenize-market
-const MAX_TOKEN_REPAIRS_PER_RUN = 10;
-let tokenRepairsThisRun = 0;
+export const CORE_LOGIC_VERSION = "v1.0";
+export const CORE_LOGIC_FILENAME = `external_scan_signal_sourcing_${CORE_LOGIC_VERSION}.md`;
 
-// ... inside the main event loop, before the HARD_GATE ...
-
-if (!tokenIdYes && tokenRepairsThisRun < MAX_TOKEN_REPAIRS_PER_RUN) {
-  // Try to repair tokens using the tokenize-market service
-  const teamHome = cache?.team_home || '';
-  const teamAway = cache?.team_away || '';
-  const sport = cache?.extracted_league || 'sports';
-  const conditionId = event.polymarket_condition_id;
-  
-  if (teamHome && teamAway) {
-    console.log(`[POLY-MONITOR] TOKEN_REPAIR_ATTEMPT: ${teamHome} vs ${teamAway}`);
-    tokenRepairsThisRun++;
-    
-    try {
-      // Call tokenize-market edge function
-      const tokenResult = await supabase.functions.invoke('tokenize-market', {
-        body: {
-          condition_id: conditionId,
-          team_home: teamHome,
-          team_away: teamAway,
-          sport: sport,
-          update_cache: true, // Auto-update cache on success
-        }
-      });
-      
-      if (tokenResult.data?.success) {
-        // Use the newly resolved tokens
-        tokenIdYes = tokenResult.data.token_id_yes;
-        cache.token_id_yes = tokenIdYes;
-        cache.token_id_no = tokenResult.data.token_id_no;
-        console.log(`[POLY-MONITOR] TOKEN_REPAIR_SUCCESS: ${teamHome} vs ${teamAway} → ${tokenIdYes?.slice(0, 16)}...`);
-      } else {
-        console.log(`[POLY-MONITOR] TOKEN_REPAIR_FAILED: ${teamHome} vs ${teamAway} → ${tokenResult.data?.untradeable_reason || 'unknown'}`);
-      }
-    } catch (e) {
-      console.log(`[POLY-MONITOR] TOKEN_REPAIR_ERROR: ${(e as Error).message}`);
-    }
-  }
-}
+export const CORE_LOGIC_DOCUMENT = `# External Scan & Signal Sourcing (5-Stage Flow)
+...full markdown content...
+`;
 ```
 
-### File: `supabase/functions/tokenize-market/index.ts`
+### 2. `src/components/core-logic/MarkdownRenderer.tsx`
 
-**Add `update_cache` parameter support** to auto-update the h2h cache when tokens are resolved:
+Lightweight custom markdown parser supporting:
+- Headings (h1-h6)
+- Bold/italic text
+- Unordered lists
+- Code blocks (monospace styling)
+- Horizontal rules
+- Tables (basic)
+- Paragraphs
+
+No external markdown library - keeps bundle small and gives full control.
+
+### 3. `src/pages/CoreLogic.tsx`
+
+Main page component with:
+- Header with back navigation and action buttons
+- LOCKED badge + version badge
+- Rendered markdown content
+- Download and Copy functionality
+
+---
+
+## Files to Modify
+
+### 1. `src/App.tsx`
+
+Add new route:
+```typescript
+import CoreLogic from "./pages/CoreLogic";
+
+// In Routes:
+<Route path="/core-logic" element={<CoreLogic />} />
+```
+
+### 2. `src/components/terminal/Header.tsx`
+
+Add navigation button with `BookOpen` icon:
+```typescript
+import { BookOpen } from 'lucide-react';
+
+// In the button group:
+<Button variant="ghost" size="icon" onClick={() => navigate('/core-logic')} title="Core Logic">
+  <BookOpen className="h-4 w-4" />
+</Button>
+```
+
+---
+
+## Page Layout
+
+```text
++------------------------------------------------------------------+
+|  [←]  CORE LOGIC              [Copy] [Download] [Stats] [⚙] [↪] |
++------------------------------------------------------------------+
+|                                                                  |
+|  +------------------------------------------------------------+  |
+|  |  [LOCKED]                    v1.0 (canonical)              |  |
+|  +------------------------------------------------------------+  |
+|                                                                  |
+|  # External Scan & Signal Sourcing (5-Stage Flow)                |
+|                                                                  |
+|  **Version:** v1.0 (canonical)                                   |
+|  **Change control:** Any threshold change requires...            |
+|                                                                  |
+|  ---                                                             |
+|                                                                  |
+|  ## 5-Stage Flow (Authoritative)                                 |
+|  1. Source Odds (multi-source ingest)                            |
+|  2. Movement Engine (detect meaningful market moves)             |
+|  3. Candidate Builder (score + dedupe)                           |
+|  4. Polymarket Match Request (metadata only)                     |
+|  5. State Promotion & Dispatch (execution permissioning)         |
+|                                                                  |
+|  ## Stage Definitions (Contract)                                 |
+|  ### 1) Source Odds (Multi-Source Ingest)                        |
+|  - Primary Polymarket analytics: Gamma API...                    |
+|  ...                                                             |
++------------------------------------------------------------------+
+```
+
+---
+
+## Key Thresholds Embedded (From Document)
+
+These are now codified and referenceable:
+
+| Threshold | Value | Stage |
+|-----------|-------|-------|
+| Movement trigger | >= 6.0% probability change | Stage 2 |
+| Velocity trigger | >= 0.4% per minute | Stage 2 |
+| Sharp consensus | >= 2 books | Stage 2 |
+| S2 confidence | >= 60 | Stage 3.5 |
+| S2 book probability | >= 52% | Stage 3.5 |
+| S2 time to start | >= 10 min | Stage 3.5 |
+| S1 confidence range | 45-59 | Stage 3.5 |
+| S1 book probability | 48-51.9% | Stage 3.5 |
+| Cooldown | 30-60 min | Stage 3 |
+| Max S2 per hour | 12 (all sports) | Rate Limit |
+| Max S2 per sport/hour | 4 | Rate Limit |
+| Liquidity preference | >= $10K | Stage 3 |
+
+---
+
+## Download Functionality
+
+When user clicks "Download":
+1. Creates a Blob from `CORE_LOGIC_DOCUMENT`
+2. Generates download with filename: `external_scan_signal_sourcing_v1.0.md`
+3. Triggers browser download
+4. User can edit externally and re-upload
+
+## Copy Functionality
+
+When user clicks "Copy":
+1. Uses `navigator.clipboard.writeText()`
+2. Shows toast confirmation "Copied to clipboard"
+3. Full markdown available for pasting anywhere
+
+---
+
+## Design Decisions
+
+1. **No edit in UI** - Document is read-only. Editing happens externally.
+2. **Version tracking** - Version displayed prominently; changes require version bump.
+3. **No live Mermaid** - Flow diagram kept as text/ASCII for export fidelity.
+4. **Minimal parser** - Custom parser handles only the subset used in the document.
+5. **Terminal styling** - Uses existing dark theme with cards and monospace fonts.
+
+---
+
+## Implementation Order
+
+1. Create `src/lib/core-logic-document.ts` with full document content
+2. Create `src/components/core-logic/MarkdownRenderer.tsx` component
+3. Create `src/pages/CoreLogic.tsx` page
+4. Update `src/App.tsx` to add `/core-logic` route
+5. Update `src/components/terminal/Header.tsx` to add BookOpen nav icon
+
+---
+
+## Future Reference
+
+Once implemented, this document can be imported anywhere:
 
 ```typescript
-// In the request handler, after successful tokenization:
-if (body.update_cache && result.success && result.conditionId) {
-  await supabase
-    .from('polymarket_h2h_cache')
-    .update({
-      token_id_yes: result.tokenIdYes,
-      token_id_no: result.tokenIdNo,
-      token_source: result.tokenSource,
-      tradeable: true,
-      untradeable_reason: null,
-      last_token_repair_at: new Date().toISOString(),
-    })
-    .eq('condition_id', result.conditionId);
-}
+import { CORE_LOGIC_DOCUMENT, CORE_LOGIC_VERSION } from '@/lib/core-logic-document';
+
+// Example: log current version
+console.log(`Running Core Logic ${CORE_LOGIC_VERSION}`);
+
+// Example: reference thresholds programmatically
+// (thresholds are in the document text, not as separate constants)
 ```
-
----
-
-## Expected Outcome
-
-After implementation:
-
-| Metric | Before | After |
-|--------|--------|-------|
-| Firecrawl token rate | 0% | 60-80% |
-| Markets passing HARD_GATE | 3/48 | 30-40/48 |
-| Potential signals | 0 | 5-15 (depending on edges) |
-
-The monitor will self-heal on each 5-minute poll:
-1. First poll: Repairs up to 10 markets
-2. Second poll: Repairs another 10
-3. By third poll: Most markets tokenized, signals can flow
-
----
-
-## Technical Notes
-
-- Rate limit: 10 repairs per poll prevents timeout
-- Caching: Successfully repaired tokens are persisted to DB
-- Fallback: Markets that can't be tokenized are marked untradeable (won't retry every cycle due to `last_token_repair_at`)
-- The tokenize-market function already has a proven 4-tier extractor chain
 
