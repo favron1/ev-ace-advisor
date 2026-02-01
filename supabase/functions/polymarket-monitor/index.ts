@@ -37,7 +37,8 @@ const SHARP_BOOKS = ['pinnacle', 'betfair', 'betfair_ex_eu'];
 
 // ============= CORE LOGIC VERSION =============
 // This version tag is attached to all signals for tracking and comparison
-const CORE_LOGIC_VERSION = 'v1.1';
+// V1.3: "Match Failure Flip" - observability layer for silent signal drops
+const CORE_LOGIC_VERSION = 'v1.3';
 
 // AI resolution cache - persists across poll cycles
 const aiResolvedNames = new Map<string, { homeTeam: string; awayTeam: string } | null>();
@@ -1417,6 +1418,7 @@ Deno.serve(async (req) => {
     
     // ============= FUNNEL LOGGING =============
     // Track exactly where matches fail for debugging
+    // V1.3: Enhanced with failure reason tracking for self-healing
     const funnelStats = {
       watching_total: eventsToProcess.length,
       // TOKENIZATION GATE (Phase 1 - Critical)
@@ -1451,7 +1453,52 @@ Deno.serve(async (req) => {
       priced_from_clob: 0,
       priced_from_cache: 0,
       rejected_garbage_price: 0,
+      // V1.3: Failure reason tracking for self-healing
+      failure_team_alias_missing: 0,
+      failure_no_book_game_found: 0,
+      failure_start_time_mismatch: 0,
     };
+
+    // V1.3: Helper function to log match failures to database
+    async function logMatchFailure(
+      polyEvent: {
+        title: string;
+        teamA: string;
+        teamB: string;
+        conditionId: string;
+      },
+      sportCode: string,
+      failureReason: string
+    ) {
+      try {
+        // Upsert to match_failures table, incrementing occurrence_count on conflict
+        const { error } = await supabase.rpc('upsert_match_failure', {
+          p_poly_event_title: polyEvent.title,
+          p_poly_team_a: polyEvent.teamA,
+          p_poly_team_b: polyEvent.teamB,
+          p_poly_condition_id: polyEvent.conditionId,
+          p_sport_code: sportCode,
+          p_failure_reason: failureReason,
+        });
+        
+        // Fallback if RPC doesn't exist - use direct upsert
+        if (error) {
+          await supabase.from('match_failures').upsert({
+            poly_event_title: polyEvent.title,
+            poly_team_a: polyEvent.teamA,
+            poly_team_b: polyEvent.teamB,
+            poly_condition_id: polyEvent.conditionId,
+            sport_code: sportCode,
+            failure_reason: failureReason,
+            last_seen_at: new Date().toISOString(),
+          }, {
+            onConflict: 'poly_condition_id',
+          });
+        }
+      } catch (err) {
+        console.error('[V1.3] Failed to log match failure:', err);
+      }
+    }
 
     // Log placeholder time stats for debugging
     try {
@@ -1955,6 +2002,41 @@ Deno.serve(async (req) => {
           }
         }
         // ============= END CANONICAL MATCHING STRATEGY =============
+        
+        // V1.3: Log match failures for observability and self-healing
+        if (!match && bookmakerGames.length > 0) {
+          // Determine failure reason from canonical result or default
+          let failureReason = 'NO_BOOK_GAME_FOUND';
+          
+          if (canonicalResult?.failureReason) {
+            failureReason = canonicalResult.failureReason;
+            
+            // Track by failure type
+            if (failureReason === 'TEAM_ALIAS_MISSING') {
+              funnelStats.failure_team_alias_missing++;
+            } else if (failureReason === 'NO_BOOK_GAME_FOUND') {
+              funnelStats.failure_no_book_game_found++;
+            } else if (failureReason === 'START_TIME_MISMATCH') {
+              funnelStats.failure_start_time_mismatch++;
+            }
+          } else {
+            funnelStats.failure_no_book_game_found++;
+          }
+          
+          // Log to match_failures table for UI visibility
+          await logMatchFailure(
+            {
+              title: event.event_name,
+              teamA: polyYesTeam,
+              teamB: polyNoTeam,
+              conditionId: event.polymarket_condition_id || '',
+            },
+            sport,
+            failureReason
+          );
+          
+          console.log(`[V1.3] MATCH_FAILURE: "${event.event_name}" reason=${failureReason}`);
+        }
         
         // Track matched total
         if (match) {
@@ -2507,8 +2589,21 @@ Deno.serve(async (req) => {
         : 0,
     };
     
+    // V1.3: Calculate split coverage/match metrics
+    const bookCoverageAvailable = funnelStats.tokenized_total - funnelStats.failure_no_book_game_found;
+    const bookCoverageMissing = funnelStats.failure_no_book_game_found;
+    const matchRateCovered = bookCoverageAvailable > 0 
+      ? Math.round((funnelStats.matched_total / bookCoverageAvailable) * 100) 
+      : 0;
+    
     console.log(`[POLY-MONITOR] FUNNEL_STATS:`, JSON.stringify(funnelSummary));
     console.log(`[POLY-MONITOR] FUNNEL_PIPELINE: ${funnelStats.watching_total} watching → ${funnelStats.tokenized_total} tokenized (${funnelStats.blocked_no_tokens} blocked) → ${funnelStats.matched_total} matched → ${funnelStats.edges_over_threshold} edges → ${funnelStats.signals_created} signals`);
+    
+    // V1.3: Split coverage/match metrics logging
+    console.log(`[V1.3] COVERAGE: ${bookCoverageAvailable}/${funnelStats.tokenized_total} markets have book data (${funnelStats.tokenized_total > 0 ? Math.round((bookCoverageAvailable / funnelStats.tokenized_total) * 100) : 0}%)`);
+    console.log(`[V1.3] MATCH_RATE_COVERED: ${funnelStats.matched_total}/${bookCoverageAvailable} matched (${matchRateCovered}%)`);
+    console.log(`[V1.3] FAILURES: ${funnelStats.failure_team_alias_missing} team_alias, ${funnelStats.failure_start_time_mismatch} time_mismatch, ${bookCoverageMissing} no_coverage`);
+    
     console.log(`[POLY-MONITOR] Complete: ${eventsToProcess.length} polled, ${eventsMatched} matched, ${edgesFound} edges (${movementConfirmedCount} movement-confirmed), ${alertsSent} alerts in ${duration}ms`);
 
     return new Response(

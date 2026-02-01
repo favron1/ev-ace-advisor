@@ -15,6 +15,7 @@ import { FiltersBar } from '@/components/terminal/FiltersBar';
 import { ScanControlPanel } from '@/components/terminal/ScanControlPanel';
 import { AutomationPanel } from '@/components/terminal/AutomationPanel';
 import { MarketWatchDashboard } from '@/components/terminal/MarketWatchDashboard';
+import { UnmatchedTeamsPanel } from '@/components/terminal/UnmatchedTeamsPanel';
 import { useSignals } from '@/hooks/useSignals';
 import { useScanConfig } from '@/hooks/useScanConfig';
 import { useWatchState } from '@/hooks/useWatchState';
@@ -307,6 +308,9 @@ export default function Terminal() {
             
             {/* Market Watch Dashboard - Full Visibility */}
             <MarketWatchDashboard />
+            
+            {/* V1.3: Unmatched Teams Panel for self-healing team mappings */}
+            <UnmatchedTeamsPanel />
           </div>
         </div>
       </main>
