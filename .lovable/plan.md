@@ -1,328 +1,223 @@
 
 
-# Core Logic Versioning System
+# Plan: Complete v1.3 Implementation
 
 ## Overview
-
-This plan implements a version-controlled Core Logic system that:
-1. **Freezes v1.0** as the immutable canonical baseline
-2. **Creates v1.1** as an experimental variant with documented changes
-3. **Tags all signals** with `core_logic_version` for comparative analysis
-4. **Enables side-by-side evaluation** of signal quality between versions
+Fully implement Core Logic v1.3 "Match Failure Flip" - the observability layer that prevents silent signal drops and enables self-healing team mappings.
 
 ---
 
-## Current State
-
-| Component | Status |
-|-----------|--------|
-| Core Logic v1.0 Document | Exists in `src/lib/core-logic-document.ts` |
-| Implementation | Matches v1.0 thresholds in `polymarket-monitor/index.ts` |
-| Version Tracking | NOT IMPLEMENTED - signals don't record which version generated them |
-| Multiple Versions | NOT SUPPORTED - single document only |
-
----
-
-## Architecture
+## Current Gap Analysis
 
 ```text
-+----------------------------------+
-|     Core Logic Documents         |
-+----------------------------------+
-|                                  |
-|  +-----------+   +-----------+   |
-|  |   v1.0    |   |   v1.1    |   |
-|  | (frozen)  |   | (active)  |   |
-|  +-----------+   +-----------+   |
-|        |               |         |
-+--------|---------------|--------+
-         |               |
-         v               v
-+----------------------------------+
-|   polymarket-monitor/index.ts    |
-|   (imports active version)       |
-+----------------------------------+
-         |
-         v
-+----------------------------------+
-|  signal_opportunities table      |
-|  +core_logic_version column      |
-+----------------------------------+
++------------------+----------------+-------------------+
+|   Component      |   Expected     |    Actual         |
++------------------+----------------+-------------------+
+| Version Tag      | v1.3           | v1.1              |
+| match_failures   | Populated      | EMPTY (0 rows)    |
+| Silent drops     | Logged         | Still happening   |
+| WATCH forcing    | Implemented    | Not implemented   |
+| UI Panel         | Exists         | Missing           |
++------------------+----------------+-------------------+
 ```
 
 ---
 
-## Phase 1: Database Schema Change
+## Phase 1: Edge Function - Log All Match Failures
 
-Add `core_logic_version` column to track signal origin:
+### File: `supabase/functions/_shared/match-poly-to-book.ts`
 
-```sql
--- Add version tracking column
-ALTER TABLE signal_opportunities 
-ADD COLUMN core_logic_version TEXT DEFAULT 'v1.0';
+Modify `matchPolyMarket()` to return failure reason codes when match fails:
 
--- Add version to signal_logs for settlement tracking
-ALTER TABLE signal_logs 
-ADD COLUMN core_logic_version TEXT;
-```
-
----
-
-## Phase 2: Create Versioned Document Structure
-
-### File: `src/lib/core-logic-v1.0.ts` (NEW - FROZEN)
-
-Move current document to dedicated frozen file:
-- Exact copy of current v1.0 content
-- Header comment: `// FROZEN - DO NOT MODIFY`
-- Export: `CORE_LOGIC_V1_0_DOCUMENT`
-
-### File: `src/lib/core-logic-v1.1.ts` (NEW - EXPERIMENTAL)
-
-Create experimental version with:
-- "Changes from v1.0" section at top
-- Same structure as v1.0
-- Tunable parameters clearly marked
-
-Example changes for v1.1:
-```markdown
-## Changes from v1.0
-
-### Modified Thresholds (Experimental)
-- Movement trigger: 6.0% -> **5.0%** (increased sensitivity)
-- Velocity trigger: 0.4%/min -> **0.3%/min** (lower bar)
-- S1 confidence floor: 45 -> **40** (capture more marginal signals)
-
-### New Features
-- Sport-specific threshold overrides
-- Enhanced degradation modes
-```
-
-### File: `src/lib/core-logic-document.ts` (MODIFIED)
-
-Refactor to:
-1. Import both versions
-2. Export `ACTIVE_CORE_LOGIC_VERSION = 'v1.1'`
-3. Export version-aware accessors
-
+**New return shape:**
 ```typescript
-import { CORE_LOGIC_V1_0_DOCUMENT } from './core-logic-v1.0';
-import { CORE_LOGIC_V1_1_DOCUMENT, CORE_LOGIC_V1_1_CONSTANTS } from './core-logic-v1.1';
-
-export const ACTIVE_CORE_LOGIC_VERSION = 'v1.1';
-
-export function getCoreLogicDocument(version: string) {
-  return version === 'v1.0' ? CORE_LOGIC_V1_0_DOCUMENT : CORE_LOGIC_V1_1_DOCUMENT;
+interface MatchResult {
+  match: BookEvent | null;
+  method: MatchMethod;
+  failureReason?: FailureReason;  // NEW
+  debug: { ... };
 }
 
-export function getCoreLogicConstants(version: string) {
-  return version === 'v1.0' ? CORE_LOGIC_V1_0_CONSTANTS : CORE_LOGIC_V1_1_CONSTANTS;
-}
+type FailureReason = 
+  | 'NO_BOOK_GAME_FOUND'
+  | 'TEAM_ALIAS_MISSING' 
+  | 'START_TIME_MISMATCH'
+  | 'MULTIPLE_GAMES_AMBIGUOUS';
 ```
+
+**Logic changes:**
+- If team resolution fails → `TEAM_ALIAS_MISSING`
+- If lookup key yields 0 candidates → `NO_BOOK_GAME_FOUND`
+- If time filter rejects all → `START_TIME_MISMATCH`
 
 ---
 
-## Phase 3: Extract Programmable Constants
-
-### File: `src/lib/core-logic-v1.0.ts`
-
-Add typed constants alongside the document:
-
-```typescript
-export const CORE_LOGIC_V1_0_CONSTANTS = {
-  VERSION: 'v1.0',
-  
-  // Stage 2: Movement Engine
-  MOVEMENT_THRESHOLD: 0.06,       // 6.0% absolute
-  VELOCITY_THRESHOLD: 0.004,      // 0.4% per minute
-  SHARP_CONSENSUS_MIN: 2,
-  
-  // Stage 3.5: Signal State Gates
-  S2_CONFIDENCE_MIN: 60,
-  S2_BOOK_PROB_MIN: 0.52,
-  S2_TIME_TO_START_MIN: 10,
-  S1_CONFIDENCE_MIN: 45,
-  S1_BOOK_PROB_MIN: 0.48,
-  
-  // Stage 3: Rate Limiting
-  COOLDOWN_MINUTES: 30,
-  MAX_S2_PER_HOUR: 12,
-  MAX_S2_PER_SPORT_PER_HOUR: 4,
-  
-  // Stage 3.6: Auto-Promotion
-  LIQUIDITY_PREFERENCE: 10000,
-} as const;
-```
-
-### File: `src/lib/core-logic-v1.1.ts`
-
-Experimental constants with adjustments:
-
-```typescript
-export const CORE_LOGIC_V1_1_CONSTANTS = {
-  VERSION: 'v1.1',
-  
-  // Stage 2: Movement Engine (TUNED)
-  MOVEMENT_THRESHOLD: 0.05,       // 5.0% (lowered for sensitivity)
-  VELOCITY_THRESHOLD: 0.003,      // 0.3% per minute (lowered)
-  SHARP_CONSENSUS_MIN: 2,         // unchanged
-  
-  // Stage 3.5: Signal State Gates (TUNED)
-  S2_CONFIDENCE_MIN: 55,          // lowered from 60
-  S2_BOOK_PROB_MIN: 0.50,         // lowered from 52%
-  S2_TIME_TO_START_MIN: 10,       // unchanged
-  S1_CONFIDENCE_MIN: 40,          // lowered from 45
-  S1_BOOK_PROB_MIN: 0.45,         // lowered from 48%
-  
-  // Stage 3: Rate Limiting (INCREASED)
-  COOLDOWN_MINUTES: 20,           // reduced from 30
-  MAX_S2_PER_HOUR: 20,            // increased from 12
-  MAX_S2_PER_SPORT_PER_HOUR: 8,   // increased from 4
-  
-  // Stage 3.6: Auto-Promotion
-  LIQUIDITY_PREFERENCE: 5000,     // lowered from 10K
-} as const;
-```
-
----
-
-## Phase 4: Update Edge Function
+## Phase 2: Edge Function - Write to match_failures Table
 
 ### File: `supabase/functions/polymarket-monitor/index.ts`
 
-Replace hardcoded `CORE_LOGIC` object with imported version:
-
+**Add at top:**
 ```typescript
-// At top of file
-const ACTIVE_VERSION = 'v1.1';
-
-// Use version-aware constants
-const CORE_LOGIC = getCoreLogicConstants(ACTIVE_VERSION);
+const CORE_LOGIC_VERSION = 'v1.3';  // Upgrade from v1.1
 ```
 
-Add version to signal creation:
-
+**Add helper function:**
 ```typescript
-const signalData = {
-  // ... existing fields
-  core_logic_version: ACTIVE_VERSION,  // NEW
-  signal_factors: {
-    // ... existing fields
-    core_logic_version: ACTIVE_VERSION,  // Also in JSON for querying
+async function logMatchFailure(
+  supabase: any,
+  polyEvent: { 
+    title: string; 
+    teamA: string; 
+    teamB: string; 
+    conditionId: string; 
   },
-};
+  sportCode: string,
+  failureReason: string,
+  suggestedMatch?: string
+) {
+  await supabase.from('match_failures').upsert({
+    poly_event_title: polyEvent.title,
+    poly_team_a: polyEvent.teamA,
+    poly_team_b: polyEvent.teamB,
+    poly_condition_id: polyEvent.conditionId,
+    sport_code: sportCode,
+    failure_reason: failureReason,
+    suggested_match: suggestedMatch,
+    last_seen_at: new Date().toISOString(),
+  }, {
+    onConflict: 'poly_condition_id',
+    ignoreDuplicates: false,
+  });
+}
+```
+
+**Modify matching loop:**
+When `matchResult.match === null`:
+1. Call `logMatchFailure()` with appropriate reason
+2. Track in funnel stats by reason code
+3. Continue to next market (no silent drop)
+
+---
+
+## Phase 3: v1.3 Behavior - Force WATCH + Block S2
+
+When match fails due to `TEAM_ALIAS_MISSING`:
+- Signal state = `WATCH` (never promote to S2)
+- Log: `"[V1.3] TEAM_ALIAS_MISSING: forcing WATCH for {eventName}"`
+
+When match fails due to `NO_BOOK_GAME_FOUND`:
+- Track separately as "awaiting coverage"
+- Do NOT count against match rate
+
+---
+
+## Phase 4: Split Metrics
+
+Update funnel stats to distinguish:
+
+```typescript
+interface FunnelStats {
+  // Existing
+  watching_total: number;
+  matched_total: number;
+  
+  // NEW for v1.3
+  book_coverage_available: number;   // Markets where bookmakers have odds
+  book_coverage_missing: number;     // No bookmaker data yet
+  team_alias_failures: number;       // Has book data, but team name mismatch
+  time_mismatch_failures: number;    // Has book data, times don't align
+  
+  // Calculated
+  match_rate_covered: number;        // matched / book_coverage_available
+}
+```
+
+Log these at end of scan:
+```
+[V1.3] COVERAGE: 45/66 markets have book data (68%)
+[V1.3] MATCH_RATE_COVERED: 42/45 matched (93%)
+[V1.3] FAILURES: 3 team_alias, 0 time_mismatch
 ```
 
 ---
 
-## Phase 5: Update UI for Version Display
+## Phase 5: UI - Unmatched Teams Panel
 
-### File: `src/pages/CoreLogic.tsx`
+### New File: `src/components/terminal/UnmatchedTeamsPanel.tsx`
 
-Add version selector:
-- Tabs or dropdown to switch between v1.0 and v1.1
-- v1.0 shows "FROZEN" badge
-- v1.1 shows "EXPERIMENTAL" badge
-- Download respects selected version
+**Features:**
+- Query `match_failures` table for `resolution_status = 'pending'`
+- Group by `(sport_code, poly_team_a)` to deduplicate
+- Show occurrence count and last seen
+- Allow user to type canonical team name
+- On submit: insert into `team_mappings` + mark failure as resolved
 
-### File: `src/components/terminal/SignalCard.tsx`
+**UI layout:**
+```text
++------------------------------------------+
+| Unmatched Teams Queue (3 pending)        |
++------------------------------------------+
+| HIOST (NBA) - seen 12x                   |
+| Suggested: Houston Rockets               |
+| [Map to: ________________] [Save]        |
++------------------------------------------+
+| MICH (NCAA) - seen 5x                    |
+| Suggested: Michigan Wolverines           |
+| [Map to: ________________] [Save]        |
++------------------------------------------+
+```
 
-Display version badge on signals:
-- Small chip showing "v1.0" or "v1.1"
-- Different colors for easy differentiation
+### File: `src/pages/Terminal.tsx`
+
+Add `<UnmatchedTeamsPanel />` to the terminal layout (collapsed by default).
 
 ---
 
-## Phase 6: Stats Page Version Comparison
+## Phase 6: Edge Function - Use team_mappings Lookups
 
-### File: `src/pages/Stats.tsx`
+### File: `supabase/functions/_shared/canonicalize.ts`
 
-Add version comparison section:
-- Filter signals by `core_logic_version`
-- Side-by-side metrics: signal volume, win rate, average edge
-- Helps evaluate which version performs better
+Modify `resolveTeamName()` to:
+1. First check hardcoded `teamMap`
+2. Then query `team_mappings` table for learned aliases
+3. Return resolved name or null
+
+This makes manually-added mappings permanent and automatic.
 
 ---
+
+## Files to Modify
+
+| File | Changes |
+|------|---------|
+| `supabase/functions/_shared/match-poly-to-book.ts` | Add failure reason codes |
+| `supabase/functions/polymarket-monitor/index.ts` | Bump to v1.3, add `logMatchFailure()`, split metrics |
+| `supabase/functions/watch-mode-poll/index.ts` | Add failure logging (mirrors monitor) |
+| `supabase/functions/_shared/canonicalize.ts` | Query `team_mappings` for learned aliases |
 
 ## Files to Create
 
 | File | Purpose |
 |------|---------|
-| `src/lib/core-logic-v1.0.ts` | Frozen v1.0 document + constants |
-| `src/lib/core-logic-v1.1.ts` | Experimental v1.1 document + constants |
-
-## Files to Modify
-
-| File | Change |
-|------|--------|
-| `src/lib/core-logic-document.ts` | Refactor to import/export versions |
-| `supabase/functions/polymarket-monitor/index.ts` | Import version constants, tag signals |
-| `src/types/arbitrage.ts` | Add `core_logic_version` to types |
-| `src/pages/CoreLogic.tsx` | Add version selector UI |
-| `src/components/terminal/SignalCard.tsx` | Display version badge |
-| Database migration | Add `core_logic_version` column |
+| `src/components/terminal/UnmatchedTeamsPanel.tsx` | UI for resolving team mappings |
 
 ---
 
-## Database Migration
-
-```sql
--- Migration: Add core_logic_version tracking
-ALTER TABLE signal_opportunities 
-ADD COLUMN IF NOT EXISTS core_logic_version TEXT DEFAULT 'v1.0';
-
-ALTER TABLE signal_logs 
-ADD COLUMN IF NOT EXISTS core_logic_version TEXT;
-
--- Index for version-based queries
-CREATE INDEX IF NOT EXISTS idx_signals_version 
-ON signal_opportunities(core_logic_version);
-
--- Backfill existing signals as v1.0
-UPDATE signal_opportunities 
-SET core_logic_version = 'v1.0' 
-WHERE core_logic_version IS NULL;
-```
-
----
-
-## v1.1 Changes Summary (Proposed)
-
-The experimental v1.1 version relaxes constraints to increase signal volume:
-
-| Parameter | v1.0 | v1.1 | Rationale |
-|-----------|------|------|-----------|
-| Movement threshold | 6.0% | 5.0% | Catch smaller but significant moves |
-| Velocity threshold | 0.4%/min | 0.3%/min | Lower bar for sustained moves |
-| S2 confidence | >= 60 | >= 55 | Allow slightly lower confidence |
-| S2 book prob | >= 52% | >= 50% | Include coinflip scenarios |
-| S1 confidence | >= 45 | >= 40 | Wider S1 funnel |
-| Cooldown | 30 min | 20 min | Faster signal refresh |
-| Max S2/hour | 12 | 20 | Higher throughput |
-| Liquidity pref | $10K | $5K | Include smaller markets |
-
----
-
-## Expected Outcome
+## Success Criteria
 
 After implementation:
-- **v1.0**: Preserved as immutable baseline, signals tagged `v1.0`
-- **v1.1**: Active experimental version, signals tagged `v1.1`
-- **Auditability**: Every signal shows which logic version generated it
-- **Comparison**: Stats page enables v1.0 vs v1.1 performance analysis
-- **Rollback**: Can revert to v1.0 by changing `ACTIVE_VERSION`
+1. `match_failures` table populates with every unmatched market
+2. Logs show `[V1.3]` prefix with split coverage/match metrics
+3. Signals tagged with `core_logic_version = 'v1.3'`
+4. UI panel shows pending failures and allows resolution
+5. Resolved mappings persist and auto-apply to future scans
 
 ---
 
-## Implementation Order
+## Technical Notes
 
-1. Database migration (add column)
-2. Create `src/lib/core-logic-v1.0.ts` (frozen copy)
-3. Create `src/lib/core-logic-v1.1.ts` (experimental variant)
-4. Refactor `src/lib/core-logic-document.ts` (version switching)
-5. Update `polymarket-monitor/index.ts` (use constants, tag signals)
-6. Update `src/types/arbitrage.ts` (add version type)
-7. Update `CoreLogic.tsx` (version selector)
-8. Update `SignalCard.tsx` (version badge)
-9. Update `Stats.tsx` (version comparison)
+- **Database upsert key:** Use `poly_condition_id` as the unique key for `match_failures`
+- **Increment counter:** On duplicate, increment `occurrence_count` and update `last_seen_at`
+- **RLS:** `match_failures` uses service role for writes, public read - already configured
+- **team_mappings query:** Cache results per scan to avoid N+1 queries
 
