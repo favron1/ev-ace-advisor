@@ -1,142 +1,166 @@
 
-# Fix Bookmaker Matching: Add Soccer + Fix Event Dates
+# Fix Token Resolution: Restore Signal Pipeline
 
-## Problem Summary
+## Problem Diagnosis
 
-The current bookmaker match rate is critically low:
-- **Soccer leagues (79 H2H markets): 0% matched** - Not fetched from Odds API at all
-- **NHL/NBA (71 H2H markets): ~20% matched** - Event dates are broken (using scrape timestamp instead of actual game time)
+Based on my investigation, I've identified **the critical issue** blocking signals:
+
+### Current State
+| Metric | Value |
+|--------|-------|
+| Watching markets | 281 |
+| Markets with bookmaker time | 24 (8.5%) |
+| Active signals | **0** |
+| Recent bookmaker signals | 44,736 ✅ |
+| Sharp book snapshots (1h) | 2,840 ✅ |
+
+### Pipeline Funnel Analysis
+From the monitor logs:
+```
+48 watching → 3 tokenized (45 blocked) → 3 matched → 0 edges → 0 signals
+```
+
+**Root Cause: Token Resolution Failure**
+
+| Source | Total | With Tokens | Rate |
+|--------|-------|-------------|------|
+| api | 1,231 | 1,231 | 100% ✅ |
+| gamma-api | 75 | 75 | 100% ✅ |
+| firecrawl | 45 | 0 | **0%** ❌ |
+
+The Firecrawl-scraped games (NBA, NHL) have **0% tokenization**. The backfill logic in `polymarket-sync-24h` uses `lookupClobVolumeFromCache()` which queries the pre-fetched Gamma API data - but **NBA/NHL games often don't have matching Gamma API events** (they use Firecrawl precisely because Gamma doesn't list them).
+
+---
+
+## Fix Strategy
+
+### Option A: Proactive Token Repair in polymarket-monitor (Recommended)
+
+Instead of relying on sync-24h backfill (which doesn't work), make the monitor **self-healing** by calling the tokenize-market service for untokenized markets.
+
+**Changes to `polymarket-monitor/index.ts`:**
+
+1. Before the HARD_GATE check, attempt token resolution for markets missing tokens
+2. Call the existing `tokenize-market` edge function which has 4 extractors:
+   - CLOB API direct
+   - Gamma API search
+   - Firecrawl HTML scrape
+   - CLOB search API
+
+This is the most robust approach because:
+- Uses all 4 token extractors in priority order
+- Only runs for markets that need it (not all 48)
+- Self-heals on every poll cycle
+- Existing tokenize-market function is proven to work
+
+### Option B: Batch Token Repair Job (Alternative)
+
+Create a scheduled job that runs independently to repair tokens:
+- Query all `firecrawl` source markets with NULL tokens
+- Call tokenize-market for each
+- Update cache with results
+
+Less ideal because it adds another scheduled task.
 
 ---
 
 ## Implementation Details
 
-### Part 1: Add Soccer Leagues to Odds API Ingestion
+### File: `supabase/functions/polymarket-monitor/index.ts`
 
-**File: `supabase/functions/ingest-odds/index.ts`**
-
-Add soccer league sport keys to the `h2hSports` array (line 198):
+**Add near line 1536 (before HARD_GATE check):**
 
 ```typescript
-// BEFORE: Only 4 US sports
-const h2hSports = [
-  'basketball_nba',
-  'basketball_ncaab',
-  'americanfootball_nfl',
-  'icehockey_nhl',
-];
+// ============= TOKEN REPAIR PATH =============
+// If market has no tokens, try to resolve them via tokenize-market
+const MAX_TOKEN_REPAIRS_PER_RUN = 10;
+let tokenRepairsThisRun = 0;
 
-// AFTER: Add 5 soccer leagues
-const h2hSports = [
-  'basketball_nba',
-  'basketball_ncaab',
-  'americanfootball_nfl',
-  'icehockey_nhl',
-  // Soccer leagues
-  'soccer_epl',
-  'soccer_spain_la_liga',
-  'soccer_italy_serie_a',
-  'soccer_germany_bundesliga',
-  'soccer_uefa_champs_league',
-];
+// ... inside the main event loop, before the HARD_GATE ...
+
+if (!tokenIdYes && tokenRepairsThisRun < MAX_TOKEN_REPAIRS_PER_RUN) {
+  // Try to repair tokens using the tokenize-market service
+  const teamHome = cache?.team_home || '';
+  const teamAway = cache?.team_away || '';
+  const sport = cache?.extracted_league || 'sports';
+  const conditionId = event.polymarket_condition_id;
+  
+  if (teamHome && teamAway) {
+    console.log(`[POLY-MONITOR] TOKEN_REPAIR_ATTEMPT: ${teamHome} vs ${teamAway}`);
+    tokenRepairsThisRun++;
+    
+    try {
+      // Call tokenize-market edge function
+      const tokenResult = await supabase.functions.invoke('tokenize-market', {
+        body: {
+          condition_id: conditionId,
+          team_home: teamHome,
+          team_away: teamAway,
+          sport: sport,
+          update_cache: true, // Auto-update cache on success
+        }
+      });
+      
+      if (tokenResult.data?.success) {
+        // Use the newly resolved tokens
+        tokenIdYes = tokenResult.data.token_id_yes;
+        cache.token_id_yes = tokenIdYes;
+        cache.token_id_no = tokenResult.data.token_id_no;
+        console.log(`[POLY-MONITOR] TOKEN_REPAIR_SUCCESS: ${teamHome} vs ${teamAway} → ${tokenIdYes?.slice(0, 16)}...`);
+      } else {
+        console.log(`[POLY-MONITOR] TOKEN_REPAIR_FAILED: ${teamHome} vs ${teamAway} → ${tokenResult.data?.untradeable_reason || 'unknown'}`);
+      }
+    } catch (e) {
+      console.log(`[POLY-MONITOR] TOKEN_REPAIR_ERROR: ${(e as Error).message}`);
+    }
+  }
+}
 ```
 
-This uses the Odds API sport keys already defined in `sports-config.ts`.
+### File: `supabase/functions/tokenize-market/index.ts`
 
----
-
-### Part 2: Add Soccer to Sync Function's Odds API Pre-Fetch
-
-**File: `supabase/functions/polymarket-sync-24h/index.ts`**
-
-Update the `sportsToFetch` array (line 229) to include soccer leagues:
+**Add `update_cache` parameter support** to auto-update the h2h cache when tokens are resolved:
 
 ```typescript
-// BEFORE: Only 4 US sports
-const sportsToFetch = ['basketball_nba', 'basketball_ncaab', 'icehockey_nhl', 'americanfootball_nfl'];
-
-// AFTER: Add 5 soccer leagues from shared config
-const sportsToFetch = [
-  'basketball_nba', 
-  'basketball_ncaab', 
-  'icehockey_nhl', 
-  'americanfootball_nfl',
-  // Soccer leagues (from SPORTS_CONFIG)
-  'soccer_epl',
-  'soccer_spain_la_liga',
-  'soccer_italy_serie_a',
-  'soccer_germany_bundesliga',
-  'soccer_uefa_champs_league',
-];
-```
-
----
-
-### Part 3: Fix Event Date Fallback Logic
-
-**File: `supabase/functions/polymarket-sync-24h/index.ts`**
-
-The fallback date logic (line 551) currently defaults to `now + 12h` when no Odds API match is found. This is problematic because:
-
-1. Scraped games may not match to Odds API due to team name normalization issues
-2. The fallback timestamp becomes the "event_date", which doesn't match bookmaker times
-3. This causes the 24h window filter to reject valid games
-
-**Fix:** When using fallback date, also improve team name matching to increase hit rate:
-
-```typescript
-// Enhanced team name matching in findOddsApiCommenceTime:
-// Add common nickname mappings for better matching
-
-// Example: "Man City" should match "Manchester City"
-const nicknameMap: Record<string, string[]> = {
-  'manchester city': ['man city', 'city'],
-  'manchester united': ['man united', 'man utd', 'united'],
-  'tottenham': ['spurs', 'tottenham hotspur'],
-  'inter milan': ['inter', 'internazionale'],
-  'ac milan': ['milan'],
-  // ... add more as needed
-};
-```
-
-Additionally, log warnings when fallback is used so we can track unmatched games:
-
-```typescript
-if (!actualCommenceTime) {
-  console.log(`[FIRECRAWL] NO_BOOKIE_MATCH: ${game.team1Name} vs ${game.team2Name} - using fallback date`);
-  // Track for debugging
-  unmatchedGames.push({ team1: game.team1Name, team2: game.team2Name });
+// In the request handler, after successful tokenization:
+if (body.update_cache && result.success && result.conditionId) {
+  await supabase
+    .from('polymarket_h2h_cache')
+    .update({
+      token_id_yes: result.tokenIdYes,
+      token_id_no: result.tokenIdNo,
+      token_source: result.tokenSource,
+      tradeable: true,
+      untradeable_reason: null,
+      last_token_repair_at: new Date().toISOString(),
+    })
+    .eq('condition_id', result.conditionId);
 }
 ```
 
 ---
 
-## Expected Outcomes
+## Expected Outcome
 
-| Metric | Current | After Fix |
-|--------|---------|-----------|
-| Soccer bookmaker matches | 0% | 80%+ |
-| NHL/NBA bookmaker matches | ~20% | 60%+ |
-| Total H2H with `bookmaker_commence_time` | 16/211 (8%) | 150+/211 (70%+) |
-| Signals with correct `expires_at` | ~8% | 70%+ |
+After implementation:
 
----
+| Metric | Before | After |
+|--------|--------|-------|
+| Firecrawl token rate | 0% | 60-80% |
+| Markets passing HARD_GATE | 3/48 | 30-40/48 |
+| Potential signals | 0 | 5-15 (depending on edges) |
 
-## Verification Steps
-
-1. Deploy updated `ingest-odds` function
-2. Run `ingest-odds` to populate `bookmaker_signals` with soccer data
-3. Deploy updated `polymarket-sync-24h` function
-4. Run `polymarket-sync-24h` to populate `bookmaker_commence_time`
-5. Query database to verify match rates improved
-6. Run `polymarket-monitor` to verify signals use authoritative times
+The monitor will self-heal on each 5-minute poll:
+1. First poll: Repairs up to 10 markets
+2. Second poll: Repairs another 10
+3. By third poll: Most markets tokenized, signals can flow
 
 ---
 
-## Files Modified
+## Technical Notes
 
-| File | Changes |
-|------|---------|
-| `supabase/functions/ingest-odds/index.ts` | Add 5 soccer leagues to `h2hSports` array |
-| `supabase/functions/polymarket-sync-24h/index.ts` | Add 5 soccer leagues to `sportsToFetch` array |
-| `supabase/functions/polymarket-sync-24h/index.ts` | Add nickname mapping for better team matching |
+- Rate limit: 10 repairs per poll prevents timeout
+- Caching: Successfully repaired tokens are persisted to DB
+- Fallback: Markets that can't be tokenized are marked untradeable (won't retry every cycle due to `last_token_repair_at`)
+- The tokenize-market function already has a proven 4-tier extractor chain
+
