@@ -1,45 +1,55 @@
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Download, Copy, Lock, Settings, BarChart3, LogOut } from "lucide-react";
+import { ArrowLeft, Download, Copy, Lock, Settings, BarChart3, LogOut, FlaskConical } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { toast } from "@/components/ui/sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { MarkdownRenderer } from "@/components/core-logic/MarkdownRenderer";
 import {
-  CORE_LOGIC_DOCUMENT,
-  CORE_LOGIC_VERSION,
-  CORE_LOGIC_FILENAME,
+  getCoreLogicDocument,
+  getCoreLogicFilename,
+  getVersionMetadata,
+  AVAILABLE_VERSIONS,
+  ACTIVE_CORE_LOGIC_VERSION,
+  type CoreLogicVersion,
 } from "@/lib/core-logic-document";
 
 export default function CoreLogic() {
   const navigate = useNavigate();
+  const [selectedVersion, setSelectedVersion] = useState<CoreLogicVersion>(ACTIVE_CORE_LOGIC_VERSION as CoreLogicVersion);
+  
+  const documentContent = getCoreLogicDocument(selectedVersion);
+  const filename = getCoreLogicFilename(selectedVersion);
+  const metadata = getVersionMetadata(selectedVersion);
 
   const handleDownload = () => {
-    const blob = new Blob([CORE_LOGIC_DOCUMENT], {
+    const blob = new Blob([documentContent], {
       type: "text/markdown;charset=utf-8",
     });
     const url = URL.createObjectURL(blob);
 
-    const a = document.createElement("a");
+    const a = window.document.createElement("a");
     a.href = url;
-    a.download = CORE_LOGIC_FILENAME;
-    document.body.appendChild(a);
+    a.download = filename;
+    window.document.body.appendChild(a);
     a.click();
     a.remove();
 
     URL.revokeObjectURL(url);
     toast.success("Downloaded", {
-      description: CORE_LOGIC_FILENAME,
+      description: filename,
     });
   };
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(CORE_LOGIC_DOCUMENT);
+      await navigator.clipboard.writeText(documentContent);
       toast.success("Copied to clipboard", {
-        description: "Full document content copied",
+        description: `${selectedVersion} document content copied`,
       });
     } catch (err) {
       toast.error("Failed to copy", {
@@ -114,24 +124,67 @@ export default function CoreLogic() {
 
       {/* Main Content */}
       <main className="flex-1 container px-4 py-6">
+        {/* Version Selector Tabs */}
+        <Tabs 
+          value={selectedVersion} 
+          onValueChange={(v) => setSelectedVersion(v as CoreLogicVersion)}
+          className="mb-6"
+        >
+          <TabsList className="grid w-full max-w-md grid-cols-2">
+            {AVAILABLE_VERSIONS.map((version) => {
+              const meta = getVersionMetadata(version);
+              const isActive = version === ACTIVE_CORE_LOGIC_VERSION;
+              return (
+                <TabsTrigger 
+                  key={version} 
+                  value={version}
+                  className="gap-2"
+                >
+                  {meta.status === 'frozen' ? (
+                    <Lock className="h-3 w-3" />
+                  ) : (
+                    <FlaskConical className="h-3 w-3" />
+                  )}
+                  {version}
+                  {isActive && (
+                    <Badge variant="secondary" className="text-[10px] px-1 py-0 h-4">
+                      ACTIVE
+                    </Badge>
+                  )}
+                </TabsTrigger>
+              );
+            })}
+          </TabsList>
+        </Tabs>
+
         {/* Status Bar */}
         <Card className="mb-6 bg-card/50">
           <CardContent className="py-3 px-4">
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center gap-3">
-                <Badge
-                  variant="outline"
-                  className="gap-1.5 border-amber-500/50 text-amber-500 bg-amber-500/10"
-                >
-                  <Lock className="h-3 w-3" />
-                  LOCKED
-                </Badge>
+                {metadata.status === 'frozen' ? (
+                  <Badge
+                    variant="outline"
+                    className="gap-1.5 border-amber-500/50 text-amber-500 bg-amber-500/10"
+                  >
+                    <Lock className="h-3 w-3" />
+                    FROZEN
+                  </Badge>
+                ) : (
+                  <Badge
+                    variant="outline"
+                    className="gap-1.5 border-green-500/50 text-green-500 bg-green-500/10"
+                  >
+                    <FlaskConical className="h-3 w-3" />
+                    EXPERIMENTAL
+                  </Badge>
+                )}
                 <span className="text-xs text-muted-foreground">
-                  Read-only • Single source of truth
+                  {metadata.description}
                 </span>
               </div>
               <Badge variant="secondary" className="font-mono">
-                {CORE_LOGIC_VERSION} (canonical)
+                {metadata.label}
               </Badge>
             </div>
           </CardContent>
@@ -139,9 +192,9 @@ export default function CoreLogic() {
 
         {/* Document Content */}
         <Card className="bg-card/30 border-border">
-          <ScrollArea className="h-[calc(100vh-220px)]">
+          <ScrollArea className="h-[calc(100vh-280px)]">
             <CardContent className="p-6 md:p-8">
-              <MarkdownRenderer markdown={CORE_LOGIC_DOCUMENT} />
+              <MarkdownRenderer markdown={documentContent} />
             </CardContent>
           </ScrollArea>
         </Card>

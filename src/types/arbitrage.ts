@@ -41,6 +41,9 @@ export interface BookmakerSignal {
   captured_at: string;
 }
 
+// Core Logic Version type
+export type CoreLogicVersion = 'v1.0' | 'v1.1';
+
 export interface SignalOpportunity {
   id: string;
   polymarket_market_id?: string;
@@ -69,6 +72,8 @@ export interface SignalOpportunity {
   movement_confirmed?: boolean;
   movement_velocity?: number;
   signal_tier?: 'elite' | 'strong' | 'static';
+  // Version tracking
+  core_logic_version?: CoreLogicVersion;
 }
 
 export interface SignalFactors {

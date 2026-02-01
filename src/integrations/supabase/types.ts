@@ -690,6 +690,7 @@ export type Database = {
         Row: {
           actual_result: boolean | null
           confidence_at_signal: number
+          core_logic_version: string | null
           created_at: string | null
           edge_at_signal: number
           entry_price: number
@@ -706,6 +707,7 @@ export type Database = {
         Insert: {
           actual_result?: boolean | null
           confidence_at_signal: number
+          core_logic_version?: string | null
           created_at?: string | null
           edge_at_signal: number
           entry_price: number
@@ -722,6 +724,7 @@ export type Database = {
         Update: {
           actual_result?: boolean | null
           confidence_at_signal?: number
+          core_logic_version?: string | null
           created_at?: string | null
           edge_at_signal?: number
           entry_price?: number
@@ -750,6 +753,7 @@ export type Database = {
           bookmaker_prob_fair: number | null
           bookmaker_probability: number
           confidence_score: number
+          core_logic_version: string | null
           created_at: string | null
           edge_percent: number
           event_name: string
@@ -780,6 +784,7 @@ export type Database = {
           bookmaker_prob_fair?: number | null
           bookmaker_probability: number
           confidence_score: number
+          core_logic_version?: string | null
           created_at?: string | null
           edge_percent: number
           event_name: string
@@ -810,6 +815,7 @@ export type Database = {
           bookmaker_prob_fair?: number | null
           bookmaker_probability?: number
           confidence_score?: number
+          core_logic_version?: string | null
           created_at?: string | null
           edge_percent?: number
           event_name?: string
