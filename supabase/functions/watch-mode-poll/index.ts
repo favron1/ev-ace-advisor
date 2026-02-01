@@ -1,6 +1,8 @@
 // ============================================================================
 // WATCH-MODE-POLL: H2H Movement Detection via Bookmaker Signals
 // ============================================================================
+// CORE LOGIC VERSION: v1.3 - "Match Failure Flip"
+// ============================================================================
 // This function detects arbitrage opportunities by:
 // 1. Query Polymarket H2H cache for active sports markets (24hr horizon)
 // 2. Query bookmaker_signals table for recent H2H data
@@ -8,9 +10,57 @@
 // 4. Calculate edge = bookmaker_fair_prob - polymarket_yes_price
 // 5. Store snapshots for movement tracking
 // 6. Escalate markets with edge to active monitoring
+// 7. [V1.3] Log all match failures to match_failures table
 // ============================================================================
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+const CORE_LOGIC_VERSION = 'v1.3';
+
+// ============================================================================
+// V1.3: MATCH FAILURE TYPES
+// ============================================================================
+type FailureReason = 
+  | 'TEAM_PARSE_FAILED'      // Could not extract 2 teams from event name
+  | 'NO_BOOK_GAME_FOUND'     // No matching bookmaker event found
+  | 'TEAM_ALIAS_MISSING'     // Found event but team name mismatch
+  | 'OUTCOME_NOT_FOUND';     // Matched event but no outcome for home team
+
+interface MatchFailureLog {
+  poly_event_title: string;
+  poly_team_a: string;
+  poly_team_b: string;
+  poly_condition_id: string | null;
+  sport_code: string | null;
+  failure_reason: FailureReason;
+  last_seen_at: string;
+}
+
+// ============================================================================
+// V1.3: Helper to log match failures
+// ============================================================================
+async function logMatchFailure(
+  supabase: any,
+  failure: MatchFailureLog
+): Promise<void> {
+  try {
+    await supabase.from('match_failures').upsert({
+      poly_event_title: failure.poly_event_title,
+      poly_team_a: failure.poly_team_a,
+      poly_team_b: failure.poly_team_b,
+      poly_condition_id: failure.poly_condition_id,
+      sport_code: failure.sport_code,
+      failure_reason: failure.failure_reason,
+      last_seen_at: failure.last_seen_at,
+      resolution_status: 'pending',
+    }, {
+      onConflict: 'poly_condition_id',
+      ignoreDuplicates: false,
+    });
+  } catch (err) {
+    console.warn(`[${CORE_LOGIC_VERSION}] Failed to log match failure:`, err);
+  }
+}
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -448,6 +498,14 @@ Deno.serve(async (req) => {
     let matchedCount = 0;
     let unmatchedCount = 0;
 
+    // V1.3: Split metrics tracking
+    const failureStats = {
+      team_parse_failed: 0,
+      no_book_game_found: 0,
+      team_alias_missing: 0,
+      outcome_not_found: 0,
+    };
+
     for (const polyMarket of polyMarkets as PolymarketCacheEntry[]) {
       // Extract teams from Polymarket event
       const polyEventName = polyMarket.question || polyMarket.event_title;
@@ -460,8 +518,20 @@ Deno.serve(async (req) => {
       }
 
       if (polyTeams.length !== 2) {
-        console.log(`[WATCH-MODE-POLL] Could not parse teams from: ${polyEventName}`);
+        console.log(`[${CORE_LOGIC_VERSION}] TEAM_PARSE_FAILED: ${polyEventName}`);
         unmatchedCount++;
+        failureStats.team_parse_failed++;
+        
+        // Log to match_failures
+        await logMatchFailure(supabase, {
+          poly_event_title: polyEventName,
+          poly_team_a: polyTeams[0] || 'UNKNOWN',
+          poly_team_b: polyTeams[1] || 'UNKNOWN',
+          poly_condition_id: polyMarket.condition_id,
+          sport_code: polyMarket.sport_category,
+          failure_reason: 'TEAM_PARSE_FAILED',
+          last_seen_at: new Date().toISOString(),
+        });
         continue;
       }
 
@@ -478,8 +548,20 @@ Deno.serve(async (req) => {
       }
 
       if (!matchedEventKey || matchedSignals.length === 0) {
-        console.log(`[WATCH-MODE-POLL] No bookmaker match for: ${polyEventName} (teams: ${polyTeams.join(' vs ')})`);
+        console.log(`[${CORE_LOGIC_VERSION}] NO_BOOK_GAME_FOUND: ${polyEventName} (teams: ${polyTeams.join(' vs ')})`);
         unmatchedCount++;
+        failureStats.no_book_game_found++;
+        
+        // Log to match_failures
+        await logMatchFailure(supabase, {
+          poly_event_title: polyEventName,
+          poly_team_a: polyTeams[0],
+          poly_team_b: polyTeams[1],
+          poly_condition_id: polyMarket.condition_id,
+          sport_code: polyMarket.sport_category,
+          failure_reason: 'NO_BOOK_GAME_FOUND',
+          last_seen_at: new Date().toISOString(),
+        });
         continue;
       }
 
@@ -490,7 +572,19 @@ Deno.serve(async (req) => {
       const matchedOutcome = findMatchingOutcome(homeTeam, matchedSignals);
 
       if (!matchedOutcome) {
-        console.log(`[WATCH-MODE-POLL] Matched event but no outcome for: ${homeTeam}`);
+        console.log(`[${CORE_LOGIC_VERSION}] TEAM_ALIAS_MISSING: ${homeTeam} in ${polyEventName}`);
+        failureStats.team_alias_missing++;
+        
+        // Log to match_failures - matched event but can't resolve outcome
+        await logMatchFailure(supabase, {
+          poly_event_title: polyEventName,
+          poly_team_a: polyTeams[0],
+          poly_team_b: polyTeams[1],
+          poly_condition_id: polyMarket.condition_id,
+          sport_code: polyMarket.sport_category,
+          failure_reason: 'TEAM_ALIAS_MISSING',
+          last_seen_at: new Date().toISOString(),
+        });
         continue;
       }
 
@@ -532,7 +626,7 @@ Deno.serve(async (req) => {
       // Calculate edge
       const edge = (vigFreeFairProb - polyMarket.yes_price) * 100;
 
-      console.log(`[WATCH-MODE-POLL] Match: ${polyEventName.substring(0, 40)}... | Book: ${(vigFreeFairProb * 100).toFixed(1)}% | Poly: ${(polyMarket.yes_price * 100).toFixed(1)}% | Edge: ${edge.toFixed(1)}%`);
+      console.log(`[${CORE_LOGIC_VERSION}] Match: ${polyEventName.substring(0, 40)}... | Book: ${(vigFreeFairProb * 100).toFixed(1)}% | Poly: ${(polyMarket.yes_price * 100).toFixed(1)}% | Edge: ${edge.toFixed(1)}%`);
 
       if (edge >= MIN_EDGE_PCT) {
         edgesFound.push({
@@ -545,7 +639,18 @@ Deno.serve(async (req) => {
       }
     }
 
-    console.log(`[WATCH-MODE-POLL] Matched: ${matchedCount}/${polyMarkets.length} markets, Unmatched: ${unmatchedCount}`);
+    // ========================================================================
+    // V1.3: SPLIT METRICS LOGGING
+    // ========================================================================
+    const bookCoverageAvailable = matchedCount + failureStats.team_alias_missing;
+    const bookCoverageMissing = failureStats.no_book_game_found;
+    const matchRateCovered = bookCoverageAvailable > 0 
+      ? ((matchedCount / bookCoverageAvailable) * 100).toFixed(1) 
+      : '0.0';
+
+    console.log(`[${CORE_LOGIC_VERSION}] COVERAGE: ${bookCoverageAvailable}/${polyMarkets.length} markets have book data (${((bookCoverageAvailable / polyMarkets.length) * 100).toFixed(0)}%)`);
+    console.log(`[${CORE_LOGIC_VERSION}] MATCH_RATE_COVERED: ${matchedCount}/${bookCoverageAvailable} matched (${matchRateCovered}%)`);
+    console.log(`[${CORE_LOGIC_VERSION}] FAILURES: ${failureStats.team_alias_missing} team_alias, ${failureStats.team_parse_failed} parse_failed, ${failureStats.no_book_game_found} no_book_data`);
 
     // ========================================================================
     // STEP 4: Store snapshots
@@ -556,9 +661,9 @@ Deno.serve(async (req) => {
         .insert(snapshots);
 
       if (insertError) {
-        console.error('[WATCH-MODE-POLL] Snapshot insert error:', insertError);
+        console.error(`[${CORE_LOGIC_VERSION}] Snapshot insert error:`, insertError);
       } else {
-        console.log(`[WATCH-MODE-POLL] Stored ${snapshots.length} snapshots`);
+        console.log(`[${CORE_LOGIC_VERSION}] Stored ${snapshots.length} snapshots`);
       }
     }
 
@@ -613,7 +718,7 @@ Deno.serve(async (req) => {
 
       if (!upsertError) {
         escalatedCount++;
-        console.log(`[WATCH-MODE-POLL] Escalated: ${polyMarket.question.substring(0, 40)}... (+${edge.toFixed(1)}%)`);
+        console.log(`[${CORE_LOGIC_VERSION}] Escalated: ${polyMarket.question.substring(0, 40)}... (+${edge.toFixed(1)}%)`);
       }
     }
 
@@ -650,15 +755,20 @@ Deno.serve(async (req) => {
       .lt('captured_at', cleanupTime);
 
     const duration = Date.now() - startTime;
-    console.log(`[WATCH-MODE-POLL] Complete in ${duration}ms`);
+    console.log(`[${CORE_LOGIC_VERSION}] Complete in ${duration}ms`);
 
     return new Response(
       JSON.stringify({
         success: true,
+        core_logic_version: CORE_LOGIC_VERSION,
         polymarket_count: polyMarkets.length,
         bookmaker_signals_count: bookmakerSignals.length,
         matched_markets: matchedCount,
         unmatched_markets: unmatchedCount,
+        book_coverage_available: bookCoverageAvailable,
+        book_coverage_missing: bookCoverageMissing,
+        match_rate_covered_pct: parseFloat(matchRateCovered),
+        failure_stats: failureStats,
         snapshots_stored: snapshots.length,
         edges_found: edgesFound.length,
         escalated_to_active: escalatedCount,
