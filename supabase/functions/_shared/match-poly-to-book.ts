@@ -21,9 +21,21 @@ export type MatchMethod =
   | 'fuzzy_last_resort'    // Found via legacy fuzzy matching
   | null;                  // No match found
 
+// ============================================================================
+// V1.3 FAILURE REASON CODES
+// ============================================================================
+// When match fails, we now track WHY for observability and self-healing
+export type FailureReason = 
+  | 'TEAM_ALIAS_MISSING'        // Team name couldn't be resolved via teamMap
+  | 'NO_BOOK_GAME_FOUND'        // No bookmaker events for this matchup key
+  | 'START_TIME_MISMATCH'       // Candidates found but time window filter rejected all
+  | 'MULTIPLE_GAMES_AMBIGUOUS'  // Multiple candidates, can't determine correct one
+  | null;                       // No failure (match succeeded)
+
 export interface MatchResult {
   match: BookEvent | null;
   method: MatchMethod;
+  failureReason: FailureReason;  // V1.3: Always populated when match is null
   debug: {
     polyTeams: [string, string];
     resolvedTeams: [string | null, string | null];
@@ -106,9 +118,14 @@ export function matchPolyMarket(
   
   debug.resolvedTeams = [team1Resolved, team2Resolved];
   
-  // If either team fails to resolve, return no match
+  // V1.3: If either team fails to resolve, return with TEAM_ALIAS_MISSING reason
   if (!team1Resolved || !team2Resolved) {
-    return { match: null, method: null, debug };
+    return { 
+      match: null, 
+      method: null, 
+      failureReason: 'TEAM_ALIAS_MISSING',
+      debug,
+    };
   }
   
   // Step 2: Generate canonical key
@@ -122,8 +139,14 @@ export function matchPolyMarket(
   // Step 3: Lookup candidates from index
   const candidates = bookIndex.get(lookupKey);
   
+  // V1.3: If no candidates found, return with NO_BOOK_GAME_FOUND reason
   if (!candidates || candidates.length === 0) {
-    return { match: null, method: null, debug };
+    return { 
+      match: null, 
+      method: null, 
+      failureReason: 'NO_BOOK_GAME_FOUND',
+      debug,
+    };
   }
   
   debug.candidatesFound = candidates.length;
@@ -143,6 +166,7 @@ export function matchPolyMarket(
       return { 
         match: candidate, 
         method: 'canonical_exact',
+        failureReason: null,
         debug,
       };
     }
@@ -164,14 +188,20 @@ export function matchPolyMarket(
   debug.timeFilterPassed = passedTimeFilter;
   debug.timeDiffHours = best ? hoursDiff(new Date(best.commence_time), polyDate!) : null;
   
+  // V1.3: If time filter rejected all candidates, return with START_TIME_MISMATCH reason
   if (!best) {
-    return { match: null, method: null, debug };
+    return { 
+      match: null, 
+      method: null, 
+      failureReason: 'START_TIME_MISMATCH',
+      debug,
+    };
   }
   
   // Determine method based on how close the match is
   const method: MatchMethod = debug.timeDiffHours! < 24 ? 'canonical_exact' : 'canonical_time';
   
-  return { match: best, method, debug };
+  return { match: best, method, failureReason: null, debug };
 }
 
 /**
@@ -194,6 +224,7 @@ export function matchWithCanonicalPrimary(
     return {
       match: null,
       method: null,
+      failureReason: 'TEAM_ALIAS_MISSING',
       debug: {
         polyTeams: [eventName, ''],
         resolvedTeams: [null, null],
