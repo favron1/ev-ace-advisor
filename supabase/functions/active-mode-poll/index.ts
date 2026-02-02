@@ -559,22 +559,15 @@ Deno.serve(async (req) => {
       }
 
       // ======================================================================
-      // STEP 2: Refresh bookmaker price
+      // STEP 2: Use bookmaker probability from watch-mode-poll
       // ======================================================================
-      let liveBookmakerProb = event.current_probability;
-
-      if (event.bookmaker_source && event.bookmaker_market_key) {
-        const bookProb = await refreshBookmakerPrice(
-          event.bookmaker_source,
-          event.bookmaker_market_key,
-          ODDS_API_KEY
-        );
-        results.bookmaker_refreshes++;
-        
-        if (bookProb) {
-          liveBookmakerProb = bookProb;
-        }
-      }
+      // IMPORTANT: watch-mode-poll already calculated the correct vig-free fair probability
+      // including NHL 3→2 normalization. We should use that stored value, not re-fetch
+      // from outrights API (which is for championship futures, not H2H games).
+      // 
+      // For H2H markets, the correct probability is already in event_watch_state.current_probability
+      // as set by watch-mode-poll's edge detection logic.
+      const liveBookmakerProb = event.current_probability;
 
       // ======================================================================
       // STEP 3: Calculate live edge
