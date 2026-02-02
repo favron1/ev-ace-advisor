@@ -40,6 +40,16 @@ const SHARP_BOOKS = ['pinnacle', 'betfair', 'betfair_ex_eu'];
 // V1.3: "Match Failure Flip" - observability layer for silent signal drops
 const CORE_LOGIC_VERSION = 'v1.3';
 
+// ============= CORE LOGIC v1.3 THRESHOLDS =============
+// These constants define the gates for signal quality (from canonical spec)
+const V1_3_GATES = {
+  S2_BOOK_PROB_MIN: 0.50,    // 50% minimum for execution-eligible (S2)
+  S1_BOOK_PROB_MIN: 0.45,    // 45% minimum for any signal (S1)
+  S2_CONFIDENCE_MIN: 55,      // Confidence floor for S2
+  S2_TIME_TO_START_MIN: 10,   // Minutes to event start for S2
+  SMS_TIERS: ['elite', 'strong'] as const,  // Only these tiers get SMS
+} as const;
+
 // AI resolution cache - persists across poll cycles
 const aiResolvedNames = new Map<string, { homeTeam: string; awayTeam: string } | null>();
 
@@ -568,14 +578,22 @@ async function detectSharpMovement(
   return { triggered: false, velocity: 0, booksConfirming: 0, direction: null };
 }
 
-// Determine signal tier based on movement + edge
-// High-edge (10%+) signals get promoted to at least "strong" tier for SMS eligibility
+// Determine signal tier based on movement + edge + book probability
+// v1.3: Book probability is now required for tier elevation
 function calculateSignalTier(
   movementTriggered: boolean,
-  netEdge: number
+  netEdge: number,
+  bookProbability: number  // NEW: Required for v1.3 compliance
 ): 'elite' | 'strong' | 'static' {
-  // High edge alone (10%+) qualifies as at least strong - ensures SMS gets sent
-  if (netEdge >= 0.10) {
+  // v1.3: Low book probability caps tier at STATIC regardless of edge
+  // Signals with <45% book prob are fundamentally not tradeable
+  if (bookProbability < V1_3_GATES.S1_BOOK_PROB_MIN) {
+    console.log(`[V1.3] TIER_CAP: bookProb=${(bookProbability * 100).toFixed(1)}% < ${V1_3_GATES.S1_BOOK_PROB_MIN * 100}% floor -> STATIC`);
+    return 'static';
+  }
+  
+  // High edge alone (10%+) qualifies as at least strong IF book prob is valid (>=50%)
+  if (netEdge >= 0.10 && bookProbability >= V1_3_GATES.S2_BOOK_PROB_MIN) {
     return movementTriggered ? 'elite' : 'strong';
   }
   
@@ -2388,6 +2406,24 @@ Deno.serve(async (req) => {
             funnelStats.edges_over_threshold++;
           }
           
+          // ============= STAGE 3.5: BOOK PROBABILITY GATE (v1.3) =============
+          // Book probability must meet minimum thresholds for signal quality
+          // This prevents low-probability signals from reaching the feed
+          if (recommendedFairProb < V1_3_GATES.S1_BOOK_PROB_MIN) {
+            console.log(`[V1.3] BOOK_PROB_GATE_REJECT: ${event.event_name} - ${(recommendedFairProb * 100).toFixed(1)}% < ${V1_3_GATES.S1_BOOK_PROB_MIN * 100}% floor`);
+            continue; // REJECT - book probability too low for any signal
+          }
+          
+          // Determine signal state based on book probability
+          let signalState: 'S2_EXECUTION_ELIGIBLE' | 'S1_PROMOTE' | 'WATCH' = 'WATCH';
+          if (recommendedFairProb >= V1_3_GATES.S2_BOOK_PROB_MIN) {
+            signalState = 'S2_EXECUTION_ELIGIBLE';
+          } else if (recommendedFairProb >= V1_3_GATES.S1_BOOK_PROB_MIN) {
+            signalState = 'S1_PROMOTE';
+          }
+          console.log(`[V1.3] GATE_CHECK: ${event.event_name} | bookProb=${(recommendedFairProb * 100).toFixed(1)}% | state=${signalState}`);
+          // ============= END STAGE 3.5 =============
+          
           if (rawEdge >= 0.02) {
             // CRITICAL FIX #3: Staleness & high-prob edge gating
             // Gate against artifact edges on high-probability outcomes
@@ -2425,7 +2461,7 @@ Deno.serve(async (req) => {
             }
             
             // Calculate base tier, then apply movement boost
-            let signalTier = calculateSignalTier(movementTriggered, netEdge);
+            let signalTier = calculateSignalTier(movementTriggered, netEdge, recommendedFairProb);
             
             // Movement boost can upgrade tier: STATIC -> STRONG -> ELITE
             if (movementBoost >= 2 && signalTier === 'static') {
@@ -2636,21 +2672,28 @@ Deno.serve(async (req) => {
               funnelStats.signals_created++;
             }
 
-            // Send SMS for ALL new signals added to the feed (user request)
+            // Send SMS ONLY for ELITE and STRONG signals (v1.3 compliance)
+            // STATIC tier signals should never trigger SMS notifications
             if (!signalError && signal && !existingSignal) {
-              console.log(`[POLY-MONITOR] New signal created - sending SMS: tier=${signalTier}, rawEdge=${(rawEdge * 100).toFixed(1)}%`);
-              const alertSent = await sendSmsAlert(
-                supabase, event, livePolyPrice, recommendedFairProb,
-                rawEdge, netEdge, liveVolume, stakeAmount, marketType, recommendedOutcome,
-                signalTier, movement.velocity, betSide, movement.direction
-              );
+              const SMS_ELIGIBLE_TIERS: readonly string[] = V1_3_GATES.SMS_TIERS;
               
-              if (alertSent) {
-                alertsSent++;
-                await supabase
-                  .from('event_watch_state')
-                  .update({ watch_state: 'alerted', updated_at: now.toISOString() })
-                  .eq('id', event.id);
+              if (SMS_ELIGIBLE_TIERS.includes(signalTier)) {
+                console.log(`[V1.3] SMS SENDING: tier=${signalTier}, edge=${(rawEdge * 100).toFixed(1)}%, bookProb=${(recommendedFairProb * 100).toFixed(1)}%`);
+                const alertSent = await sendSmsAlert(
+                  supabase, event, livePolyPrice, recommendedFairProb,
+                  rawEdge, netEdge, liveVolume, stakeAmount, marketType, recommendedOutcome,
+                  signalTier, movement.velocity, betSide, movement.direction
+                );
+                
+                if (alertSent) {
+                  alertsSent++;
+                  await supabase
+                    .from('event_watch_state')
+                    .update({ watch_state: 'alerted', updated_at: now.toISOString() })
+                    .eq('id', event.id);
+                }
+              } else {
+                console.log(`[V1.3] SMS BLOCKED: tier=${signalTier} not in [${SMS_ELIGIBLE_TIERS.join(', ')}] - signal created but no SMS`);
               }
             }
           }
