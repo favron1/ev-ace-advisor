@@ -120,6 +120,17 @@ const isPastOrStale = (event: WatchEvent) => {
   return false;
 };
 
+// Detect futures markets that shouldn't be in the pipeline (only H2H games belong here)
+const isFuturesMarket = (event: WatchEvent) => {
+  const name = event.event_name.toLowerCase();
+  const futuresPatterns = [
+    'traded', 'trade', 'win totals', 'over or under',
+    'trophy', 'championship', 'mvp', 'winner', 'playoffs',
+    'division', 'conference', 'which', 'where will', 'will be'
+  ];
+  return futuresPatterns.some(p => name.includes(p));
+};
+
 export default function Pipeline() {
   const [watchEvents, setWatchEvents] = useState<WatchEvent[]>([]);
   const [signals, setSignals] = useState<Signal[]>([]);
@@ -321,15 +332,18 @@ export default function Pipeline() {
     return () => clearInterval(interval);
   }, []);
 
-  // Group events by state
-  const eventsByState = watchEvents.filter(e => !isPastOrStale(e)).reduce((acc, event) => {
+  // Filter out futures and past/stale events, then group by state
+  const filteredEvents = watchEvents.filter(e => !isPastOrStale(e) && !isFuturesMarket(e));
+  
+  const eventsByState = filteredEvents.reduce((acc, event) => {
     const state = event.watch_state || 'unknown';
     if (!acc[state]) acc[state] = [];
     acc[state].push(event);
     return acc;
   }, {} as Record<string, WatchEvent[]>);
 
-  const stateOrder = ['signal', 'confirmed', 'active', 'monitored', 'watching', 'dropped', 'expired'];
+  // Only show active pipeline states (no expired/dropped)
+  const stateOrder = ['signal', 'confirmed', 'active', 'monitored', 'watching'];
   const stateCounts = stateOrder.map(state => ({
     state,
     count: eventsByState[state]?.length || 0
@@ -385,7 +399,7 @@ export default function Pipeline() {
         {/* Main Content Tabs */}
         <Tabs defaultValue="all" className="space-y-4">
           <TabsList>
-            <TabsTrigger value="all">All Events ({watchEvents.filter(e => e.watch_state !== 'expired' && !isPastOrStale(e)).length})</TabsTrigger>
+            <TabsTrigger value="all">All Events ({filteredEvents.filter(e => e.watch_state !== 'expired' && e.watch_state !== 'dropped').length})</TabsTrigger>
             <TabsTrigger value="active">Active Pipeline ({(eventsByState['active']?.length || 0) + (eventsByState['monitored']?.length || 0)})</TabsTrigger>
             <TabsTrigger value="signals">Signals ({signals.length})</TabsTrigger>
             <TabsTrigger value="snapshots">Recent Snapshots</TabsTrigger>
@@ -412,10 +426,10 @@ export default function Pipeline() {
                   <div className="space-y-2">
                     {loading ? (
                       <div className="text-center py-8 text-muted-foreground">Loading...</div>
-                    ) : watchEvents.filter(e => e.watch_state !== 'expired' && !isPastOrStale(e)).length === 0 ? (
+                    ) : filteredEvents.filter(e => e.watch_state !== 'expired' && e.watch_state !== 'dropped').length === 0 ? (
                       <div className="text-center py-8 text-muted-foreground">No events in pipeline</div>
                     ) : (
-                      sortEvents(watchEvents.filter(e => e.watch_state !== 'expired' && !isPastOrStale(e))).map((event) => (
+                      sortEvents(filteredEvents.filter(e => e.watch_state !== 'expired' && e.watch_state !== 'dropped')).map((event) => (
                         <div
                           key={event.id}
                           className="p-3 rounded-lg border bg-card hover:bg-muted/50 transition-colors"
