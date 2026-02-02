@@ -227,6 +227,8 @@ interface PolymarketCacheEntry {
   team_away_normalized: string | null;
   sport_category: string | null;
   market_type: string | null;
+  event_date?: string | null;
+  bookmaker_commence_time?: string | null;
   yes_price: number;
   no_price: number;
   volume: number;
@@ -242,7 +244,23 @@ interface BookmakerSignal {
   implied_probability: number;
   market_type: string;
   captured_at: string;
+  commence_time?: string | null;
   is_sharp_book: boolean | null;
+}
+
+function inferCommenceTime(polyMarket: PolymarketCacheEntry, matchedSignals: BookmakerSignal[] | null): string | null {
+  // Prefer bookmaker commence_time (most reliable), then cached commence time, then Polymarket event_date
+  const fromBook = matchedSignals?.[0]?.commence_time || null;
+  const fromCache = (polyMarket.bookmaker_commence_time as string | null) || null;
+  const fromPoly = (polyMarket.event_date as string | null) || null;
+  return fromBook || fromCache || fromPoly;
+}
+
+function isPastCommenceTime(commenceTime: string | null, graceMinutes = 30): boolean {
+  if (!commenceTime) return false;
+  const t = new Date(commenceTime).getTime();
+  if (Number.isNaN(t)) return false;
+  return t < Date.now() - graceMinutes * 60 * 1000;
 }
 
 // ============================================================================
@@ -629,6 +647,7 @@ Deno.serve(async (req) => {
       edge: number;
       matchedTeam: string;
       matchedEvent: string;
+      commenceTime: string | null;
     }> = [];
 
     // V1.3.1: Track ALL matched markets for "monitored" state (not just edges)
@@ -639,6 +658,7 @@ Deno.serve(async (req) => {
       edge: number;
       matchedTeam: string;
       matchedEvent: string;
+      commenceTime: string | null;
     }> = [];
 
     const snapshots: Array<{
@@ -721,6 +741,21 @@ Deno.serve(async (req) => {
       }
 
       matchedCount++;
+
+      // Use bookmaker commence_time when available to prevent past events hanging around with NULL commence_time
+      const commenceTime = inferCommenceTime(polyMarket, matchedSignals);
+      if (isPastCommenceTime(commenceTime, 30)) {
+        // If we already have a watch_state row, force-expire it; otherwise just skip
+        try {
+          await supabase
+            .from('event_watch_state')
+            .update({ watch_state: 'expired', commence_time: commenceTime })
+            .eq('event_key', `poly_${polyMarket.condition_id}`);
+        } catch (_) {
+          // ignore
+        }
+        continue;
+      }
 
       // Find the specific outcome matching Polymarket's team_home (the YES side)
       const homeTeam = polyMarket.team_home || polyTeams[0];
@@ -809,6 +844,7 @@ Deno.serve(async (req) => {
         edge,
         matchedTeam: homeTeam,
         matchedEvent: matchedSignals[0].event_name,
+        commenceTime,
       });
 
       if (edge >= MIN_EDGE_PCT) {
@@ -818,6 +854,7 @@ Deno.serve(async (req) => {
           edge,
           matchedTeam: homeTeam,
           matchedEvent: matchedSignals[0].event_name,
+          commenceTime,
         });
       }
     }
@@ -870,7 +907,7 @@ Deno.serve(async (req) => {
     let velocityTriggeredCount = 0;
 
     for (const edgeData of toEscalate) {
-      const { polyMarket, bookmakerFairProb, edge, matchedTeam } = edgeData;
+      const { polyMarket, bookmakerFairProb, edge, matchedTeam, commenceTime } = edgeData;
       
       const eventKey = `poly_${polyMarket.condition_id}`;
       const activeUntil = new Date(Date.now() + ACTIVE_WINDOW_MINUTES * 60 * 1000).toISOString();
@@ -899,6 +936,7 @@ Deno.serve(async (req) => {
           event_key: eventKey,
           event_name: polyMarket.question,
           watch_state: 'active',
+          commence_time: commenceTime,
           polymarket_condition_id: polyMarket.condition_id,
           polymarket_question: polyMarket.question,
           polymarket_yes_price: polyMarket.yes_price,
@@ -928,7 +966,7 @@ Deno.serve(async (req) => {
 
     // Store non-escalated edges in watching state (with velocity data)
     for (const edgeData of edgesFound.filter(e => !toEscalate.includes(e))) {
-      const { polyMarket, bookmakerFairProb, edge, matchedTeam } = edgeData;
+      const { polyMarket, bookmakerFairProb, edge, matchedTeam, commenceTime } = edgeData;
       const eventKey = `poly_${polyMarket.condition_id}`;
       
       // V1.3: Book probability gate for watching state too
@@ -946,6 +984,7 @@ Deno.serve(async (req) => {
           event_key: eventKey,
           event_name: polyMarket.question,
           watch_state: 'watching',
+          commence_time: commenceTime,
           polymarket_condition_id: polyMarket.condition_id,
           polymarket_question: polyMarket.question,
           polymarket_yes_price: polyMarket.yes_price,
@@ -970,7 +1009,7 @@ Deno.serve(async (req) => {
     const escalatedKeys = new Set(toEscalate.map(e => `poly_${e.polyMarket.condition_id}`));
     
     for (const matchData of allMatchedMarkets) {
-      const { polyMarket, bookmakerFairProb, edge, matchedTeam } = matchData;
+      const { polyMarket, bookmakerFairProb, edge, matchedTeam, commenceTime } = matchData;
       const eventKey = `poly_${polyMarket.condition_id}`;
       
       // Skip if already escalated to active/watching (higher priority state)
@@ -997,6 +1036,7 @@ Deno.serve(async (req) => {
             bookmaker_source: normalizeSportCategory(polyMarket.sport_category),
             polymarket_yes_price: polyMarket.yes_price,
             polymarket_volume: polyMarket.volume,
+            commence_time: commenceTime,
             last_poly_refresh: new Date().toISOString(),
           })
           .eq('event_key', eventKey);
@@ -1010,6 +1050,7 @@ Deno.serve(async (req) => {
           event_key: eventKey,
           event_name: polyMarket.question,
           watch_state: 'monitored',
+          commence_time: commenceTime,
           polymarket_condition_id: polyMarket.condition_id,
           polymarket_question: polyMarket.question,
           polymarket_yes_price: polyMarket.yes_price,

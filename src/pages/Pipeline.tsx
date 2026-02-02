@@ -99,6 +99,27 @@ const formatTime = (dateStr: string | null) => {
   return date.toLocaleDateString();
 };
 
+const isPastOrStale = (event: WatchEvent) => {
+  // Prefer commence_time; fallback to updated_at when commence_time is missing (some markets don't populate it reliably)
+  const now = Date.now();
+  const graceMs = 30 * 60 * 1000; // 30m grace
+
+  if (event.commence_time) {
+    const t = new Date(event.commence_time).getTime();
+    if (!Number.isNaN(t)) {
+      return t < now - graceMs;
+    }
+  }
+
+  // Fallback: if we haven't seen an update in 36h, treat as stale/past
+  const updated = new Date(event.updated_at).getTime();
+  if (!Number.isNaN(updated)) {
+    return updated < now - 36 * 60 * 60 * 1000;
+  }
+
+  return false;
+};
+
 export default function Pipeline() {
   const [watchEvents, setWatchEvents] = useState<WatchEvent[]>([]);
   const [signals, setSignals] = useState<Signal[]>([]);
@@ -301,7 +322,7 @@ export default function Pipeline() {
   }, []);
 
   // Group events by state
-  const eventsByState = watchEvents.reduce((acc, event) => {
+  const eventsByState = watchEvents.filter(e => !isPastOrStale(e)).reduce((acc, event) => {
     const state = event.watch_state || 'unknown';
     if (!acc[state]) acc[state] = [];
     acc[state].push(event);
@@ -364,7 +385,7 @@ export default function Pipeline() {
         {/* Main Content Tabs */}
         <Tabs defaultValue="all" className="space-y-4">
           <TabsList>
-            <TabsTrigger value="all">All Events ({watchEvents.filter(e => e.watch_state !== 'expired').length})</TabsTrigger>
+            <TabsTrigger value="all">All Events ({watchEvents.filter(e => e.watch_state !== 'expired' && !isPastOrStale(e)).length})</TabsTrigger>
             <TabsTrigger value="active">Active Pipeline ({(eventsByState['active']?.length || 0) + (eventsByState['monitored']?.length || 0)})</TabsTrigger>
             <TabsTrigger value="signals">Signals ({signals.length})</TabsTrigger>
             <TabsTrigger value="snapshots">Recent Snapshots</TabsTrigger>
@@ -391,10 +412,10 @@ export default function Pipeline() {
                   <div className="space-y-2">
                     {loading ? (
                       <div className="text-center py-8 text-muted-foreground">Loading...</div>
-                    ) : watchEvents.filter(e => e.watch_state !== 'expired').length === 0 ? (
+                    ) : watchEvents.filter(e => e.watch_state !== 'expired' && !isPastOrStale(e)).length === 0 ? (
                       <div className="text-center py-8 text-muted-foreground">No events in pipeline</div>
                     ) : (
-                      sortEvents(watchEvents.filter(e => e.watch_state !== 'expired')).map((event) => (
+                      sortEvents(watchEvents.filter(e => e.watch_state !== 'expired' && !isPastOrStale(e))).map((event) => (
                         <div
                           key={event.id}
                           className="p-3 rounded-lg border bg-card hover:bg-muted/50 transition-colors"
