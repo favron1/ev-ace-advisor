@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '@/integrations/supabase/client';
 import { Header } from '@/components/terminal/Header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -6,7 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { RefreshCw, Eye, Zap, CheckCircle, AlertTriangle, Clock, TrendingUp, Activity, ArrowUp, ArrowDown } from 'lucide-react';
+import { RefreshCw, Eye, Zap, CheckCircle, AlertTriangle, Clock, TrendingUp, Activity, ArrowUp, ArrowDown, ArrowLeft, Plus } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
 type SortField = 'edge' | 'movement' | 'volume' | 'updated' | 'samples' | 'confidence' | 'probability' | 'time';
@@ -107,6 +108,55 @@ export default function Pipeline() {
   const [sortField, setSortField] = useState<SortField>('edge');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const { toast } = useToast();
+  const navigate = useNavigate();
+
+  const handleAddToSignalFeed = async (event: WatchEvent) => {
+    if (!event.current_probability || !event.polymarket_yes_price) {
+      toast({
+        title: 'Cannot create signal',
+        description: 'This event is missing book or Polymarket price data',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    const edge = (event.current_probability - event.polymarket_yes_price) * 100;
+    
+    const { error } = await supabase.from('signal_opportunities').insert({
+      event_name: event.event_name,
+      side: 'YES',
+      polymarket_price: event.polymarket_yes_price,
+      polymarket_yes_price: event.polymarket_yes_price,
+      polymarket_volume: event.polymarket_volume,
+      polymarket_condition_id: event.polymarket_condition_id,
+      polymarket_match_confidence: 1.0,
+      bookmaker_probability: event.current_probability,
+      bookmaker_prob_fair: event.current_probability,
+      edge_percent: edge,
+      is_true_arbitrage: true,
+      movement_confirmed: (event.movement_pct || 0) > 0,
+      confidence_score: Math.min(90, 60 + Math.round(edge * 3)),
+      urgency: edge > 8 ? 'high' : 'normal',
+      status: 'active',
+      signal_tier: 'MANUAL',
+      core_logic_version: 'v1.3',
+      signal_factors: {
+        edge_type: 'manual_pipeline_promotion',
+        movement_pct: event.movement_pct,
+      },
+    });
+
+    if (error) {
+      toast({
+        title: 'Failed to create signal',
+        description: error.message,
+        variant: 'destructive',
+      });
+    } else {
+      toast({ title: 'Signal created', description: event.event_name });
+      await fetchData();
+    }
+  };
 
   // Sort button component
   const SortButton = ({ field, label }: { field: SortField; label: string }) => (
@@ -271,9 +321,19 @@ export default function Pipeline() {
       <main className="container mx-auto px-4 py-6 space-y-6">
         {/* Header */}
         <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold">Pipeline Monitor</h1>
-            <p className="text-muted-foreground text-sm">Full visibility into event detection → signal creation</p>
+          <div className="flex items-center gap-3">
+            <Button 
+              variant="ghost" 
+              size="icon" 
+              onClick={() => navigate('/')}
+              title="Back to Terminal"
+            >
+              <ArrowLeft className="h-5 w-5" />
+            </Button>
+            <div>
+              <h1 className="text-2xl font-bold">Pipeline Monitor</h1>
+              <p className="text-muted-foreground text-sm">Full visibility into event detection → signal creation</p>
+            </div>
           </div>
           <Button 
             variant="outline" 
@@ -362,17 +422,29 @@ export default function Pipeline() {
                                 </div>
                               </div>
                             </div>
-                            <div className="text-right text-xs text-muted-foreground shrink-0">
-                              {event.escalated_at && (
-                                <div>Escalated: {formatTime(event.escalated_at)}</div>
-                              )}
-                              {event.hold_start_at && (
-                                <div>Hold: {formatTime(event.hold_start_at)}</div>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      ))
+                                            <div className="flex flex-col items-end gap-2 shrink-0">
+                                              <Button
+                                                variant="outline"
+                                                size="sm"
+                                                className="h-7 text-xs"
+                                                onClick={() => handleAddToSignalFeed(event)}
+                                                disabled={!event.current_probability || !event.polymarket_yes_price}
+                                              >
+                                                <Plus className="h-3 w-3 mr-1" />
+                                                Add to Signals
+                                              </Button>
+                                              <div className="text-xs text-muted-foreground text-right">
+                                                {event.escalated_at && (
+                                                  <div>Escalated: {formatTime(event.escalated_at)}</div>
+                                                )}
+                                                {event.hold_start_at && (
+                                                  <div>Hold: {formatTime(event.hold_start_at)}</div>
+                                                )}
+                                              </div>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      ))
                     )}
                   </div>
                 </ScrollArea>
@@ -449,18 +521,30 @@ export default function Pipeline() {
                             </div>
                           </div>
                           
-                          <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                            <span>Volume: ${event.polymarket_volume?.toLocaleString(undefined, { maximumFractionDigits: 0 }) || '-'}</span>
-                            <span>•</span>
-                            <span>Source: {event.bookmaker_source || '-'}</span>
-                            <span>•</span>
-                            <span>Last refresh: {formatTime(event.last_poly_refresh)}</span>
-                            {event.escalated_at && (
-                              <>
-                                <span>•</span>
-                                <span>Escalated: {formatTime(event.escalated_at)}</span>
-                              </>
-                            )}
+                          <div className="mt-3 flex items-center justify-between">
+                            <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                              <span>Volume: ${event.polymarket_volume?.toLocaleString(undefined, { maximumFractionDigits: 0 }) || '-'}</span>
+                              <span>•</span>
+                              <span>Source: {event.bookmaker_source || '-'}</span>
+                              <span>•</span>
+                              <span>Last refresh: {formatTime(event.last_poly_refresh)}</span>
+                              {event.escalated_at && (
+                                <>
+                                  <span>•</span>
+                                  <span>Escalated: {formatTime(event.escalated_at)}</span>
+                                </>
+                              )}
+                            </div>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 text-xs"
+                              onClick={() => handleAddToSignalFeed(event)}
+                              disabled={!event.current_probability || !event.polymarket_yes_price}
+                            >
+                              <Plus className="h-3 w-3 mr-1" />
+                              Add to Signals
+                            </Button>
                           </div>
                         </div>
                       ))
