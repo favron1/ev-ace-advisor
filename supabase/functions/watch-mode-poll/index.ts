@@ -722,7 +722,26 @@ Deno.serve(async (req) => {
         totalRawProb += avg;
       }
 
-      // Vig-free probability for matched outcome
+      // V1.3 FIX: For NHL (and other 3-way sports), filter out Draw/Tie and renormalize to 2-way
+      // Polymarket H2H markets are always 2-way (Team A wins vs Team B wins), so we must
+      // compare against 2-way fair probabilities, not raw 3-way odds that include Draw
+      const isNHL = polyMarket.sport_category?.toLowerCase().includes('nhl') || 
+                    polyMarket.sport_category?.toLowerCase().includes('icehockey');
+      
+      if (isNHL) {
+        // Remove Draw/Tie outcomes from the probability map
+        const drawKeys = [...avgProbs.keys()].filter(k => 
+          k.toLowerCase() === 'draw' || k.toLowerCase() === 'tie'
+        );
+        for (const drawKey of drawKeys) {
+          const drawProb = avgProbs.get(drawKey) || 0;
+          avgProbs.delete(drawKey);
+          totalRawProb -= drawProb;
+          console.log(`[${CORE_LOGIC_VERSION}] NHL 3→2 normalization: removed ${drawKey} (${(drawProb * 100).toFixed(1)}%) from ${polyEventName.substring(0, 30)}`);
+        }
+      }
+
+      // Vig-free probability for matched outcome (now normalized to 2-way for NHL)
       const matchedOutcomeCanon = getCanonicalName(matchedOutcome.outcome);
       const rawProb = avgProbs.get(matchedOutcomeCanon) || matchedOutcome.implied_probability;
       const vigFreeFairProb = totalRawProb > 0 ? rawProb / totalRawProb : rawProb;
