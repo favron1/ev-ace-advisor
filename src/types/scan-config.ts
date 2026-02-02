@@ -142,12 +142,19 @@ export type SharpBookmaker = typeof SHARP_BOOKMAKERS[number];
 // Focus mode for signal detection
 export type FocusMode = 'h2h_only' | 'all' | 'futures_only';
 
-// Available sports for polling - CORE 4 SPORTS ONLY
+// Available sports for polling - Full v1.3 Coverage
 export const AVAILABLE_SPORTS = [
+  // US Sports
   { key: 'basketball_nba', label: 'NBA Basketball', icon: '🏀' },
   { key: 'basketball_ncaab', label: 'NCAA Basketball', icon: '🏀' },
   { key: 'americanfootball_nfl', label: 'NFL Football', icon: '🏈' },
   { key: 'icehockey_nhl', label: 'NHL Hockey', icon: '🏒' },
+  // Soccer Leagues (v1.3)
+  { key: 'soccer_epl', label: 'English Premier League', icon: '⚽' },
+  { key: 'soccer_spain_la_liga', label: 'La Liga (Spain)', icon: '⚽' },
+  { key: 'soccer_italy_serie_a', label: 'Serie A (Italy)', icon: '⚽' },
+  { key: 'soccer_germany_bundesliga', label: 'Bundesliga (Germany)', icon: '⚽' },
+  { key: 'soccer_uefa_champs_league', label: 'UEFA Champions League', icon: '⚽' },
 ] as const;
 
 export type AvailableSport = typeof AVAILABLE_SPORTS[number]['key'];
