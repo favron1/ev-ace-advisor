@@ -131,6 +131,18 @@ const isFuturesMarket = (event: WatchEvent) => {
   return futuresPatterns.some(p => name.includes(p));
 };
 
+// Detect non-H2H markets (spreads, totals) that can't match to H2H bookmaker data
+const isNonH2HMarket = (event: WatchEvent) => {
+  const name = event.event_name.toLowerCase();
+  const nonH2HPatterns = [
+    'spread:', 'spread ', 'o/u ', 'over/under',
+    '(-1.5)', '(+1.5)', '(-2.5)', '(+2.5)', '(-3.5)', '(+3.5)',
+    '(-0.5)', '(+0.5)', '(-4.5)', '(+4.5)', '(-5.5)', '(+5.5)',
+    ': o/u', 'total '
+  ];
+  return nonH2HPatterns.some(p => name.includes(p));
+};
+
 export default function Pipeline() {
   const [watchEvents, setWatchEvents] = useState<WatchEvent[]>([]);
   const [signals, setSignals] = useState<Signal[]>([]);
