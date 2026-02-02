@@ -484,6 +484,7 @@ Deno.serve(async (req) => {
     const maxEventDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     
     // Load API-sourced markets with volume filter
+    // FIXED: Filter out stale 50¢ placeholder prices and prioritize fresh data
     const { data: apiMarkets, error: apiError } = await supabase
       .from('polymarket_h2h_cache')
       .select('*')
@@ -493,6 +494,8 @@ Deno.serve(async (req) => {
       .not('event_date', 'is', null)
       .lte('event_date', maxEventDate)
       .or('source.is.null,source.neq.firecrawl')
+      .neq('yes_price', 0.5) // Exclude stale 50/50 placeholder prices
+      .order('last_price_update', { ascending: false }) // Prioritize freshest
       .order('volume', { ascending: false })
       .limit(MAX_MARKETS_PER_SCAN);
 
@@ -508,6 +511,8 @@ Deno.serve(async (req) => {
       .not('event_date', 'is', null)
       .lte('event_date', maxEventDate)
       .in('extracted_league', ['NBA', 'NCAA', 'NFL'])
+      .neq('yes_price', 0.5) // Exclude stale 50/50 placeholder prices
+      .order('last_price_update', { ascending: false })
       .order('event_date', { ascending: true })
       .limit(50);
 
@@ -524,6 +529,8 @@ Deno.serve(async (req) => {
       .eq('source', 'manual')
       .not('event_date', 'is', null)
       .lte('event_date', maxEventDate)
+      .neq('yes_price', 0.5) // Exclude stale 50/50 placeholder prices
+      .order('last_price_update', { ascending: false })
       .order('event_date', { ascending: true })
       .limit(50);
 
@@ -532,7 +539,30 @@ Deno.serve(async (req) => {
     }
 
     // Combine all market sets
-    const polyMarkets = [...(apiMarkets || []), ...(firecrawlMarkets || []), ...(manualMarkets || [])];
+    const allMarkets = [...(apiMarkets || []), ...(firecrawlMarkets || []), ...(manualMarkets || [])];
+
+    // Deduplicate by event_title, keeping the one with most recent price update
+    // This prevents the same game from appearing multiple times with different prices
+    const seenEvents = new Map<string, typeof allMarkets[0]>();
+    for (const market of allMarkets) {
+      const existing = seenEvents.get(market.event_title);
+      if (!existing) {
+        seenEvents.set(market.event_title, market);
+      } else {
+        // Keep the market with fresher price data
+        const existingTime = existing.last_price_update ? new Date(existing.last_price_update).getTime() : 0;
+        const currentTime = market.last_price_update ? new Date(market.last_price_update).getTime() : 0;
+        
+        // Prefer non-50¢ prices, then prefer most recent update
+        const existingIs50 = existing.yes_price === 0.5;
+        const currentIs50 = market.yes_price === 0.5;
+        
+        if ((existingIs50 && !currentIs50) || (!existingIs50 && !currentIs50 && currentTime > existingTime)) {
+          seenEvents.set(market.event_title, market);
+        }
+      }
+    }
+    const polyMarkets = Array.from(seenEvents.values());
 
     if (polyMarkets.length === 0) {
       console.log('[WATCH-MODE-POLL] No H2H markets within 24hr horizon');
