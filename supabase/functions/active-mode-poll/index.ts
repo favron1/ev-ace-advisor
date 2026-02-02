@@ -88,34 +88,49 @@ interface WatchState {
 // POLYMARKET DIRECT PRICE REFRESH
 // ============================================================================
 
-async function refreshPolymarketPrice(conditionId: string): Promise<{
+async function refreshPolymarketPrice(conditionId: string, supabase?: any): Promise<{
   yesPrice: number;
   noPrice: number;
   volume: number;
 } | null> {
   try {
-    // Use the CLOB API for direct condition_id price lookup
-    const url = `https://clob.polymarket.com/price?token_id=${conditionId}`;
-    const response = await fetch(url, {
-      headers: { 'Accept': 'application/json' },
-    });
+    // BUG FIX: CLOB /price endpoint requires TOKEN_ID, not condition_id!
+    // First, try to get token IDs from cache
+    let yesTokenId: string | null = null;
     
-    if (!response.ok) {
-      // Try fallback to Gamma events search
-      console.log(`[ACTIVE-MODE-POLL] CLOB API returned ${response.status}, trying Gamma fallback`);
-      return await refreshPolymarketPriceViaGamma(conditionId);
+    if (supabase) {
+      const { data: cached } = await supabase
+        .from('polymarket_h2h_cache')
+        .select('token_id_yes, token_id_no')
+        .eq('condition_id', conditionId)
+        .maybeSingle();
+      
+      yesTokenId = cached?.token_id_yes;
     }
     
-    const priceData = await response.json();
-    
-    if (priceData && priceData.price !== undefined) {
-      return {
-        yesPrice: parseFloat(priceData.price) || 0.5,
-        noPrice: 1 - (parseFloat(priceData.price) || 0.5),
-        volume: 0, // CLOB doesn't return volume directly
-      };
+    // If we have a YES token ID, use the CLOB API for accurate pricing
+    if (yesTokenId) {
+      const url = `https://clob.polymarket.com/price?token_id=${yesTokenId}&side=buy`;
+      const response = await fetch(url, {
+        headers: { 'Accept': 'application/json' },
+      });
+      
+      if (response.ok) {
+        const priceData = await response.json();
+        if (priceData && priceData.price !== undefined) {
+          const yesPrice = parseFloat(priceData.price) || 0.5;
+          console.log(`[ACTIVE-MODE-POLL] CLOB refresh: ${conditionId.substring(0, 20)}... -> ${(yesPrice * 100).toFixed(0)}c`);
+          return {
+            yesPrice,
+            noPrice: 1 - yesPrice,
+            volume: 0,
+          };
+        }
+      }
     }
     
+    // Fallback to Gamma API (works with condition_id)
+    console.log(`[ACTIVE-MODE-POLL] Using Gamma fallback for: ${conditionId.substring(0, 20)}...`);
     return await refreshPolymarketPriceViaGamma(conditionId);
   } catch (error) {
     console.error(`[ACTIVE-MODE-POLL] Error refreshing Polymarket price:`, error);
@@ -360,13 +375,17 @@ async function surfaceConfirmedSignal(
       polymarket_volume: event.polymarket_volume,
       polymarket_updated_at: new Date().toISOString(),
       polymarket_match_confidence: 1.0,
+      polymarket_condition_id: event.polymarket_condition_id, // BUG FIX: Was missing - needed for settlement
       bookmaker_probability: bookmakerProb,
       bookmaker_prob_fair: bookmakerProb,
       edge_percent: liveEdge,
       is_true_arbitrage: true,
+      movement_confirmed: true, // BUG FIX: Set true since this is a confirmed signal
       confidence_score: Math.min(95, 65 + Math.round(liveEdge * 5)),
       urgency,
       status: 'active',
+      signal_tier: 'MOMENTUM', // Set appropriate tier for confirmed signals
+      core_logic_version: 'v1.3',
       signal_factors: {
         edge_type: 'polymarket_first_confirmed',
         condition_id: event.polymarket_condition_id,
@@ -489,12 +508,12 @@ Deno.serve(async (req) => {
 
       // Try CLOB/Gamma API first (works for API-sourced markets)
       if (event.polymarket_condition_id) {
-        const polyData = await refreshPolymarketPrice(event.polymarket_condition_id);
+        const polyData = await refreshPolymarketPrice(event.polymarket_condition_id, supabase);
         results.polymarket_refreshes++;
         
         if (polyData) {
           livePolyPrice = polyData.yesPrice;
-          livePolyVolume = polyData.volume;
+          livePolyVolume = polyData.volume || event.polymarket_volume || 0;
           priceRefreshed = true;
           
           // Update cache with fresh price
@@ -503,7 +522,6 @@ Deno.serve(async (req) => {
             .update({
               yes_price: polyData.yesPrice,
               no_price: polyData.noPrice,
-              volume: polyData.volume,
               last_price_update: new Date().toISOString(),
             })
             .eq('condition_id', event.polymarket_condition_id);
