@@ -515,8 +515,24 @@ Deno.serve(async (req) => {
       console.warn('[WATCH-MODE-POLL] Firecrawl market fetch error:', fcError);
     }
 
-    // Combine both market sets
-    const polyMarkets = [...(apiMarkets || []), ...(firecrawlMarkets || [])];
+    // Load MANUAL entries (user-submitted from screenshots) - NO volume filter
+    const { data: manualMarkets, error: manualError } = await supabase
+      .from('polymarket_h2h_cache')
+      .select('*')
+      .eq('status', 'active')
+      .eq('market_type', 'h2h')
+      .eq('source', 'manual')
+      .not('event_date', 'is', null)
+      .lte('event_date', maxEventDate)
+      .order('event_date', { ascending: true })
+      .limit(50);
+
+    if (manualError) {
+      console.warn('[WATCH-MODE-POLL] Manual market fetch error:', manualError);
+    }
+
+    // Combine all market sets
+    const polyMarkets = [...(apiMarkets || []), ...(firecrawlMarkets || []), ...(manualMarkets || [])];
 
     if (polyMarkets.length === 0) {
       console.log('[WATCH-MODE-POLL] No H2H markets within 24hr horizon');
@@ -533,7 +549,7 @@ Deno.serve(async (req) => {
       );
     }
     
-    console.log(`[WATCH-MODE-POLL] Loaded ${polyMarkets.length} H2H markets (API: ${apiMarkets?.length || 0}, Firecrawl: ${firecrawlMarkets?.length || 0})`);
+    console.log(`[WATCH-MODE-POLL] Loaded ${polyMarkets.length} H2H markets (API: ${apiMarkets?.length || 0}, Firecrawl: ${firecrawlMarkets?.length || 0}, Manual: ${manualMarkets?.length || 0})`);
 
     // ========================================================================
     // STEP 2: Query bookmaker_signals for recent H2H data
