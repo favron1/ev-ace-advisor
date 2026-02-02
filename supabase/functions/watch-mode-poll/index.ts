@@ -97,6 +97,7 @@ function normalizeSportCategory(sport: string | null): string {
   if (!sport) return 'unknown';
   
   const aliases: Record<string, string> = {
+    // US Sports
     'NHL': 'icehockey_nhl',
     'nhl': 'icehockey_nhl',
     'NBA': 'basketball_nba',
@@ -105,6 +106,28 @@ function normalizeSportCategory(sport: string | null): string {
     'nfl': 'americanfootball_nfl',
     'MLB': 'baseball_mlb',
     'mlb': 'baseball_mlb',
+    // NCAA Basketball
+    'NCAA': 'basketball_ncaab',
+    'ncaa': 'basketball_ncaab',
+    'NCAAB': 'basketball_ncaab',
+    'ncaab': 'basketball_ncaab',
+    'College Basketball': 'basketball_ncaab',
+    // European Soccer
+    'EPL': 'soccer_epl',
+    'epl': 'soccer_epl',
+    'Premier League': 'soccer_epl',
+    'English Premier League': 'soccer_epl',
+    'La Liga': 'soccer_spain_la_liga',
+    'la liga': 'soccer_spain_la_liga',
+    'LaLiga': 'soccer_spain_la_liga',
+    'Bundesliga': 'soccer_germany_bundesliga',
+    'bundesliga': 'soccer_germany_bundesliga',
+    'Serie A': 'soccer_italy_serie_a',
+    'serie a': 'soccer_italy_serie_a',
+    'UCL': 'soccer_uefa_champs_league',
+    'ucl': 'soccer_uefa_champs_league',
+    'Champions League': 'soccer_uefa_champs_league',
+    'UEFA Champions League': 'soccer_uefa_champs_league',
   };
   
   return aliases[sport] || sport;
@@ -501,20 +524,19 @@ Deno.serve(async (req) => {
     // ========================================================================
     const maxEventDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     
-    // Load API-sourced markets with volume filter
+    // Load API-sourced markets - NO volume filter (volume is unreliable for fresh markets)
     // FIXED: Filter out stale 50¢ placeholder prices and prioritize fresh data
     const { data: apiMarkets, error: apiError } = await supabase
       .from('polymarket_h2h_cache')
       .select('*')
       .eq('status', 'active')
       .eq('market_type', 'h2h')
-      .gte('volume', minVolume)
       .not('event_date', 'is', null)
       .lte('event_date', maxEventDate)
       .or('source.is.null,source.neq.firecrawl')
       .neq('yes_price', 0.5) // Exclude stale 50/50 placeholder prices
       .order('last_price_update', { ascending: false }) // Prioritize freshest
-      .order('volume', { ascending: false })
+      .order('event_date', { ascending: true }) // Nearest events first
       .limit(MAX_MARKETS_PER_SCAN);
 
     if (apiError) throw apiError;
