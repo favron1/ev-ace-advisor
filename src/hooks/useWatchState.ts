@@ -115,7 +115,9 @@ export function useWatchState(options?: UseWatchStateOptions) {
 
       toast({
         title: 'Active Mode Complete',
-        description: `${data.confirmed} confirmed, ${data.signalOnly} signal-only, ${data.dropped} dropped`,
+        description: data.message 
+          ? data.message 
+          : `${data.confirmed ?? 0} confirmed, ${data.continued ?? 0} still monitoring, ${data.dropped ?? 0} dropped`,
       });
 
       return data;
