@@ -597,6 +597,78 @@ Deno.serve(async (req) => {
           console.log(`[SYNC-POLYMARKET-H2H] Upserted batch ${i / batchSize + 1}: ${batch.length} markets`);
     }
 
+    // ============= TOKEN REPAIR STEP =============
+    // Fetch individual market details for markets missing token IDs
+    console.log('[SYNC-POLYMARKET-H2H] Starting token repair for markets without tokens...');
+    
+    const { data: marketsNeedingTokens, error: tokenFetchError } = await supabase
+      .from('polymarket_h2h_cache')
+      .select('condition_id, event_title')
+      .eq('status', 'active')
+      .eq('market_type', 'h2h')
+      .is('token_id_yes', null)
+      .gte('event_date', new Date().toISOString())
+      .order('event_date', { ascending: true })
+      .limit(50); // Process 50 at a time to avoid timeouts
+    
+    if (tokenFetchError) {
+      console.error('[SYNC-POLYMARKET-H2H] Error fetching markets needing tokens:', tokenFetchError);
+    } else if (marketsNeedingTokens && marketsNeedingTokens.length > 0) {
+      console.log(`[SYNC-POLYMARKET-H2H] Repairing tokens for ${marketsNeedingTokens.length} markets`);
+      let repaired = 0;
+      
+      for (const market of marketsNeedingTokens) {
+        try {
+          // Fetch individual market details from Gamma API
+          const marketUrl = `${GAMMA_API_BASE}/markets/${market.condition_id}`;
+          const response = await fetch(marketUrl, {
+            headers: { 'Accept': 'application/json' },
+          });
+          
+          if (response.ok) {
+            const marketData = await response.json();
+            const { yesTokenId, noTokenId } = extractTokenIds(marketData);
+            
+            if (yesTokenId) {
+              const { error: updateError } = await supabase
+                .from('polymarket_h2h_cache')
+                .update({
+                  token_id_yes: yesTokenId,
+                  token_id_no: noTokenId,
+                  last_token_repair_at: new Date().toISOString(),
+                  token_source: 'gamma_individual',
+                })
+                .eq('condition_id', market.condition_id);
+              
+              if (!updateError) {
+                repaired++;
+                console.log(`[SYNC-POLYMARKET-H2H] Repaired tokens for: ${market.event_title}`);
+              }
+            } else {
+              // Mark as untradeable if no tokens found
+              await supabase
+                .from('polymarket_h2h_cache')
+                .update({
+                  tradeable: false,
+                  untradeable_reason: 'NO_TOKENS_IN_API',
+                  last_token_repair_at: new Date().toISOString(),
+                })
+                .eq('condition_id', market.condition_id);
+            }
+          }
+          
+          // Small delay to avoid rate limiting
+          await new Promise(resolve => setTimeout(resolve, 50));
+        } catch (err) {
+          console.warn(`[SYNC-POLYMARKET-H2H] Failed to repair tokens for ${market.condition_id}:`, err);
+        }
+      }
+      
+      console.log(`[SYNC-POLYMARKET-H2H] Token repair complete: ${repaired}/${marketsNeedingTokens.length} fixed`);
+    } else {
+      console.log('[SYNC-POLYMARKET-H2H] No markets need token repair');
+    }
+
     // ============= CLOB PRICE REFRESH =============
     // Fetch real executable prices from Polymarket CLOB API
     console.log('[SYNC-POLYMARKET-H2H] Starting CLOB price refresh...');
