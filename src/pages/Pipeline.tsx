@@ -304,7 +304,7 @@ export default function Pipeline() {
         {/* Main Content Tabs */}
         <Tabs defaultValue="all" className="space-y-4">
           <TabsList>
-            <TabsTrigger value="all">All Events ({watchEvents.length})</TabsTrigger>
+            <TabsTrigger value="all">All Events ({watchEvents.filter(e => e.watch_state !== 'expired').length})</TabsTrigger>
             <TabsTrigger value="active">Active Pipeline ({(eventsByState['active']?.length || 0) + (eventsByState['monitored']?.length || 0)})</TabsTrigger>
             <TabsTrigger value="signals">Signals ({signals.length})</TabsTrigger>
             <TabsTrigger value="snapshots">Recent Snapshots</TabsTrigger>
@@ -331,10 +331,10 @@ export default function Pipeline() {
                   <div className="space-y-2">
                     {loading ? (
                       <div className="text-center py-8 text-muted-foreground">Loading...</div>
-                    ) : watchEvents.length === 0 ? (
+                    ) : watchEvents.filter(e => e.watch_state !== 'expired').length === 0 ? (
                       <div className="text-center py-8 text-muted-foreground">No events in pipeline</div>
                     ) : (
-                      sortEvents(watchEvents).map((event) => (
+                      sortEvents(watchEvents.filter(e => e.watch_state !== 'expired')).map((event) => (
                         <div
                           key={event.id}
                           className="p-3 rounded-lg border bg-card hover:bg-muted/50 transition-colors"
