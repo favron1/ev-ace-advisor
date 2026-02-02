@@ -601,6 +601,16 @@ Deno.serve(async (req) => {
       matchedEvent: string;
     }> = [];
 
+    // V1.3.1: Track ALL matched markets for "monitored" state (not just edges)
+    // This ensures book prices are visible in Pipeline even before edge develops
+    const allMatchedMarkets: Array<{
+      polyMarket: PolymarketCacheEntry;
+      bookmakerFairProb: number;
+      edge: number;
+      matchedTeam: string;
+      matchedEvent: string;
+    }> = [];
+
     const snapshots: Array<{
       event_key: string;
       event_name: string;
@@ -762,6 +772,15 @@ Deno.serve(async (req) => {
 
       console.log(`[${CORE_LOGIC_VERSION}] Match: ${polyEventName.substring(0, 40)}... | Book: ${(vigFreeFairProb * 100).toFixed(1)}% | Poly: ${(polyMarket.yes_price * 100).toFixed(1)}% | Edge: ${edge.toFixed(1)}%`);
 
+      // V1.3.1: Store ALL matched markets for "monitored" state
+      allMatchedMarkets.push({
+        polyMarket,
+        bookmakerFairProb: vigFreeFairProb,
+        edge,
+        matchedTeam: homeTeam,
+        matchedEvent: matchedSignals[0].event_name,
+      });
+
       if (edge >= MIN_EDGE_PCT) {
         edgesFound.push({
           polyMarket,
@@ -912,6 +931,76 @@ Deno.serve(async (req) => {
         }, { onConflict: 'event_key' });
     }
 
+    // ========================================================================
+    // STEP 6.5 (V1.3.1): Upsert ALL matched markets as "monitored" with book data
+    // This ensures Pipeline shows book prices even for markets without current edge
+    // Critical for tracking: markets may develop edge later via movement
+    // ========================================================================
+    let monitoredCount = 0;
+    const escalatedKeys = new Set(toEscalate.map(e => `poly_${e.polyMarket.condition_id}`));
+    
+    for (const matchData of allMatchedMarkets) {
+      const { polyMarket, bookmakerFairProb, edge, matchedTeam } = matchData;
+      const eventKey = `poly_${polyMarket.condition_id}`;
+      
+      // Skip if already escalated to active/watching (higher priority state)
+      if (escalatedKeys.has(eventKey)) {
+        continue;
+      }
+      
+      // Check if event already exists in a higher-priority state
+      const { data: existing } = await supabase
+        .from('event_watch_state')
+        .select('watch_state')
+        .eq('event_key', eventKey)
+        .single();
+      
+      // Don't downgrade from active/confirmed/signal states
+      const preserveStates = ['active', 'confirmed', 'signal'];
+      if (existing && preserveStates.includes(existing.watch_state)) {
+        // Just update the book data without changing state
+        await supabase
+          .from('event_watch_state')
+          .update({
+            current_probability: bookmakerFairProb,
+            bookmaker_market_key: matchedTeam,
+            bookmaker_source: normalizeSportCategory(polyMarket.sport_category),
+            polymarket_yes_price: polyMarket.yes_price,
+            polymarket_volume: polyMarket.volume,
+            last_poly_refresh: new Date().toISOString(),
+          })
+          .eq('event_key', eventKey);
+        continue;
+      }
+      
+      // Upsert as "monitored" state with full book data
+      const { error: monitorError } = await supabase
+        .from('event_watch_state')
+        .upsert({
+          event_key: eventKey,
+          event_name: polyMarket.question,
+          watch_state: 'monitored',
+          polymarket_condition_id: polyMarket.condition_id,
+          polymarket_question: polyMarket.question,
+          polymarket_yes_price: polyMarket.yes_price,
+          polymarket_volume: polyMarket.volume,
+          bookmaker_market_key: matchedTeam,
+          bookmaker_source: normalizeSportCategory(polyMarket.sport_category),
+          initial_probability: existing ? undefined : bookmakerFairProb, // Don't overwrite initial
+          current_probability: bookmakerFairProb,
+          movement_pct: Math.abs(edge), // Store absolute edge as movement indicator
+          polymarket_price: polyMarket.yes_price,
+          polymarket_matched: true,
+          last_poly_refresh: new Date().toISOString(),
+        }, { onConflict: 'event_key' });
+      
+      if (!monitorError) {
+        monitoredCount++;
+      }
+    }
+    
+    console.log(`[${CORE_LOGIC_VERSION}] Monitored ${monitoredCount} matched markets with book data`);
+
     // Cleanup old snapshots (>24h)
     const cleanupTime = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     await supabase
@@ -930,6 +1019,7 @@ Deno.serve(async (req) => {
         bookmaker_signals_count: bookmakerSignals.length,
         matched_markets: matchedCount,
         unmatched_markets: unmatchedCount,
+        monitored_with_book_data: monitoredCount,
         book_coverage_available: bookCoverageAvailable,
         book_coverage_missing: bookCoverageMissing,
         match_rate_covered_pct: parseFloat(matchRateCovered),
