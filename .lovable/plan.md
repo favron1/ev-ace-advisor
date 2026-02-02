@@ -1,173 +1,131 @@
 
 
-# Fix Pipeline Issues: Duplicate Events, Missing Book Data & Add Navigation
+# Fix Polymarket Prices & Missing Book Data in Pipeline
 
-## Overview
-This plan addresses three issues with the Pipeline page:
+## Problem Summary
+The Pipeline shows incorrect data because:
+1. **Multiple duplicate market entries** exist in `polymarket_h2h_cache` for the same game (different market types like spreads/totals/h2h)
+2. **Stale 50¢ prices** persist in many cache entries that never got CLOB price updates
+3. **`watch-mode-poll`** uses these stale cache prices instead of fresh CLOB data
 
-1. **Duplicate events causing the count drop** - Same games have multiple entries (some with book data, some without)
-2. **Add "Add to Signal Feed" button** - Allow manually promoting a pipeline event to a signal
-3. **Add Back button** - Easy navigation out of the Pipeline page
-
----
-
-## Root Cause Analysis
-
-### Why events dropped from "many" to 18:
-The database has **duplicate entries** for the same games:
-- "Senators vs. Penguins" - 5 entries
-- "Islanders vs. Capitals" - 4 entries  
-- "Blues vs. Predators" - 4 entries
-- etc.
-
-Only SOME of these duplicates have `current_probability` (book data). Currently 69 monitored events are missing book data while 13 have it.
-
-The duplicates were created when different Polymarket markets (spreads, totals, H2H) for the same game each created separate `event_watch_state` entries.
+## Solution Overview
+Fix the data flow so Pipeline always shows the correct, most recent prices.
 
 ---
 
-## Implementation Plan
-
-### Part 1: Clean Up Duplicate Events (Database)
-
-Run a cleanup query to remove duplicate entries that lack book data when a better entry exists:
+## Part 1: Clean Up Duplicate Cache Entries (Database)
+Delete duplicate `polymarket_h2h_cache` entries that have stale 50¢ prices when a better entry exists:
 
 ```sql
-DELETE FROM event_watch_state 
+-- Remove duplicate cache entries with stale 50/50 prices 
+-- when a fresher entry exists for the same event
+DELETE FROM polymarket_h2h_cache 
 WHERE id IN (
-  SELECT ews.id 
-  FROM event_watch_state ews
-  WHERE ews.current_probability IS NULL
-    AND ews.watch_state != 'expired'
+  SELECT older.id 
+  FROM polymarket_h2h_cache older
+  WHERE older.yes_price = 0.5 
+    AND older.no_price = 0.5
+    AND older.status = 'active'
     AND EXISTS (
-      SELECT 1 FROM event_watch_state ews2 
-      WHERE ews2.event_name = ews.event_name 
-        AND ews2.current_probability IS NOT NULL
-        AND ews2.id != ews.id
+      SELECT 1 FROM polymarket_h2h_cache better
+      WHERE better.event_title = older.event_title
+        AND better.status = 'active'
+        AND better.id != older.id
+        AND (better.yes_price != 0.5 OR better.no_price != 0.5)
+        AND better.last_price_update > older.last_price_update
     )
 );
 ```
 
-This keeps the entries WITH book prices and removes the empty duplicates.
-
 ---
 
-### Part 2: Add Back Button
-**File: `src/pages/Pipeline.tsx`**
+## Part 2: Update `watch-mode-poll` to Prioritize Fresh Prices
+**File: `supabase/functions/watch-mode-poll/index.ts`**
 
-Add a back arrow button in the header section next to the title:
+When selecting markets from the cache, filter out duplicate entries and prioritize those with non-50¢ prices:
+
+**Change 1**: Modify the cache query to exclude 50/50 placeholder prices when fresher data exists
 
 ```typescript
-import { ArrowLeft } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+// Around line 487-497: Add filter to exclude stale 50/50 entries
+const { data: apiMarkets, error: apiError } = await supabase
+  .from('polymarket_h2h_cache')
+  .select('*')
+  .eq('status', 'active')
+  .eq('market_type', 'h2h')
+  .gte('volume', minVolume)
+  .not('event_date', 'is', null)
+  .lte('event_date', maxEventDate)
+  .or('source.is.null,source.neq.firecrawl')
+  // NEW: Exclude stale 50/50 placeholder prices
+  .not('yes_price', 'eq', 0.5)
+  .order('last_price_update', { ascending: false }) // Prioritize freshest
+  .order('volume', { ascending: false })
+  .limit(MAX_MARKETS_PER_SCAN);
+```
 
-// In component:
-const navigate = useNavigate();
+**Change 2**: Add deduplication logic after loading markets
 
-// In header section (around line 273):
-<div className="flex items-center gap-3">
-  <Button 
-    variant="ghost" 
-    size="icon" 
-    onClick={() => navigate('/')}
-    title="Back to Terminal"
-  >
-    <ArrowLeft className="h-5 w-5" />
-  </Button>
-  <div>
-    <h1 className="text-2xl font-bold">Pipeline Monitor</h1>
-    <p className="text-muted-foreground text-sm">...</p>
-  </div>
-</div>
+```typescript
+// After line 535 where markets are combined:
+const polyMarkets = [...(apiMarkets || []), ...(firecrawlMarkets || []), ...(manualMarkets || [])];
+
+// NEW: Deduplicate by event_title, keeping the one with most recent price update
+const seenEvents = new Map<string, typeof polyMarkets[0]>();
+for (const market of polyMarkets) {
+  const existing = seenEvents.get(market.event_title);
+  if (!existing || 
+      (market.last_price_update && 
+       (!existing.last_price_update || 
+        new Date(market.last_price_update) > new Date(existing.last_price_update)))) {
+    // Prefer markets with non-50/50 prices
+    if (market.yes_price !== 0.5 || !existing || existing.yes_price === 0.5) {
+      seenEvents.set(market.event_title, market);
+    }
+  }
+}
+const uniqueMarkets = Array.from(seenEvents.values());
 ```
 
 ---
 
-### Part 3: Add "Add to Signal Feed" Button
-**File: `src/pages/Pipeline.tsx`**
+## Part 3: Fix Stale `event_watch_state` Prices
+**File: `supabase/functions/watch-mode-poll/index.ts`**
 
-Add a button on each event card that creates a signal from the pipeline event:
+The function stores `polymarket_yes_price: polyMarket.yes_price` from cache, but should refresh from CLOB or at minimum use the deduped market.
 
-**New function:**
-```typescript
-const handleAddToSignalFeed = async (event: WatchEvent) => {
-  if (!event.current_probability || !event.polymarket_yes_price) {
-    toast({
-      title: 'Cannot create signal',
-      description: 'This event is missing book or Polymarket price data',
-      variant: 'destructive',
-    });
-    return;
-  }
+Update lines 968-970 and 985-986 to use fresh prices from the best available cache entry.
 
-  const edge = (event.current_probability - event.polymarket_yes_price) * 100;
-  
-  const { error } = await supabase.from('signal_opportunities').insert({
-    event_name: event.event_name,
-    side: 'YES',
-    polymarket_price: event.polymarket_yes_price,
-    polymarket_yes_price: event.polymarket_yes_price,
-    polymarket_volume: event.polymarket_volume,
-    polymarket_condition_id: event.polymarket_condition_id,
-    polymarket_match_confidence: 1.0,
-    bookmaker_probability: event.current_probability,
-    bookmaker_prob_fair: event.current_probability,
-    edge_percent: edge,
-    is_true_arbitrage: true,
-    movement_confirmed: event.movement_pct > 0,
-    confidence_score: Math.min(90, 60 + Math.round(edge * 3)),
-    urgency: edge > 8 ? 'high' : 'normal',
-    status: 'active',
-    signal_tier: 'MANUAL',
-    core_logic_version: 'v1.3',
-    signal_factors: {
-      edge_type: 'manual_pipeline_promotion',
-      movement_pct: event.movement_pct,
-    },
-  });
+---
 
-  if (error) {
-    toast({
-      title: 'Failed to create signal',
-      description: error.message,
-      variant: 'destructive',
-    });
-  } else {
-    toast({ title: 'Signal created', description: event.event_name });
-    await fetchData(); // Refresh to show updated state
-  }
-};
-```
+## Part 4: Database Cleanup - Remove Stale Watch State Entries
+Remove old `event_watch_state` entries that have null book data and 50¢ poly prices:
 
-**Button in event card (All Events and Active Pipeline tabs):**
-```typescript
-<Button
-  variant="outline"
-  size="sm"
-  className="h-7 text-xs"
-  onClick={() => handleAddToSignalFeed(event)}
-  disabled={!event.current_probability || !event.polymarket_yes_price}
->
-  <TrendingUp className="h-3 w-3 mr-1" />
-  Add to Signals
-</Button>
+```sql
+-- Clean stale event_watch_state entries with placeholder data
+DELETE FROM event_watch_state 
+WHERE polymarket_yes_price = 0.5
+  AND current_probability IS NULL
+  AND updated_at < NOW() - INTERVAL '2 days';
 ```
 
 ---
 
 ## Summary of Changes
 
-| Change | File | Description |
-|--------|------|-------------|
-| Database cleanup | SQL query | Remove duplicate entries without book data |
-| Back button | Pipeline.tsx | ArrowLeft icon navigates to Terminal |
-| Add to Signal button | Pipeline.tsx | Creates signal_opportunities entry from event |
+| Change | Location | Description |
+|--------|----------|-------------|
+| Remove duplicate cache entries | SQL migration | Delete 50/50 entries when better data exists |
+| Filter stale prices in query | watch-mode-poll | Exclude `yes_price = 0.5` placeholder entries |
+| Deduplicate by event name | watch-mode-poll | Keep only freshest price per game |
+| Clean old watch state | SQL migration | Remove entries with null book data |
 
 ---
 
-## Result
-- Pipeline will show cleaner data without duplicates
-- All remaining events will have book percentages (where available for that sport)
-- Easy navigation back to main Terminal
-- Ability to manually promote any event to the Signal Feed for tracking
+## Expected Result
+After these changes:
+- Pipeline will show correct Polymarket prices (28¢, 46¢, etc.) instead of 50¢
+- All events with book coverage will display book percentages
+- No more duplicate events in the Pipeline view
+- Fresh data prioritized over stale placeholder data
 
