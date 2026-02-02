@@ -28,8 +28,8 @@ export function ScanSettingsPanel({ config, onChange }: ScanSettingsPanelProps) 
   const handleSportToggle = (sportKey: string, checked: boolean) => {
     let updated: string[];
     if (checked) {
-      // Max 4 sports for cost control
-      if (enabledSports.length >= 4) {
+      // Max 6 sports for cost control (expanded for v1.3 soccer coverage)
+      if (enabledSports.length >= 6) {
         updated = [...enabledSports.slice(1), sportKey];
       } else {
         updated = [...enabledSports, sportKey];
@@ -50,7 +50,7 @@ export function ScanSettingsPanel({ config, onChange }: ScanSettingsPanelProps) 
             Sport Scope
           </CardTitle>
           <CardDescription>
-            Select which sports to monitor (max 4 for cost control)
+            Select which sports to monitor (max 6 for cost control)
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -73,7 +73,7 @@ export function ScanSettingsPanel({ config, onChange }: ScanSettingsPanelProps) 
             ))}
           </div>
           <p className="text-xs text-muted-foreground">
-            Currently monitoring: {enabledSports.length}/4 sports
+            Currently monitoring: {enabledSports.length}/6 sports
           </p>
         </CardContent>
       </Card>
