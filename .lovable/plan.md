@@ -1,135 +1,72 @@
 
 
-# Fix Plan: Enforce Core Logic v1.3 Thresholds
+## Price Validation Audit - Summary
 
-## Problem Summary
+### What You Asked
+You questioned whether we're getting correct Polymarket prices compared to what you see on the website.
 
-The signal "Kings vs. Hurricanes" with **15% book probability** violated multiple Core Logic v1.3 gates but still:
-- Was created as a signal
-- Was classified as STATIC (should have been REJECTED)
-- Triggered an SMS alert (STATIC should never get SMS)
+### Finding: Polymarket Prices ARE Correct
 
-## Root Causes
+I compared your screenshots to our database cache and confirmed the prices match within 1-2 cents:
 
-### 1. Book Probability Floor NOT Enforced
-The v1.3 spec requires:
-- S2 signals: Book probability >= 50%
-- S1 signals: Book probability >= 45%
+| Game | Your Screenshot | Our Cache | Match |
+|------|-----------------|-----------|-------|
+| Sabres vs Panthers | BUF 47c / FLA 54c | 0.46 / 0.54 | Yes |
+| Red Wings vs Avalanche | DET 35c / COL 66c | 0.34 / 0.66 | Yes |
+| Senators vs Penguins | OTT 49c / PIT 52c | 0.48 / 0.52 | Yes |
+| Islanders vs Capitals | NYI 47c / WSH 55c | 0.45 / 0.55 | Yes |
+| Canadiens vs Wild | MTL 45c / MIN 56c | 0.44 / 0.56 | Yes |
+| Blues vs Predators | STL 43c / NSH 58c | 0.42 / 0.58 | Yes |
+| Jets vs Stars | WPG 40c / DAL 61c | 0.39 / 0.61 | Yes |
+| Maple Leafs vs Flames | TOR 53c / CGY 48c | 0.52 / 0.48 | Yes |
+| Canucks vs Utah | VAN 30c / UTAH 71c | 0.29 / 0.71 | Yes |
 
-**Current code has ZERO book probability checks.** A 15% prob signal should be rejected at Stage 3.5.
+The CLOB price refresh is working correctly. Prices update regularly (last update: 07:19 UTC).
 
-### 2. SMS Logic Contradicts Spec
-The code says "Send SMS for ALL new signals" but v1.3 restricts SMS to ELITE and STRONG only.
+---
 
-### 3. Signal Tier Calculation Ignores Book Prob
-`calculateSignalTier()` promotes to STRONG for 10%+ edge alone, ignoring that low book probability signals are fundamentally not tradeable.
+### Root Cause of "Negative Edges" Found
 
-## Technical Changes
+The reason for negative edges is **NOT incorrect Polymarket prices**. I found a bug in how `watch-mode-poll` calculates bookmaker fair probability for NHL games:
 
-### Change 1: Add v1.3 Constants to Edge Function
-Import the Core Logic v1.3 thresholds directly into the monitor to ensure alignment.
+**The Bug: NHL 3-Way Odds Not Normalized to 2-Way**
 
-```typescript
-// CORE LOGIC v1.3 THRESHOLDS (imported from canonical spec)
-const V1_3_GATES = {
-  S2_BOOK_PROB_MIN: 0.50,    // 50% minimum for execution-eligible
-  S1_BOOK_PROB_MIN: 0.45,    // 45% minimum for watch state
-  S2_CONFIDENCE_MIN: 55,
-  S2_TIME_TO_START_MIN: 10,  // minutes
-  SMS_TIERS: ['elite', 'strong'] as const,
-};
-```
+Example - Red Wings vs Avalanche:
+- Bookmaker raw data includes Draw: Colorado 54%, Detroit 26%, Draw 20%
+- Current calculation: Detroit fair = 26% / 100% = 26%
+- Polymarket price: 34c
+- Calculated edge: 26% - 34% = **-8%** (wrong!)
 
-### Change 2: Add Book Probability Gate (Stage 3.5)
-Add a hard gate BEFORE signal creation that rejects signals with book probability below floor.
+Correct calculation (2-way normalized):
+- Detroit fair = 26% / (26% + 54%) = **32.5%**
+- Polymarket price: 34c
+- Correct edge: 32.5% - 34% = **-1.5%** (still not actionable, but accurate)
 
-```typescript
-// ============= STAGE 3.5: BOOK PROBABILITY GATE (v1.3) =============
-// Book probability must meet minimum thresholds for signal quality
-const S1_PROB_FLOOR = 0.45;  // Minimum for any signal
-const S2_PROB_FLOOR = 0.50;  // Minimum for execution-eligible
+The `refresh-signals` function already handles this correctly (filters out Draw/Tie for NHL), but `watch-mode-poll` does not.
 
-if (recommendedFairProb < S1_PROB_FLOOR) {
-  console.log(`[V1.3] BOOK_PROB_GATE_REJECT: ${event.event_name} - ${(recommendedFairProb * 100).toFixed(1)}% < ${S1_PROB_FLOOR * 100}% floor`);
-  continue; // REJECT - book probability too low
-}
+---
 
-let signalState: 'S2_EXECUTION_ELIGIBLE' | 'S1_PROMOTE' | 'WATCH' = 'WATCH';
+### Fix Required
 
-if (recommendedFairProb >= S2_PROB_FLOOR) {
-  signalState = 'S2_EXECUTION_ELIGIBLE';
-} else if (recommendedFairProb >= S1_PROB_FLOOR) {
-  signalState = 'S1_PROMOTE';
-}
-```
+Add NHL 3-way to 2-way normalization in `watch-mode-poll` function, matching the logic already present in `refresh-signals`.
 
-### Change 3: Fix SMS Logic to Respect Tier Restriction
-Change the SMS dispatch to ONLY send for ELITE and STRONG signals.
+#### Technical Changes
 
-```typescript
-// Send SMS ONLY for ELITE and STRONG signals (v1.3 compliance)
-if (!signalError && signal && !existingSignal) {
-  const SMS_ELIGIBLE_TIERS = ['elite', 'strong'];
-  
-  if (SMS_ELIGIBLE_TIERS.includes(signalTier)) {
-    console.log(`[V1.3] SMS SENDING: tier=${signalTier}, edge=${(rawEdge * 100).toFixed(1)}%`);
-    const alertSent = await sendSmsAlert(...);
-    // ...
-  } else {
-    console.log(`[V1.3] SMS BLOCKED: tier=${signalTier} not in ${SMS_ELIGIBLE_TIERS.join(',')}`);
-  }
-}
-```
+**File: `supabase/functions/watch-mode-poll/index.ts`**
 
-### Change 4: Update calculateSignalTier to Consider Book Prob
-Add book probability as a factor in tier calculation.
+In the vig-free probability calculation section (around lines 706-728), add logic to:
+1. Detect if the sport is NHL
+2. Filter out any "Draw" or "Tie" outcomes from the probability map
+3. Renormalize the remaining 2-way probabilities before calculating edge
 
-```typescript
-function calculateSignalTier(
-  movementTriggered: boolean,
-  netEdge: number,
-  bookProbability: number  // NEW PARAMETER
-): 'elite' | 'strong' | 'static' {
-  // v1.3: Low book probability caps tier at STATIC regardless of edge
-  if (bookProbability < 0.45) return 'static';
-  
-  // High edge alone (10%+) qualifies as strong IF book prob is valid
-  if (netEdge >= 0.10 && bookProbability >= 0.50) {
-    return movementTriggered ? 'elite' : 'strong';
-  }
-  
-  if (!movementTriggered) return 'static';
-  if (netEdge >= 0.05) return 'elite';
-  if (netEdge >= 0.03) return 'strong';
-  return 'static';
-}
-```
+This is a straightforward fix that replicates existing logic from `refresh-signals` into `watch-mode-poll`.
 
-### Change 5: Add v1.3 Compliance Logging
-Add clear logging for v1.3 gate decisions to aid debugging.
+---
 
-```typescript
-console.log(`[V1.3] GATE_CHECK: ${event.event_name} | bookProb=${(recommendedFairProb * 100).toFixed(1)}% | state=${signalState} | tier=${signalTier}`);
-```
+### Summary
 
-## Files to Modify
-
-| File | Changes |
-|------|---------|
-| `supabase/functions/polymarket-monitor/index.ts` | Add book probability gate, fix SMS logic, update tier calculation |
-
-## Validation Steps
-
-After implementation:
-1. Run a scan and verify no signals with <45% book probability are created
-2. Verify STATIC signals do not trigger SMS
-3. Check logs for `[V1.3] BOOK_PROB_GATE_REJECT` entries
-4. Confirm ELITE/STRONG signals still get SMS
-
-## Expected Outcome
-
-- Signals like "Kings @ 15% book prob" will be REJECTED before creation
-- SMS will only fire for ELITE and STRONG tier signals
-- All signals will comply with Core Logic v1.3 probability floors
-- Clear v1.3 logging will make gate decisions transparent
+1. Polymarket prices are correct (validated against your screenshots)
+2. The issue is NHL 3-way odds not being converted to 2-way before edge calculation
+3. This affects all NHL games and explains the large negative edges
+4. Single-file fix required in `watch-mode-poll`
 
