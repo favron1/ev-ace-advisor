@@ -68,6 +68,19 @@ const corsHeaders = {
 };
 
 // ============================================================================
+// CORE LOGIC v1.3 THRESHOLDS (from canonical spec)
+// ============================================================================
+const V1_3_GATES = {
+  MOVEMENT_THRESHOLD: 0.05,       // 5% absolute probability change
+  VELOCITY_THRESHOLD: 0.003,      // 0.3% per minute
+  SHARP_CONSENSUS_MIN: 2,
+  TIME_WINDOW_MIN: 5,             // minutes
+  TIME_WINDOW_MAX: 15,            // minutes
+  S1_BOOK_PROB_MIN: 0.45,         // 45% minimum for any signal
+  S2_BOOK_PROB_MIN: 0.50,         // 50% minimum for execution-eligible
+} as const;
+
+// ============================================================================
 // CONFIGURATION
 // ============================================================================
 const MIN_EDGE_PCT = 2.0;
@@ -348,6 +361,92 @@ function calculateVigFreeProb(signals: BookmakerSignal[]): number {
   }
   
   return totalRawProb > 0 ? 1 / totalRawProb : 0; // Return vig multiplier for logging
+}
+
+// ============================================================================
+// MOVEMENT VELOCITY CALCULATION (v1.3)
+// ============================================================================
+// Calculate velocity from probability_snapshots time-series data
+// Returns: velocity in probability units per minute
+
+interface VelocityResult {
+  velocity: number;          // prob change per minute
+  absoluteMove: number;      // total probability change
+  timeWindowMinutes: number; // actual time window used
+  snapshotCount: number;     // number of snapshots analyzed
+  direction: 'shortening' | 'drifting' | null;
+  triggered: boolean;        // meets v1.3 velocity threshold
+}
+
+async function calculateMovementVelocity(
+  supabase: any,
+  eventKey: string,
+): Promise<VelocityResult> {
+  const nullResult: VelocityResult = {
+    velocity: 0,
+    absoluteMove: 0,
+    timeWindowMinutes: 0,
+    snapshotCount: 0,
+    direction: null,
+    triggered: false,
+  };
+  
+  try {
+    // Get snapshots from the last 15 minutes (v1.3 TIME_WINDOW_MAX)
+    const windowStart = new Date(Date.now() - V1_3_GATES.TIME_WINDOW_MAX * 60 * 1000).toISOString();
+    
+    const { data: snapshots, error } = await supabase
+      .from('probability_snapshots')
+      .select('fair_probability, captured_at')
+      .eq('event_key', eventKey)
+      .gte('captured_at', windowStart)
+      .order('captured_at', { ascending: true });
+    
+    if (error || !snapshots || snapshots.length < 2) {
+      return nullResult;
+    }
+    
+    // Calculate time window
+    const firstSnapshot = snapshots[0];
+    const lastSnapshot = snapshots[snapshots.length - 1];
+    const firstTime = new Date(firstSnapshot.captured_at).getTime();
+    const lastTime = new Date(lastSnapshot.captured_at).getTime();
+    const timeWindowMs = lastTime - firstTime;
+    const timeWindowMinutes = timeWindowMs / (60 * 1000);
+    
+    // Need at least TIME_WINDOW_MIN of data
+    if (timeWindowMinutes < V1_3_GATES.TIME_WINDOW_MIN) {
+      return nullResult;
+    }
+    
+    // Calculate probability change
+    const firstProb = firstSnapshot.fair_probability;
+    const lastProb = lastSnapshot.fair_probability;
+    const absoluteMove = lastProb - firstProb;
+    
+    // Calculate velocity (probability change per minute)
+    const velocity = timeWindowMinutes > 0 ? absoluteMove / timeWindowMinutes : 0;
+    
+    // Determine direction
+    const direction = absoluteMove > 0 ? 'shortening' : absoluteMove < 0 ? 'drifting' : null;
+    
+    // Check if velocity meets threshold (v1.3: 0.3% per minute = 0.003)
+    const triggered = Math.abs(velocity) >= V1_3_GATES.VELOCITY_THRESHOLD;
+    
+    console.log(`[V1.3] VELOCITY: ${eventKey.substring(0, 40)} | ${snapshots.length} snaps, ${timeWindowMinutes.toFixed(1)}m window, ${(absoluteMove * 100).toFixed(2)}% move, ${(velocity * 100).toFixed(3)}%/min velocity, triggered=${triggered}`);
+    
+    return {
+      velocity: Math.abs(velocity),
+      absoluteMove: Math.abs(absoluteMove),
+      timeWindowMinutes,
+      snapshotCount: snapshots.length,
+      direction,
+      triggered,
+    };
+  } catch (err) {
+    console.error(`[V1.3] Velocity calc error for ${eventKey}:`, err);
+    return nullResult;
+  }
 }
 
 // ============================================================================
@@ -684,12 +783,31 @@ Deno.serve(async (req) => {
       .slice(0, slotsAvailable);
 
     let escalatedCount = 0;
+    let velocityTriggeredCount = 0;
 
     for (const edgeData of toEscalate) {
       const { polyMarket, bookmakerFairProb, edge, matchedTeam } = edgeData;
       
       const eventKey = `poly_${polyMarket.condition_id}`;
       const activeUntil = new Date(Date.now() + ACTIVE_WINDOW_MINUTES * 60 * 1000).toISOString();
+
+      // ========================================================================
+      // V1.3: Calculate movement velocity from probability_snapshots
+      // ========================================================================
+      const velocityResult = await calculateMovementVelocity(supabase, eventKey);
+      
+      if (velocityResult.triggered) {
+        velocityTriggeredCount++;
+        console.log(`[V1.3] VELOCITY_TRIGGERED: ${polyMarket.question.substring(0, 40)}... | ${(velocityResult.velocity * 100).toFixed(3)}%/min, ${velocityResult.direction}`);
+      }
+      
+      // ========================================================================
+      // V1.3: Book probability gate - reject signals with book prob < 45%
+      // ========================================================================
+      if (bookmakerFairProb < V1_3_GATES.S1_BOOK_PROB_MIN) {
+        console.log(`[V1.3] BOOK_PROB_GATE_REJECT: ${polyMarket.question.substring(0, 40)}... | ${(bookmakerFairProb * 100).toFixed(1)}% < ${V1_3_GATES.S1_BOOK_PROB_MIN * 100}% floor`);
+        continue; // Skip this market entirely
+      }
 
       const { error: upsertError } = await supabase
         .from('event_watch_state')
@@ -706,26 +824,37 @@ Deno.serve(async (req) => {
           initial_probability: bookmakerFairProb,
           current_probability: bookmakerFairProb,
           peak_probability: bookmakerFairProb,
-          movement_pct: edge,
+          movement_pct: velocityResult.absoluteMove * 100, // Use actual movement, not edge
+          movement_velocity: velocityResult.velocity,      // NEW: Store velocity for monitor
           polymarket_price: polyMarket.yes_price,
           polymarket_matched: true,
           escalated_at: new Date().toISOString(),
           active_until: activeUntil,
           hold_start_at: new Date().toISOString(),
-          samples_since_hold: 0,
+          samples_since_hold: velocityResult.snapshotCount,
           last_poly_refresh: new Date().toISOString(),
         }, { onConflict: 'event_key' });
 
       if (!upsertError) {
         escalatedCount++;
-        console.log(`[${CORE_LOGIC_VERSION}] Escalated: ${polyMarket.question.substring(0, 40)}... (+${edge.toFixed(1)}%)`);
+        const velocityLabel = velocityResult.triggered ? `[VEL=${(velocityResult.velocity * 100).toFixed(2)}%/min]` : '';
+        console.log(`[${CORE_LOGIC_VERSION}] Escalated: ${polyMarket.question.substring(0, 40)}... (+${edge.toFixed(1)}% edge) ${velocityLabel}`);
       }
     }
 
-    // Store non-escalated edges in watching state
+    // Store non-escalated edges in watching state (with velocity data)
     for (const edgeData of edgesFound.filter(e => !toEscalate.includes(e))) {
       const { polyMarket, bookmakerFairProb, edge, matchedTeam } = edgeData;
       const eventKey = `poly_${polyMarket.condition_id}`;
+      
+      // V1.3: Book probability gate for watching state too
+      if (bookmakerFairProb < V1_3_GATES.S1_BOOK_PROB_MIN) {
+        console.log(`[V1.3] WATCHING_REJECT: ${polyMarket.question.substring(0, 40)}... | ${(bookmakerFairProb * 100).toFixed(1)}% < floor`);
+        continue;
+      }
+      
+      // Calculate velocity for watching state too
+      const velocityResult = await calculateMovementVelocity(supabase, eventKey);
 
       await supabase
         .from('event_watch_state')
@@ -741,7 +870,8 @@ Deno.serve(async (req) => {
           bookmaker_source: normalizeSportCategory(polyMarket.sport_category),
           initial_probability: bookmakerFairProb,
           current_probability: bookmakerFairProb,
-          movement_pct: edge,
+          movement_pct: velocityResult.absoluteMove * 100,
+          movement_velocity: velocityResult.velocity,
           polymarket_price: polyMarket.yes_price,
           polymarket_matched: true,
         }, { onConflict: 'event_key' });
@@ -772,6 +902,7 @@ Deno.serve(async (req) => {
         snapshots_stored: snapshots.length,
         edges_found: edgesFound.length,
         escalated_to_active: escalatedCount,
+        velocity_triggered: velocityTriggeredCount,
         duration_ms: duration,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }

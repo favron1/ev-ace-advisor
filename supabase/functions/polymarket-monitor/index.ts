@@ -579,11 +579,11 @@ async function detectSharpMovement(
 }
 
 // Determine signal tier based on movement + edge + book probability
-// v1.3: Book probability is now required for tier elevation
+// v1.3: Book probability AND movement confirmation required for high tiers
 function calculateSignalTier(
   movementTriggered: boolean,
   netEdge: number,
-  bookProbability: number  // NEW: Required for v1.3 compliance
+  bookProbability: number  // Required for v1.3 compliance
 ): 'elite' | 'strong' | 'static' {
   // v1.3: Low book probability caps tier at STATIC regardless of edge
   // Signals with <45% book prob are fundamentally not tradeable
@@ -592,13 +592,24 @@ function calculateSignalTier(
     return 'static';
   }
   
-  // High edge alone (10%+) qualifies as at least strong IF book prob is valid (>=50%)
-  if (netEdge >= 0.10 && bookProbability >= V1_3_GATES.S2_BOOK_PROB_MIN) {
-    return movementTriggered ? 'elite' : 'strong';
+  // v1.3: Movement confirmation is REQUIRED for STRONG and ELITE tiers
+  // High edge alone (10%+) is NOT sufficient without movement confirmation
+  // This ensures SMS alerts only go for high-conviction signals
+  if (!movementTriggered) {
+    // Without movement, max tier is STATIC regardless of edge
+    console.log(`[V1.3] TIER_CAP: No movement confirmation -> STATIC (edge=${(netEdge * 100).toFixed(1)}%)`);
+    return 'static';
   }
   
-  if (!movementTriggered) return 'static';
-  if (netEdge >= 0.05) return 'elite';
+  // With movement confirmed + valid book prob, tier based on edge magnitude
+  // Book probability must also be >=50% for S2 execution eligibility
+  if (bookProbability >= V1_3_GATES.S2_BOOK_PROB_MIN) {
+    if (netEdge >= 0.05) return 'elite';
+    if (netEdge >= 0.03) return 'strong';
+  }
+  
+  // Movement confirmed but either edge too small or book prob in S1 range (45-50%)
+  if (netEdge >= 0.05) return 'strong';  // Demoted from elite due to book prob
   if (netEdge >= 0.03) return 'strong';
   return 'static';
 }
