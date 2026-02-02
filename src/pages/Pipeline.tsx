@@ -6,8 +6,11 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { RefreshCw, Eye, Zap, CheckCircle, AlertTriangle, Clock, TrendingUp, Activity } from 'lucide-react';
+import { RefreshCw, Eye, Zap, CheckCircle, AlertTriangle, Clock, TrendingUp, Activity, ArrowUp, ArrowDown } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+
+type SortField = 'edge' | 'movement' | 'volume' | 'updated' | 'samples' | 'confidence' | 'probability' | 'time';
+type SortDirection = 'asc' | 'desc';
 
 interface WatchEvent {
   id: string;
@@ -101,7 +104,108 @@ export default function Pipeline() {
   const [recentSnapshots, setRecentSnapshots] = useState<Snapshot[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [sortField, setSortField] = useState<SortField>('edge');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const { toast } = useToast();
+
+  // Sort button component
+  const SortButton = ({ field, label }: { field: SortField; label: string }) => (
+    <Button
+      variant={sortField === field ? "default" : "outline"}
+      size="sm"
+      className="h-7 text-xs"
+      onClick={() => {
+        if (sortField === field) {
+          setSortDirection(d => d === 'asc' ? 'desc' : 'asc');
+        } else {
+          setSortField(field);
+          setSortDirection('desc');
+        }
+      }}
+    >
+      {label}
+      {sortField === field && (
+        sortDirection === 'desc' ? <ArrowDown className="h-3 w-3 ml-1" /> : <ArrowUp className="h-3 w-3 ml-1" />
+      )}
+    </Button>
+  );
+
+  // Sort functions
+  const sortEvents = (events: WatchEvent[]) => {
+    return [...events].sort((a, b) => {
+      let aVal = 0, bVal = 0;
+      switch (sortField) {
+        case 'edge':
+          aVal = (a.current_probability || 0) - (a.polymarket_yes_price || 0);
+          bVal = (b.current_probability || 0) - (b.polymarket_yes_price || 0);
+          break;
+        case 'movement':
+          aVal = a.movement_pct || 0;
+          bVal = b.movement_pct || 0;
+          break;
+        case 'volume':
+          aVal = a.polymarket_volume || 0;
+          bVal = b.polymarket_volume || 0;
+          break;
+        case 'updated':
+          aVal = new Date(a.updated_at).getTime();
+          bVal = new Date(b.updated_at).getTime();
+          break;
+        case 'samples':
+          aVal = a.samples_since_hold || 0;
+          bVal = b.samples_since_hold || 0;
+          break;
+        default:
+          aVal = (a.current_probability || 0) - (a.polymarket_yes_price || 0);
+          bVal = (b.current_probability || 0) - (b.polymarket_yes_price || 0);
+      }
+      return sortDirection === 'desc' ? bVal - aVal : aVal - bVal;
+    });
+  };
+
+  const sortSignals = (sigs: Signal[]) => {
+    return [...sigs].sort((a, b) => {
+      let aVal = 0, bVal = 0;
+      switch (sortField) {
+        case 'edge':
+          aVal = a.edge_percent || 0;
+          bVal = b.edge_percent || 0;
+          break;
+        case 'confidence':
+          aVal = a.confidence_score || 0;
+          bVal = b.confidence_score || 0;
+          break;
+        case 'updated':
+          aVal = new Date(a.created_at).getTime();
+          bVal = new Date(b.created_at).getTime();
+          break;
+        default:
+          aVal = a.edge_percent || 0;
+          bVal = b.edge_percent || 0;
+      }
+      return sortDirection === 'desc' ? bVal - aVal : aVal - bVal;
+    });
+  };
+
+  const sortSnapshots = (snaps: Snapshot[]) => {
+    return [...snaps].sort((a, b) => {
+      let aVal = 0, bVal = 0;
+      switch (sortField) {
+        case 'probability':
+          aVal = a.fair_probability || 0;
+          bVal = b.fair_probability || 0;
+          break;
+        case 'time':
+          aVal = new Date(a.captured_at).getTime();
+          bVal = new Date(b.captured_at).getTime();
+          break;
+        default:
+          aVal = new Date(a.captured_at).getTime();
+          bVal = new Date(b.captured_at).getTime();
+      }
+      return sortDirection === 'desc' ? bVal - aVal : aVal - bVal;
+    });
+  };
 
   const fetchData = async () => {
     try {
@@ -210,7 +314,17 @@ export default function Pipeline() {
           <TabsContent value="all">
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-lg">All Watched Events</CardTitle>
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-lg">All Watched Events</CardTitle>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">Sort:</span>
+                    <SortButton field="edge" label="Edge" />
+                    <SortButton field="movement" label="Movement" />
+                    <SortButton field="volume" label="Volume" />
+                    <SortButton field="updated" label="Updated" />
+                    <SortButton field="samples" label="Samples" />
+                  </div>
+                </div>
               </CardHeader>
               <CardContent>
                 <ScrollArea className="h-[600px]">
@@ -220,7 +334,7 @@ export default function Pipeline() {
                     ) : watchEvents.length === 0 ? (
                       <div className="text-center py-8 text-muted-foreground">No events in pipeline</div>
                     ) : (
-                      watchEvents.map((event) => (
+                      sortEvents(watchEvents).map((event) => (
                         <div
                           key={event.id}
                           className="p-3 rounded-lg border bg-card hover:bg-muted/50 transition-colors"
@@ -270,7 +384,16 @@ export default function Pipeline() {
           <TabsContent value="active">
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-lg">Active Pipeline (Monitored + Active)</CardTitle>
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-lg">Active Pipeline (Monitored + Active)</CardTitle>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">Sort:</span>
+                    <SortButton field="edge" label="Edge" />
+                    <SortButton field="movement" label="Movement" />
+                    <SortButton field="volume" label="Volume" />
+                    <SortButton field="samples" label="Samples" />
+                  </div>
+                </div>
               </CardHeader>
               <CardContent>
                 <ScrollArea className="h-[600px]">
@@ -278,7 +401,7 @@ export default function Pipeline() {
                     {[...(eventsByState['active'] || []), ...(eventsByState['monitored'] || [])].length === 0 ? (
                       <div className="text-center py-8 text-muted-foreground">No events currently in active monitoring</div>
                     ) : (
-                      [...(eventsByState['active'] || []), ...(eventsByState['monitored'] || [])].map((event) => (
+                      sortEvents([...(eventsByState['active'] || []), ...(eventsByState['monitored'] || [])]).map((event) => (
                         <div
                           key={event.id}
                           className="p-4 rounded-lg border bg-card"
@@ -352,7 +475,15 @@ export default function Pipeline() {
           <TabsContent value="signals">
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-lg">Signal Opportunities</CardTitle>
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-lg">Signal Opportunities</CardTitle>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">Sort:</span>
+                    <SortButton field="edge" label="Edge" />
+                    <SortButton field="confidence" label="Confidence" />
+                    <SortButton field="updated" label="Updated" />
+                  </div>
+                </div>
               </CardHeader>
               <CardContent>
                 <ScrollArea className="h-[600px]">
@@ -360,7 +491,7 @@ export default function Pipeline() {
                     {signals.length === 0 ? (
                       <div className="text-center py-8 text-muted-foreground">No signals created yet</div>
                     ) : (
-                      signals.map((signal) => (
+                      sortSignals(signals).map((signal) => (
                         <div
                           key={signal.id}
                           className="p-3 rounded-lg border bg-card"
@@ -402,7 +533,14 @@ export default function Pipeline() {
           <TabsContent value="snapshots">
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-lg">Recent Probability Snapshots</CardTitle>
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-lg">Recent Probability Snapshots</CardTitle>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">Sort:</span>
+                    <SortButton field="probability" label="Probability" />
+                    <SortButton field="time" label="Time" />
+                  </div>
+                </div>
               </CardHeader>
               <CardContent>
                 <ScrollArea className="h-[600px]">
@@ -410,7 +548,7 @@ export default function Pipeline() {
                     {recentSnapshots.length === 0 ? (
                       <div className="text-center py-8 text-muted-foreground">No snapshots recorded</div>
                     ) : (
-                      recentSnapshots.map((snap) => (
+                      sortSnapshots(recentSnapshots).map((snap) => (
                         <div
                           key={snap.id}
                           className="p-2 rounded border bg-card text-sm flex items-center justify-between"
