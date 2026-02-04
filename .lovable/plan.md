@@ -1,138 +1,148 @@
 
+# Signal Generation Pipeline Failure: Root Cause Analysis
 
-# H2H-Only Architecture Fix
+## Executive Summary
 
-## Problem Summary
-
-The Pipeline only shows 3 H2H markets when there should be ~70+ in the next 24 hours. Investigation revealed:
-
-| Metric | Current | Expected |
-|--------|---------|----------|
-| H2H markets in Polymarket cache | 71 | 71 |
-| Markets passing volume filter | 9 | 71 |
-| Markets matched to bookmakers | 3 | ~40 |
-| Bookmaker H2H events available | 36 | 36 |
-
-**Root causes:**
-1. `min_poly_volume = 5000` filters out 87% of markets (volume data is `$0` for many)
-2. Sport category normalization missing for NCAA, Soccer, etc.
-3. No volume data being captured during Polymarket sync for new markets
+Signals stopped generating on **Feb 1, 2026** (3 days ago). The last successful signals were NHL games on Jan 31 with edges of 5-40%. Currently, 0 signals are being created despite 73 markets being monitored.
 
 ---
 
-## Solution
+## Critical Issues Identified
 
-### 1. Remove Volume Filter Entirely
-**File: `scan_config` table**
+### Issue 1: Token ID Crisis (56 of 73 markets blocked)
+**Impact: 77% of markets immediately blocked**
 
-Volume is unreliable for fresh markets. Instead, use the existence of a tradeable Polymarket market as the gating factor:
+The `polymarket-monitor` requires CLOB token IDs to get live prices, but:
+- **API-sourced markets** (NHL games from Gamma API) have tokens but placeholder prices (50¢)
+- **Firecrawl-sourced markets** (NBA, Soccer) have REAL prices but NO tokens
 
+```text
+Source        | Has Tokens | Has Real Prices
+--------------|------------|----------------
+API/Gamma     | YES        | NO (all 50¢)  
+Firecrawl     | NO         | YES (34-67¢)
+```
+
+**Why this happened**: The sync function stores default 0.5 prices from Gamma API metadata. CLOB price fetching happens in the monitor, but only for tokenized markets.
+
+### Issue 2: CLOB Price Fetch Not Updating Cache
+**Impact: All "tokenized" markets show stale 50¢ prices**
+
+The monitor fetches live CLOB prices but:
+1. Logs show `priced_from_clob: 0` - zero prices actually retrieved
+2. Cache still shows `yes_price: 0.5` for all API markets
+3. The CLOB fetch is working (logs show polyPrice=0.41) but cache isn't being updated properly
+
+**Evidence**:
 ```sql
-UPDATE scan_config SET min_poly_volume = 0;
+-- All API markets have 50¢ placeholder prices
+SELECT yes_price FROM polymarket_h2h_cache WHERE source='api' AND market_type='h2h'
+-- Result: ALL rows show yes_price = 0.5
 ```
 
-### 2. Fix watch-mode-poll to Skip Volume Check
-**File: `supabase/functions/watch-mode-poll/index.ts`**
+### Issue 3: Mapping Inversion Block Too Aggressive
+**Impact: Legitimate signals blocked**
 
-Remove the volume filter from the market query:
+The safety rail at line 2288-2305 blocks signals when:
+- Current mapping edge < 1% AND
+- Swapped mapping edge > 5%
 
-```typescript
-// BEFORE:
-.gte('volume', minVolume)
+This logic INCORRECTLY blocks markets where:
+- Polymarket price (41¢) matches bookmaker fair prob (40.8%)
+- There's genuinely NO edge - not a mapping problem
 
-// AFTER:
-// (removed - any H2H market with a price is eligible)
+**Example from logs**:
+```
+Bruins vs. Panthers: polyPrice=0.41, yesFairProb=0.408
+→ bestA=0.24% (tiny edge), bestB=18.2% (swapped)
+→ BLOCKED - but should just SKIP (no real edge)
 ```
 
-### 3. Add Sport Category Normalization
-**File: `supabase/functions/watch-mode-poll/index.ts`**
+### Issue 4: Volume Filter on Edge Calculation
+**Impact: Low-volume markets skipped**
 
-Expand `normalizeSportCategory()` to handle more categories:
+Line 2244 requires `liveVolume >= 5000` to calculate edges. Many new H2H markets have $0 volume initially.
 
-```typescript
-const aliases: Record<string, string> = {
-  // Existing
-  'NHL': 'icehockey_nhl',
-  'NBA': 'basketball_nba',
-  'NFL': 'americanfootball_nfl',
-  
-  // Add NCAA mapping
-  'NCAA': 'basketball_ncaab',
-  'NCAAB': 'basketball_ncaab',
-  
-  // Add Soccer mappings  
-  'EPL': 'soccer_epl',
-  'La Liga': 'soccer_spain_la_liga',
-  'Bundesliga': 'soccer_germany_bundesliga',
-  'Serie A': 'soccer_italy_serie_a',
-  'UCL': 'soccer_uefa_champs_league',
-};
-```
+### Issue 5: Movement Detection Finding No Velocity
+**Impact: All signals capped at STATIC tier**
 
-### 4. Enable All Configured Sports in scan_config
-**Database update:**
-
-```sql
-UPDATE scan_config 
-SET enabled_sports = ARRAY[
-  'basketball_nba',
-  'basketball_ncaab', 
-  'icehockey_nhl',
-  'americanfootball_nfl',
-  'soccer_epl',
-  'soccer_spain_la_liga',
-  'soccer_germany_bundesliga',
-  'soccer_italy_serie_a',
-  'soccer_uefa_champs_league'
-];
-```
-
-### 5. Clean Up Non-H2H Markets from Database
-**One-time cleanup:**
-
-```sql
--- Remove spreads, totals, and futures from event_watch_state
-UPDATE event_watch_state 
-SET watch_state = 'expired'
-WHERE event_name ILIKE '%spread:%'
-   OR event_name ILIKE '%o/u %'
-   OR event_name ILIKE '%traded%'
-   OR event_name ILIKE '%win totals%'
-   OR event_name ILIKE '%championship%';
-
--- Also clean up polymarket_h2h_cache
-UPDATE polymarket_h2h_cache 
-SET status = 'expired'
-WHERE market_type != 'h2h';
-```
+Logs show `0 movement-confirmed` - the velocity calculation requires historical snapshots in `probability_snapshots` table. Without movement confirmation:
+- All signals capped at STATIC tier
+- No SMS alerts sent (requires STRONG or ELITE tier)
 
 ---
 
-## Technical Details
+## What Changed Since Jan 31 (When Signals Worked)
 
-### Why Volume Filtering Fails
+| Factor | Jan 31 (Working) | Now (Broken) |
+|--------|-----------------|--------------|
+| Token ID availability | Most markets had tokens | 77% missing tokens |
+| CLOB price accuracy | Real prices (38¢, 43¢, etc.) | All 50¢ placeholders |
+| Edge detection | 5-40% edges found | 0 edges over threshold |
+| Markets monitored | ~30 H2H games | 73 markets (but 56 blocked) |
 
-Polymarket's Gamma API returns volume data, but:
-1. New markets start with `$0` volume
-2. The sync runs every few hours, so volume is stale
-3. Many legitimate H2H games have low volume because they're new
+---
 
-The real filter should be: **Does a tradeable Polymarket market exist?** If yes, monitor it.
+## Recommended Fixes (Priority Order)
 
-### Expected Outcome After Fix
+### Fix 1: Token ID Repair Pipeline (CRITICAL)
+Create a self-healing process that:
+1. Looks up missing token IDs from CLOB API by condition_id
+2. Updates cache with resolved token IDs
+3. Runs before each monitor cycle
 
-| Metric | Before | After |
-|--------|--------|-------|
-| H2H markets monitored | 3 | ~50+ |
-| Sports covered | NHL only | NHL, NBA, NCAA, EPL, La Liga, etc. |
-| False positives | None | None (still requires bookmaker match) |
+### Fix 2: Cache Price Update in Monitor
+When CLOB prices are fetched successfully, update the cache:
+```typescript
+// After fetching CLOB prices, update cache
+await supabase.from('polymarket_h2h_cache').update({
+  yes_price: freshClobPrice,
+  last_price_update: now.toISOString(),
+}).eq('condition_id', conditionId);
+```
 
-### Files to Modify
+### Fix 3: Relax Mapping Inversion Gate
+Change the blocking logic from:
+```typescript
+const shouldBlock = bestA < 0.01 && bestB > SWAP_THRESHOLD;
+```
+To skip naturally when no edge exists:
+```typescript
+// Don't block - just let the "no positive edge" check handle it
+const shouldBlock = false; // Disable aggressive blocking
+```
+
+### Fix 4: Remove Volume Filter from Edge Calculation
+Change line 2244 from:
+```typescript
+if (yesFairProb !== null && noFairProb !== null && liveVolume >= 5000)
+```
+To:
+```typescript
+if (yesFairProb !== null && noFairProb !== null)
+```
+
+### Fix 5: Populate Probability Snapshots for Movement Detection
+Ensure `ingest-odds` is storing snapshots to `probability_snapshots` table for velocity calculation.
+
+---
+
+## Files to Modify
 
 | File | Changes |
 |------|---------|
-| `supabase/functions/watch-mode-poll/index.ts` | Remove volume filter, expand sport normalization |
-| Database (`scan_config`) | Set `min_poly_volume = 0`, expand `enabled_sports` |
-| Database (`event_watch_state`) | Expire non-H2H entries |
-| Database (`polymarket_h2h_cache`) | Expire non-H2H market_types |
+| `supabase/functions/polymarket-monitor/index.ts` | Fix token repair, relax inversion block, remove volume filter |
+| `supabase/functions/polymarket-sync-24h/index.ts` | Fetch CLOB prices during sync, not just metadata |
+| `supabase/functions/tokenize-market/index.ts` | Enhance token lookup to run for all untokenized markets |
 
+---
+
+## Expected Outcome After Fixes
+
+| Metric | Current | After Fix |
+|--------|---------|-----------|
+| Markets with tokens | 17/73 (23%) | 60+ (80%+) |
+| Markets with real prices | 0 | 60+ |
+| Edges calculated | 9 | 60+ |
+| Edges over threshold | 0 | 5-15 per scan |
+| Signals created | 0 | 3-10 per day |
