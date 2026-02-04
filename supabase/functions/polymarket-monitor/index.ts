@@ -1575,6 +1575,9 @@ Deno.serve(async (req) => {
       failure_team_alias_missing: 0,
       failure_no_book_game_found: 0,
       failure_start_time_mismatch: 0,
+      // NEW: Token repair and cache update stats
+      token_repairs_success: 0,
+      cache_prices_updated: 0,
     };
 
     // V1.3: Helper function to log match failures to database
@@ -1699,10 +1702,69 @@ Deno.serve(async (req) => {
         const marketType = cache?.market_type || 'h2h';
         const tokenIdYes = cache?.token_id_yes;
         
-        // ============= HARD GATE: NO TOKENS = NO SIGNAL =============
-        // Phase 1 critical fix: Block all untokenized markets at pipeline entry
-        // This prevents garbage signals from placeholders and missing data
-        if (!tokenIdYes) {
+        // ============= SELF-HEALING TOKEN REPAIR =============
+        // Instead of blocking immediately, attempt to repair missing tokens
+        let repairedTokenIdYes = tokenIdYes;
+        let repairedTokenIdNo = cache?.token_id_no;
+        
+        if (!tokenIdYes && event.polymarket_condition_id) {
+          console.log(`[POLY-MONITOR] ATTEMPTING TOKEN REPAIR for "${event.event_name}"...`);
+          
+          try {
+            // Try CLOB API direct lookup first (fastest, highest confidence)
+            const clobRepairUrl = `${CLOB_API_BASE}/markets/${event.polymarket_condition_id}`;
+            const clobRepairResponse = await fetch(clobRepairUrl);
+            
+            if (clobRepairResponse.ok) {
+              const marketData = await clobRepairResponse.json();
+              const tokens = marketData.tokens || [];
+              
+              if (tokens.length >= 2) {
+                // Find YES and NO tokens by outcome field
+                for (const token of tokens) {
+                  const outcome = (token.outcome || '').toLowerCase();
+                  if (outcome === 'yes' || outcome === 'true') {
+                    repairedTokenIdYes = token.token_id;
+                  } else if (outcome === 'no' || outcome === 'false') {
+                    repairedTokenIdNo = token.token_id;
+                  }
+                }
+                
+                // Fallback to array ordering if outcomes not labeled
+                if (!repairedTokenIdYes && tokens[0]?.token_id) {
+                  repairedTokenIdYes = tokens[0].token_id;
+                }
+                if (!repairedTokenIdNo && tokens[1]?.token_id) {
+                  repairedTokenIdNo = tokens[1].token_id;
+                }
+                
+                if (repairedTokenIdYes) {
+                  // SUCCESS! Update cache with repaired tokens
+                  await supabase
+                    .from('polymarket_h2h_cache')
+                    .update({
+                      token_id_yes: repairedTokenIdYes,
+                      token_id_no: repairedTokenIdNo,
+                      token_source: 'clob_repair',
+                      token_confidence: 100,
+                      tradeable: true,
+                      untradeable_reason: null,
+                      last_token_repair_at: now.toISOString(),
+                    })
+                    .eq('condition_id', event.polymarket_condition_id);
+                  
+                  console.log(`[POLY-MONITOR] TOKEN_REPAIR_SUCCESS: "${event.event_name}" → YES=${repairedTokenIdYes?.slice(0, 16)}...`);
+                  funnelStats.token_repairs_success = (funnelStats.token_repairs_success || 0) + 1;
+                }
+              }
+            }
+          } catch (repairErr) {
+            console.log(`[POLY-MONITOR] TOKEN_REPAIR_ERROR for "${event.event_name}":`, (repairErr as Error).message);
+          }
+        }
+        
+        // HARD GATE: If still no tokens after repair attempt, block
+        if (!repairedTokenIdYes) {
           // Update cache to mark as untradeable
           if (event.polymarket_condition_id) {
             await supabase
@@ -1714,10 +1776,13 @@ Deno.serve(async (req) => {
               .eq('condition_id', event.polymarket_condition_id);
           }
           
-          console.log(`[POLY-MONITOR] HARD_GATE_BLOCKED: No token_id_yes for "${event.event_name}"`);
+          console.log(`[POLY-MONITOR] HARD_GATE_BLOCKED: No token_id_yes for "${event.event_name}" (repair failed)`);
           funnelStats.blocked_no_tokens++;
           continue;
         }
+        
+        // Use repaired token for rest of pipeline
+        const effectiveTokenIdYes = repairedTokenIdYes;
         
         // Check if market is explicitly marked untradeable
         if (cache?.tradeable === false) {
@@ -2227,21 +2292,33 @@ Deno.serve(async (req) => {
           })
           .eq('id', event.id);
         
-        // Update cache with CLOB bid/ask/spread data
-        if (bestBid !== null || bestAsk !== null || spreadPct !== null) {
+        // FIX #2: Update cache with CLOB prices - sync cache to reality
+        // This fixes the "stale 50¢ prices" issue by updating cache with live CLOB data
+        if (bestBid !== null || bestAsk !== null || spreadPct !== null || livePolyPrice !== null) {
+          const cacheUpdate: Record<string, any> = {
+            last_price_update: now.toISOString(),
+          };
+          
+          if (bestBid !== null) cacheUpdate.best_bid = bestBid;
+          if (bestAsk !== null) cacheUpdate.best_ask = bestAsk;
+          if (spreadPct !== null) cacheUpdate.spread_pct = spreadPct;
+          
+          // CRITICAL: Update yes_price in cache with live CLOB price
+          if (livePolyPrice !== null && livePolyPrice !== 0.5) {
+            cacheUpdate.yes_price = livePolyPrice;
+            cacheUpdate.no_price = 1 - livePolyPrice;
+            funnelStats.cache_prices_updated = (funnelStats.cache_prices_updated || 0) + 1;
+          }
+          
           await supabase
             .from('polymarket_h2h_cache')
-            .update({
-              best_bid: bestBid,
-              best_ask: bestAsk,
-              spread_pct: spreadPct,
-              last_price_update: now.toISOString(),
-            })
+            .update(cacheUpdate)
             .eq('condition_id', event.polymarket_condition_id);
         }
 
         // Check for edge - now uses BOTH fair probs directly
-        if (yesFairProb !== null && noFairProb !== null && liveVolume >= 5000) {
+        // FIX #4: Remove volume filter - volume is unreliable for new markets
+        if (yesFairProb !== null && noFairProb !== null) {
           funnelStats.edges_calculated++;
           // SKIP if we can't determine the bet side
           if (!yesTeamName || !noTeamName) {
@@ -2282,27 +2359,23 @@ Deno.serve(async (req) => {
           const bestA = Math.max(yesEdge_A, noEdge_A);
           const bestB = Math.max(yesEdge_B, noEdge_B);
           
-          // RELAXED GATE: Only block if current mapping is negative/marginal AND swap is much better
-          // This allows small positive edges to pass through
-          const SWAP_THRESHOLD = 0.05; // Swapped mapping must show >5% edge to trigger block
-          const shouldBlock = bestA < 0.01 && bestB > SWAP_THRESHOLD;
+          // FIX #3: DISABLED aggressive inversion blocking
+          // The inversion logic was blocking legitimate "no edge" scenarios
+          // Let the natural "no positive edge" check handle it instead
+          const SWAP_THRESHOLD = 0.05;
+          const shouldBlock = false; // DISABLED - was too aggressive
           
-          if (shouldBlock) {
-            console.log(`[POLY-MONITOR] MAPPING_INVERSION_BLOCKED`, {
+          // Log for monitoring but don't block
+          if (bestA < 0.01 && bestB > SWAP_THRESHOLD) {
+            console.log(`[POLY-MONITOR] MAPPING_INVERSION_LOGGED (not blocking)`, {
               event: event.event_name,
               polyPrice: livePolyPrice,
               yesFairProb,
               noFairProb,
-              bestA,
-              bestB,
-              reason: 'Current mapping weak (<1%) but swapped shows >5% edge',
-              tokenIdYes,
-              yesTeamName,
-              noTeamName,
-              spreadPct,
-              volume: liveVolume,
+              bestA: (bestA * 100).toFixed(1) + '%',
+              bestB: (bestB * 100).toFixed(1) + '%',
+              reason: 'Low edge - letting natural skip handle it',
             });
-            continue;
           }
           
           // Log when we're allowing a signal through despite swap looking better (for monitoring)
