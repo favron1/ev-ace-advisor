@@ -405,6 +405,22 @@ Deno.serve(async (req) => {
         ? cacheMap.get(signal.polymarket_condition_id) 
         : null;
 
+      // HARD GATE: If this signal is backed by a market with no CLOB token IDs,
+      // the "live" price is not verifiable and often wrong (Firecrawl/UI scrape).
+      // Expire immediately to prevent bad prices from persisting in the UI.
+      if (cache) {
+        const tokenIdForSide = signal.side === 'YES' ? cache.token_id_yes : cache.token_id_no;
+        const hasAnyToken = !!cache.token_id_yes || !!cache.token_id_no;
+
+        if (!hasAnyToken || !tokenIdForSide) {
+          console.warn(
+            `[REFRESH] UNVERIFIED_PRICE_EXPIRE: signal=${signal.id.slice(0, 8)} side=${signal.side} condition=${signal.polymarket_condition_id} event="${signal.event_name}" (missing tokens)`
+          );
+          toExpire.push({ id: signal.id, reason: 'unverified_polymarket_price' });
+          continue;
+        }
+      }
+
       // Get live price from CLOB based on signal side
       // ENHANCED: Also fetch the opposite side for validation logging
       let livePrice: number | null = null;
@@ -604,6 +620,7 @@ Deno.serve(async (req) => {
       event_started: toExpire.filter(e => e.reason === 'event_started').map(e => e.id),
       edge_gone: toExpire.filter(e => e.reason === 'edge_gone').map(e => e.id),
       stale_bookmaker_data: toExpire.filter(e => e.reason === 'stale_bookmaker_data').map(e => e.id),
+      unverified_polymarket_price: toExpire.filter(e => e.reason === 'unverified_polymarket_price').map(e => e.id),
     };
 
     for (const [reason, ids] of Object.entries(expiredByReason)) {
