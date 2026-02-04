@@ -345,7 +345,61 @@ async function extractFromFirecrawl(marketUrl: string): Promise<TokenResult> {
   }
 }
 
+// Phase 3: DATE EXTRACTION FROM MARKET QUESTION
+// Extract dates from market questions to filter stale/old markets
+function extractDateFromQuestion(question: string): Date | null {
+  const q = question.toLowerCase();
+  
+  // Try ISO format: "2026-02-01", "2025-03-15"
+  const isoMatch = q.match(/\b(202[4-9])-(\d{2})-(\d{2})\b/);
+  if (isoMatch) {
+    return new Date(`${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}T23:59:59Z`);
+  }
+  
+  // Try natural format: "January 31", "Feb 2"
+  const monthNames: Record<string, number> = {
+    january: 0, jan: 0, february: 1, feb: 1, march: 2, mar: 2,
+    april: 3, apr: 3, may: 4, june: 5, jun: 5,
+    july: 6, jul: 6, august: 7, aug: 7, september: 8, sep: 8,
+    october: 9, oct: 9, november: 10, nov: 10, december: 11, dec: 11,
+  };
+  
+  const naturalMatch = q.match(/\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\.?\s+(\d{1,2})\b/i);
+  if (naturalMatch) {
+    const month = monthNames[naturalMatch[1].toLowerCase()];
+    const day = parseInt(naturalMatch[2], 10);
+    if (month !== undefined && day >= 1 && day <= 31) {
+      const now = new Date();
+      let year = now.getFullYear();
+      let parsedDate = new Date(Date.UTC(year, month, day, 23, 59, 59));
+      // If date is in the past, try next year
+      if (parsedDate < now) {
+        parsedDate = new Date(Date.UTC(year + 1, month, day, 23, 59, 59));
+      }
+      return parsedDate;
+    }
+  }
+  
+  return null;
+}
+
+// Phase 3: Check if market is stale (older than 7 days from now)
+function isMarketStale(question: string): boolean {
+  const marketDate = extractDateFromQuestion(question);
+  if (!marketDate) {
+    // Can't determine date - don't reject, but log warning
+    return false;
+  }
+  
+  const now = new Date();
+  const daysDiff = (now.getTime() - marketDate.getTime()) / (1000 * 60 * 60 * 24);
+  
+  // Reject if market date is more than 7 days in the past
+  return daysDiff > 7;
+}
+
 // Search CLOB API for matching market by team names
+// Phase 3: Added freshness validation to reject stale markets
 async function extractFromClobSearch(
   teamHome: string,
   teamAway: string
@@ -385,6 +439,13 @@ async function extractFromClobSearch(
                       (awayNickname.length > 2 && question.includes(awayNickname));
       
       if (hasHome && hasAway) {
+        // Phase 3: FRESHNESS VALIDATION
+        // Reject stale markets (games from more than 7 days ago)
+        if (isMarketStale(market.question || '')) {
+          log.push(`STALE_MARKET_REJECTED: "${market.question}" - date is >7 days old`);
+          continue; // Skip this market, try next match
+        }
+        
         const tokens = market.tokens || [];
         if (tokens.length >= 2 && market.condition_id) {
           log.push(`SUCCESS from CLOB search: "${market.question}"`);

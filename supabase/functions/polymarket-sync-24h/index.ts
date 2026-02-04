@@ -728,6 +728,14 @@ Deno.serve(async (req) => {
         const dateStr = eventDate.toISOString().split('T')[0]; // YYYY-MM-DD
         const generatedSlug = `${sportCode}-${game.team1Code}-${game.team2Code}-${dateStr}`.toLowerCase();
         
+        // Phase 2: VALIDATE SCRAPED PRICES
+        // Firecrawl prices should sum to ~100% for valid H2H markets
+        const priceSum = game.team1Price + game.team2Price;
+        if (priceSum < 0.90 || priceSum > 1.10) {
+          console.log(`[FIRECRAWL] PRICE_VALIDATION_FAIL: ${game.team1Name} vs ${game.team2Name} - prices sum to ${(priceSum * 100).toFixed(0)}% (expected ~100%) - SKIPPING`);
+          return; // Skip this game
+        }
+        
         // Determine tradeability based on token presence
         const isTradeable = !!(clobData.tokenIdYes && clobData.tokenIdNo);
         const untradeableReason = isTradeable ? null : 'MISSING_TOKENS';

@@ -1542,6 +1542,7 @@ Deno.serve(async (req) => {
       // TOKENIZATION GATE (Phase 1 - Critical)
       blocked_no_tokens: 0,
       blocked_untradeable: 0,
+      blocked_no_orderbook: 0,  // Phase 1: Markets with stale/invalid orderbooks
       tokenized_total: 0,
       // Previous stats
       skipped_no_tokens: 0,
@@ -1785,6 +1786,46 @@ Deno.serve(async (req) => {
         
         // Use repaired token for rest of pipeline
         const effectiveTokenIdYes = repairedTokenIdYes;
+        const effectiveTokenIdNo = repairedTokenIdNo;
+        
+        // ============= PHASE 1: ORDERBOOK VALIDATION =============
+        // Validate that the token has an active orderbook before pricing
+        // This prevents using stale 2023 tokens that return "No orderbook exists"
+        if (effectiveTokenIdYes) {
+          try {
+            const orderbookResponse = await fetch(`${CLOB_API_BASE}/book?token_id=${effectiveTokenIdYes}`);
+            
+            if (!orderbookResponse.ok) {
+              const errorText = await orderbookResponse.text();
+              
+              // Check if this is a "no orderbook" error
+              if (errorText.includes('No orderbook exists') || orderbookResponse.status === 404) {
+                console.log(`[POLY-MONITOR] ORDERBOOK_VALIDATION_FAILED: "${event.event_name}" - no active orderbook for token`);
+                
+                // Mark as untradeable in cache
+                if (event.polymarket_condition_id) {
+                  await supabase
+                    .from('polymarket_h2h_cache')
+                    .update({
+                      tradeable: false,
+                      untradeable_reason: 'NO_ORDERBOOK_EXISTS',
+                    })
+                    .eq('condition_id', event.polymarket_condition_id);
+                }
+                
+                funnelStats.blocked_no_orderbook = (funnelStats.blocked_no_orderbook || 0) + 1;
+                continue; // Skip this market - token is stale/invalid
+              }
+            }
+            
+            // Orderbook exists - token is valid
+            console.log(`[POLY-MONITOR] ORDERBOOK_VALIDATED: "${event.event_name}" has active orderbook`);
+          } catch (orderbookErr) {
+            // Network error during validation - log but continue (don't block on transient errors)
+            console.log(`[POLY-MONITOR] ORDERBOOK_CHECK_ERROR: "${event.event_name}": ${(orderbookErr as Error).message}`);
+          }
+        }
+        // ============= END PHASE 1 =============
         
         // FIX: Check tradeable ONLY if we didn't just repair the token
         // After repair, tradeable flag in cache is stale - we updated DB but not local object
