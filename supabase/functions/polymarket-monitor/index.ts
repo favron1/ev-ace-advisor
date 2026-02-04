@@ -1702,61 +1702,63 @@ Deno.serve(async (req) => {
         const marketType = cache?.market_type || 'h2h';
         const tokenIdYes = cache?.token_id_yes;
         
-        // ============= SELF-HEALING TOKEN REPAIR =============
-        // Instead of blocking immediately, attempt to repair missing tokens
+        // ============= SELF-HEALING TOKEN REPAIR (V2: Full Extractor Chain) =============
+        // Instead of blocking immediately, call tokenize-market function which has full
+        // extraction strategy: CLOB API → Gamma API → CLOB Search
         let repairedTokenIdYes = tokenIdYes;
         let repairedTokenIdNo = cache?.token_id_no;
         
-        if (!tokenIdYes && event.polymarket_condition_id) {
+        if (!tokenIdYes && cache) {
           console.log(`[POLY-MONITOR] ATTEMPTING TOKEN REPAIR for "${event.event_name}"...`);
           
           try {
-            // Try CLOB API direct lookup first (fastest, highest confidence)
-            const clobRepairUrl = `${CLOB_API_BASE}/markets/${event.polymarket_condition_id}`;
-            const clobRepairResponse = await fetch(clobRepairUrl);
+            // Call tokenize-market edge function with team names (works for firecrawl markets)
+            const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+            const supabaseKey = Deno.env.get('SUPABASE_ANON_KEY')!;
             
-            if (clobRepairResponse.ok) {
-              const marketData = await clobRepairResponse.json();
-              const tokens = marketData.tokens || [];
+            const repairResponse = await fetch(`${supabaseUrl}/functions/v1/tokenize-market`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${supabaseKey}`,
+              },
+              body: JSON.stringify({
+                condition_id: event.polymarket_condition_id,
+                team_home: cache.team_home,
+                team_away: cache.team_away,
+                sport: cache.extracted_league || cache.sport_category || 'sports',
+              }),
+            });
+            
+            if (repairResponse.ok) {
+              const repairResult = await repairResponse.json();
               
-              if (tokens.length >= 2) {
-                // Find YES and NO tokens by outcome field
-                for (const token of tokens) {
-                  const outcome = (token.outcome || '').toLowerCase();
-                  if (outcome === 'yes' || outcome === 'true') {
-                    repairedTokenIdYes = token.token_id;
-                  } else if (outcome === 'no' || outcome === 'false') {
-                    repairedTokenIdNo = token.token_id;
-                  }
-                }
+              if (repairResult.success && repairResult.tokenIdYes) {
+                repairedTokenIdYes = repairResult.tokenIdYes;
+                repairedTokenIdNo = repairResult.tokenIdNo;
                 
-                // Fallback to array ordering if outcomes not labeled
-                if (!repairedTokenIdYes && tokens[0]?.token_id) {
-                  repairedTokenIdYes = tokens[0].token_id;
-                }
-                if (!repairedTokenIdNo && tokens[1]?.token_id) {
-                  repairedTokenIdNo = tokens[1].token_id;
-                }
+                // Update cache with repaired tokens and REAL condition_id
+                await supabase
+                  .from('polymarket_h2h_cache')
+                  .update({
+                    condition_id: repairResult.conditionId || event.polymarket_condition_id,
+                    token_id_yes: repairedTokenIdYes,
+                    token_id_no: repairedTokenIdNo,
+                    token_source: repairResult.tokenSource || 'repair',
+                    token_confidence: repairResult.confidence || 75,
+                    tradeable: true,
+                    untradeable_reason: null,
+                    last_token_repair_at: now.toISOString(),
+                  })
+                  .eq('condition_id', event.polymarket_condition_id);
                 
-                if (repairedTokenIdYes) {
-                  // SUCCESS! Update cache with repaired tokens
-                  await supabase
-                    .from('polymarket_h2h_cache')
-                    .update({
-                      token_id_yes: repairedTokenIdYes,
-                      token_id_no: repairedTokenIdNo,
-                      token_source: 'clob_repair',
-                      token_confidence: 100,
-                      tradeable: true,
-                      untradeable_reason: null,
-                      last_token_repair_at: now.toISOString(),
-                    })
-                    .eq('condition_id', event.polymarket_condition_id);
-                  
-                  console.log(`[POLY-MONITOR] TOKEN_REPAIR_SUCCESS: "${event.event_name}" → YES=${repairedTokenIdYes?.slice(0, 16)}...`);
-                  funnelStats.token_repairs_success = (funnelStats.token_repairs_success || 0) + 1;
-                }
+                console.log(`[POLY-MONITOR] TOKEN_REPAIR_SUCCESS: "${event.event_name}" via ${repairResult.tokenSource} → YES=${repairedTokenIdYes?.slice(0, 16)}...`);
+                funnelStats.token_repairs_success = (funnelStats.token_repairs_success || 0) + 1;
+              } else {
+                console.log(`[POLY-MONITOR] TOKEN_REPAIR_FAILED: "${event.event_name}" - ${repairResult.untradeableReason || 'unknown'}`);
               }
+            } else {
+              console.log(`[POLY-MONITOR] TOKEN_REPAIR_API_ERROR: "${event.event_name}" - status ${repairResponse.status}`);
             }
           } catch (repairErr) {
             console.log(`[POLY-MONITOR] TOKEN_REPAIR_ERROR for "${event.event_name}":`, (repairErr as Error).message);
@@ -1837,9 +1839,41 @@ Deno.serve(async (req) => {
         const RESOLVED_THRESHOLD_LOW = 0.02;   // 2 cents = market resolved
         const RESOLVED_THRESHOLD_HIGH = 0.98;  // 98 cents = market resolved
         
-        // Try CLOB batch prices first
-        if (tokenIdYes && clobPrices.has(tokenIdYes)) {
-          const prices = clobPrices.get(tokenIdYes)!;
+        // Try CLOB batch prices first (use effectiveTokenIdYes for repaired tokens)
+        const lookupTokenId = effectiveTokenIdYes || tokenIdYes;
+        
+        // For repaired tokens not in batch, fetch individually from CLOB
+        if (lookupTokenId && !clobPrices.has(lookupTokenId)) {
+          try {
+            // Fetch price directly for this repaired token
+            const priceResponse = await fetch(`${CLOB_API_BASE}/prices`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify([
+                { token_id: lookupTokenId, side: 'BUY' },
+                { token_id: lookupTokenId, side: 'SELL' },
+              ]),
+            });
+            
+            if (priceResponse.ok) {
+              const priceData = await priceResponse.json();
+              if (priceData[lookupTokenId]) {
+                const pd = priceData[lookupTokenId] as Record<string, string>;
+                clobPrices.set(lookupTokenId, {
+                  bid: parseFloat(pd.SELL || '0'),
+                  ask: parseFloat(pd.BUY || '0'),
+                });
+                console.log(`[POLY-MONITOR] REPAIRED_TOKEN_PRICE_FETCHED: "${event.event_name}" ask=${pd.BUY}`);
+                funnelStats.priced_from_clob = (funnelStats.priced_from_clob || 0) + 1;
+              }
+            }
+          } catch (fetchErr) {
+            console.log(`[POLY-MONITOR] REPAIRED_TOKEN_PRICE_ERROR: "${event.event_name}": ${(fetchErr as Error).message}`);
+          }
+        }
+        
+        if (lookupTokenId && clobPrices.has(lookupTokenId)) {
+          const prices = clobPrices.get(lookupTokenId)!;
           bestBid = prices.bid;
           bestAsk = prices.ask;
           
@@ -1887,8 +1921,8 @@ Deno.serve(async (req) => {
             livePolyPrice = bestAsk;
           }
           
-          if (clobSpreads.has(tokenIdYes)) {
-            spreadPct = clobSpreads.get(tokenIdYes)!;
+          if (clobSpreads.has(lookupTokenId)) {
+            spreadPct = clobSpreads.get(lookupTokenId)!;
           } else if (bestBid > 0 && bestAsk > 0) {
             // Convert to percentage-of-mid for consistent units with calculateNetEdge()
             const mid = (bestAsk + bestBid) / 2;
@@ -1897,9 +1931,9 @@ Deno.serve(async (req) => {
         }
         
         // Fallback to single market fetch if no batch data
-        // SAFETY RAIL #1: Use tokenIdYes for explicit token matching - never rely on array ordering
-        if (!clobPrices.has(tokenIdYes || '')) {
-          if (!tokenIdYes) {
+        // SAFETY RAIL #1: Use lookupTokenId for explicit token matching - never rely on array ordering
+        if (!clobPrices.has(lookupTokenId || '')) {
+          if (!lookupTokenId) {
             // No token ID = cannot safely determine YES price, skip this market
             console.log(`[POLY-MONITOR] NO_TOKEN_ID_SKIP`, {
               event: event.event_name,
@@ -1920,7 +1954,7 @@ Deno.serve(async (req) => {
                 const marketData = await clobResponse.json();
                 
                 // Find YES token explicitly using stored token ID - NEVER use tokens[0]
-                const yesToken = marketData.tokens?.find((t: any) => t.token_id === tokenIdYes);
+                const yesToken = marketData.tokens?.find((t: any) => t.token_id === lookupTokenId);
                 if (yesToken?.price) {
                   livePolyPrice = parseFloat(yesToken.price);
                   console.log(`[POLY-MONITOR] Fallback CLOB: Found YES token for "${event.event_name}" price=${livePolyPrice.toFixed(3)}`);
@@ -1928,7 +1962,7 @@ Deno.serve(async (req) => {
                   console.log(`[POLY-MONITOR] FALLBACK_TOKEN_MISSING`, {
                     event: event.event_name,
                     conditionId: event.polymarket_condition_id,
-                    tokenIdYes,
+                    lookupTokenId,
                     tokensInResponse: marketData.tokens?.map((t: any) => t.token_id) || [],
                   });
                   continue; // Cannot safely price trade without confirmed YES token
