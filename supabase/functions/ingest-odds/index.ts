@@ -396,6 +396,52 @@ Deno.serve(async (req) => {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 
+    // FIX #5: Store probability snapshots for movement detection
+    // This populates the probability_snapshots table that velocity calculation requires
+    const probabilitySnapshots: Array<{
+      event_key: string;
+      event_name: string;
+      outcome: string;
+      fair_probability: number;
+      source: string;
+    }> = [];
+
+    for (const signal of allSignals) {
+      if (signal.market_type === 'h2h' && signal.implied_probability > 0) {
+        const eventKey = generateEventKey(signal.event_name, signal.outcome);
+        probabilitySnapshots.push({
+          event_key: eventKey,
+          event_name: signal.event_name,
+          outcome: signal.outcome,
+          fair_probability: signal.implied_probability,
+          source: 'bookmaker_consensus',
+        });
+      }
+    }
+
+    // Insert probability snapshots for movement detection
+    if (probabilitySnapshots.length > 0) {
+      const probResponse = await fetch(
+        `${supabaseUrl}/rest/v1/probability_snapshots`,
+        {
+          method: 'POST',
+          headers: {
+            'apikey': supabaseKey,
+            'Authorization': `Bearer ${supabaseKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(probabilitySnapshots),
+        }
+      );
+
+      if (!probResponse.ok) {
+        const error = await probResponse.text();
+        console.error('Probability snapshot insert error:', error);
+      } else {
+        console.log(`Inserted ${probabilitySnapshots.length} probability snapshots for movement detection`);
+      }
+    }
+
     // Store sharp book snapshots for movement detection
     if (sharpBookSnapshots.length > 0) {
       const snapshotResponse = await fetch(
