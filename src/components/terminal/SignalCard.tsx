@@ -183,53 +183,17 @@ export function SignalCard({
     };
   };
 
-  // Helper: Calculate season week for a given sport and date
-  const getSeasonWeek = (date: Date, sport: string): number => {
-    const year = date.getFullYear();
-    const month = date.getMonth(); // 0-indexed
-    
-    // Determine season start based on sport
-    let seasonStart: Date;
-    if (sport === 'nfl') {
-      // NFL: First Thursday of September
-      seasonStart = new Date(month >= 8 ? year : year - 1, 8, 5);
-    } else {
-      // NHL/NBA: Mid-October
-      seasonStart = new Date(month >= 9 ? year : year - 1, 9, 4);
-    }
-    
-    // Calculate weeks since season start
-    const msPerWeek = 7 * 24 * 60 * 60 * 1000;
-    const weeksSinceStart = Math.floor((date.getTime() - seasonStart.getTime()) / msPerWeek);
-    
-    // Return week number (1-indexed, capped at reasonable range)
-    return Math.max(1, Math.min(weeksSinceStart + 1, 52));
-  };
-
-  // Generate Polymarket sports URL using slug from backend
-  // Format: /sports/{sport}/games/week/{week}/{slug}
+  // Generate Polymarket direct URL using event slug from backend.
+  // IMPORTANT: Prefer the canonical /event/{slug} route to avoid brittle
+  // sport/week routing that changes frequently and causes 404s.
   const getPolymarketDirectUrl = (): string | null => {
     const slug = (signal as any).polymarket_slug;
     if (!slug) return null;
-    
-    // Extract sport from slug prefix (e.g., "nhl-min-edm-2026-01-31" -> "nhl")
-    const sportMatch = slug.match(/^([a-z]+)-/i);
-    if (!sportMatch) return null;
-    
-    const sport = sportMatch[1].toLowerCase();
-    
-    // Only generate sports URLs for known sports
-    const knownSports = ['nhl', 'nba', 'nfl', 'cbb'];
-    if (!knownSports.includes(sport)) return null;
-    
-    // Calculate week number from the date in the slug (last 10 chars: YYYY-MM-DD)
-    const dateMatch = slug.match(/(\d{4})-(\d{2})-(\d{2})$/);
-    if (!dateMatch) return null;
-    
-    const eventDate = new Date(`${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}`);
-    const weekNumber = getSeasonWeek(eventDate, sport);
-    
-    return `https://polymarket.com/sports/${sport}/games/week/${weekNumber}/${slug}`;
+
+    // Basic safety: slug should be URL-safe-ish and not already a full URL
+    if (/^https?:\/\//i.test(slug)) return slug;
+
+    return `https://polymarket.com/event/${encodeURIComponent(slug)}`;
   };
   
   // Enhanced fallback search URL with smarter query construction
