@@ -1,92 +1,109 @@
 
-# Fix: Polymarket Price Accuracy Issues
+# Fix: Restore CLOB Price Refresh to polymarket-sync-24h
 
 ## Problem Summary
 
-Your signal shows **45¢** for the OKC vs Spurs game, but the actual Polymarket price is **23¢** for OKC (78¢ for Spurs). This is a significant data quality bug causing false edge calculations.
+The signal showed **45¢ for OKC** when the real Polymarket price was **23¢**. This happened because the current sync function stores stale/scraped prices instead of live CLOB prices.
 
-## Technical Root Causes
+## Root Cause Analysis
 
-### 1. Firecrawl Scraper Parsing Wrong Prices
-The Firecrawl markdown parser is extracting incorrect prices. The NBA games page has changed its format, and the regex pattern is no longer matching correctly.
+### What Used to Work (sync-polymarket-h2h)
 
-**Current behavior**: Extracting "OKC55¢" when real price is "OKC23¢"
+The original working sync had a **CLOB Price Refresh** step that:
 
-### 2. Token IDs Point to Old/Dead Markets
-When the system searches for token IDs:
-- Gamma API finds the event but reports "no H2H market with tokens"
-- CLOB Search fallback returns tokens from a **2023 game** (which is finished)
-- This explains the "No orderbook exists" error
+1. Collected all token IDs from cached markets
+2. Made a batch POST to `https://clob.polymarket.com/prices`
+3. Updated the cache with **real executable prices**
 
-### 3. NBA Markets Not Yet CLOB-Tradeable
-Many NBA H2H markets are visible on the Polymarket UI but not yet enabled for CLOB API trading. This is a Polymarket platform limitation that makes these markets untradeable through their API.
+```text
+FLOW: Gamma API → Store initial → CLOB API refresh → Update with live prices
+```
+
+### What's Broken Now (polymarket-sync-24h)
+
+The new sync stores prices from:
+
+- **Gamma API metadata** (often hours stale)
+- **Firecrawl scraper** (regex-parsed markdown, unreliable)
+
+It **never** calls the CLOB API to verify prices.
+
+```text
+FLOW: Gamma API / Firecrawl → Store scraped prices → NO REFRESH → Monitor uses stale prices
+```
+
+### Why Firecrawl Prices Are Wrong
+
+The regex parser extracts prices like `OKC55¢` from markdown, but:
+
+1. The page format may have changed
+2. Multiple price patterns on the page can be mis-paired
+3. No validation that extracted prices match actual CLOB orderbook
 
 ---
 
 ## Implementation Plan
 
-### Phase 1: Validate Token-Price Consistency (Critical)
+### Phase 1: Add CLOB Price Refresh to polymarket-sync-24h
 
-**File**: `supabase/functions/polymarket-monitor/index.ts`
+**File**: `supabase/functions/polymarket-sync-24h/index.ts`
 
-Add a validation check that detects stale/invalid tokens:
+After upserting all markets to the cache, add the same CLOB refresh logic that exists in sync-polymarket-h2h:
 
 ```text
-Before using a token for pricing:
-1. Fetch orderbook for token
-2. If "No orderbook exists" → mark as untradeable
-3. Skip signal creation for this market
+1. Query all active H2H markets with token_id_yes from cache
+2. Batch-fetch prices from CLOB API: POST /prices with [{ token_id, side: 'BUY' }]
+3. Update cache with real CLOB prices (yes_price, no_price, best_bid, best_ask)
+4. Mark markets where CLOB returns no data as potentially stale
 ```
 
-This prevents creating signals with garbage 2023 data.
+### Phase 2: Validate Firecrawl Prices Against CLOB
 
-### Phase 2: Fix Firecrawl Price Extraction
+**File**: `supabase/functions/polymarket-sync-24h/index.ts`
 
-**File**: `supabase/functions/_shared/firecrawl-scraper.ts`
-
-Update the price parsing logic to handle the current Polymarket page format:
+Before storing Firecrawl-scraped prices:
 
 ```text
-1. Parse multiple price formats from markdown
-2. Validate price pairs sum to ~100%
-3. If prices don't validate, skip that market
+1. If tokens available, fetch CLOB price first
+2. Compare scraped price vs CLOB price
+3. If difference > 10%, use CLOB price (more authoritative)
+4. Log discrepancy for monitoring
 ```
 
-### Phase 3: Add Token Freshness Validation
+### Phase 3: Mark Markets with Stale Prices
 
-**File**: `supabase/functions/tokenize-market/index.ts`
-
-When CLOB Search returns a result:
+**File**: `supabase/functions/polymarket-sync-24h/index.ts`
 
 ```text
-1. Check if the market question contains a date
-2. If date is older than 7 days → reject as stale
-3. Only use tokens from current/upcoming games
-```
-
-### Phase 4: NBA Market Handling Strategy
-
-For NBA markets where CLOB API isn't available:
-
-```text
-Option A: Use Firecrawl prices only (lower confidence)
-- Create signals with is_clob_verified = false
-- Display warning in UI: "Price from UI scrape, not CLOB"
-
-Option B: Block NBA H2H signals until CLOB-tradeable
-- Mark these as untradeable with reason "NBA_CLOB_NOT_AVAILABLE"
-- Focus on NHL games which have proper CLOB support
+1. After CLOB refresh, identify markets where price wasn't updated
+2. Set a flag: price_source = 'gamma_stale' or 'firecrawl_stale'
+3. Monitor can use this to skip or warn on these markets
 ```
 
 ---
 
-## Expected Outcome
+## Technical Details
 
-| Before Fix | After Fix |
-|------------|-----------|
-| Signal shows 45¢ (wrong) | Signal blocked (untradeable) or shows 23¢ (correct) |
-| Uses 2023 token IDs | Validates token freshness |
-| Creates signals for untradeable markets | Only creates signals for CLOB-verified markets |
+### CLOB Price Refresh Function (copy from sync-polymarket-h2h)
+
+The working version in lines 700-744 of sync-polymarket-h2h:
+
+```text
+1. Collect all YES token IDs into a map: tokenId -> conditionId
+2. Call fetchClobPrices(allTokenIds) - batch POST to /prices
+3. Parse response: BUY = ask price, SELL = bid price
+4. Update cache: yes_price = BUY price, no_price = 1 - yes_price
+```
+
+### Where to Insert in polymarket-sync-24h
+
+After line ~985 (after the main upsert loop completes), before the "Expire events" section:
+
+```text
+// ============= CLOB PRICE REFRESH (CRITICAL) =============
+// Fetch real executable prices from Polymarket CLOB API
+// This replaces stale Gamma/Firecrawl prices with live orderbook data
+```
 
 ---
 
@@ -94,7 +111,20 @@ Option B: Block NBA H2H signals until CLOB-tradeable
 
 | File | Changes |
 |------|---------|
-| `polymarket-monitor/index.ts` | Add token validation check before pricing |
-| `tokenize-market/index.ts` | Add date filter to CLOB search results |
-| `firecrawl-scraper.ts` | Fix price parsing regex patterns |
-| `polymarket-sync-24h/index.ts` | Validate scraped prices before caching |
+| `polymarket-sync-24h/index.ts` | Add CLOB price refresh step after cache upserts |
+
+## Expected Outcome
+
+| Before Fix | After Fix |
+|------------|-----------|
+| Cache stores Firecrawl scraped price (55¢) | Cache stores CLOB live price (23¢) |
+| Monitor uses stale cache price | Monitor uses fresh CLOB price |
+| Signal shows wrong edge | Signal shows accurate edge |
+
+---
+
+## Why This Is the Root Fix
+
+The current fixes to polymarket-monitor (orderbook validation, token repair) are band-aids. They try to fix prices at signal-creation time, but by then the cache is already polluted with bad data.
+
+The correct fix is to **refresh prices at sync time** using the authoritative CLOB API, exactly as the original working sync-polymarket-h2h did.
