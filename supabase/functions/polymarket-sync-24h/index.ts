@@ -985,6 +985,143 @@ Deno.serve(async (req) => {
       }
     }
 
+    // ============= CLOB PRICE REFRESH (CRITICAL) =============
+    // Fetch real executable prices from Polymarket CLOB API
+    // This replaces stale Gamma/Firecrawl prices with live orderbook data
+    console.log('[POLY-SYNC-24H] Starting CLOB price refresh for cached H2H markets...');
+    
+    const { data: h2hMarkets, error: fetchH2hError } = await supabase
+      .from('polymarket_h2h_cache')
+      .select('condition_id, token_id_yes, yes_price, source')
+      .eq('status', 'active')
+      .eq('market_type', 'h2h')
+      .not('token_id_yes', 'is', null);
+    
+    if (fetchH2hError) {
+      console.error('[POLY-SYNC-24H] Error fetching H2H markets for CLOB refresh:', fetchH2hError);
+    } else if (h2hMarkets && h2hMarkets.length > 0) {
+      console.log(`[POLY-SYNC-24H] Refreshing CLOB prices for ${h2hMarkets.length} H2H markets with token IDs`);
+      
+      // Collect all YES token IDs
+      const tokenIdToCondition: Map<string, string> = new Map();
+      const tokenIdToOldPrice: Map<string, number> = new Map();
+      const allTokenIds: string[] = [];
+      
+      for (const market of h2hMarkets) {
+        if (market.token_id_yes) {
+          tokenIdToCondition.set(market.token_id_yes, market.condition_id);
+          tokenIdToOldPrice.set(market.token_id_yes, market.yes_price || 0.5);
+          allTokenIds.push(market.token_id_yes);
+        }
+      }
+      
+      if (allTokenIds.length > 0) {
+        // Batch fetch CLOB prices
+        const CLOB_API_BASE = 'https://clob.polymarket.com';
+        const batchSize = 50;
+        const allPrices: Record<string, { BUY?: string; SELL?: string }> = {};
+        
+        for (let i = 0; i < allTokenIds.length; i += batchSize) {
+          const batch = allTokenIds.slice(i, i + batchSize);
+          const requestBody = batch.map(token_id => ({
+            token_id,
+            side: 'BUY' as const
+          }));
+          
+          try {
+            const response = await fetch(`${CLOB_API_BASE}/prices`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(requestBody),
+            });
+            
+            if (response.ok) {
+              const prices = await response.json();
+              Object.assign(allPrices, prices);
+            } else {
+              console.warn(`[POLY-SYNC-24H] CLOB batch ${i} failed: ${response.status}`);
+            }
+          } catch (error) {
+            console.warn(`[POLY-SYNC-24H] CLOB batch ${i} error:`, error);
+          }
+          
+          // Small delay between batches
+          if (i + batchSize < allTokenIds.length) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+        }
+        
+        console.log(`[POLY-SYNC-24H] CLOB API returned prices for ${Object.keys(allPrices).length} tokens`);
+        
+        // Process and update cache with real CLOB prices
+        const priceUpdates: Array<{ 
+          condition_id: string; 
+          yes_price: number; 
+          no_price: number; 
+          best_bid: number; 
+          best_ask: number;
+          old_price: number;
+        }> = [];
+        
+        for (const [tokenId, priceData] of Object.entries(allPrices)) {
+          const conditionId = tokenIdToCondition.get(tokenId);
+          if (!conditionId) continue;
+          
+          // BUY price = what you pay = best ask (this is the YES price)
+          const buyPrice = parseFloat(priceData.BUY || '0');
+          const sellPrice = parseFloat(priceData.SELL || '0');
+          const oldPrice = tokenIdToOldPrice.get(tokenId) || 0.5;
+          
+          // Validate price is within sanity bounds (5¢ - 95¢)
+          if (buyPrice >= 0.05 && buyPrice <= 0.95) {
+            priceUpdates.push({
+              condition_id: conditionId,
+              yes_price: buyPrice,
+              no_price: 1 - buyPrice,
+              best_bid: sellPrice,
+              best_ask: buyPrice,
+              old_price: oldPrice,
+            });
+          } else if (buyPrice > 0) {
+            console.log(`[POLY-SYNC-24H] CLOB price out of bounds: ${conditionId} price=${buyPrice.toFixed(2)} (skipping)`);
+          }
+        }
+        
+        console.log(`[POLY-SYNC-24H] Valid CLOB prices: ${priceUpdates.length}/${Object.keys(allPrices).length}`);
+        
+        // Update cache with real prices
+        let clobUpdated = 0;
+        let priceMismatches = 0;
+        
+        for (const update of priceUpdates) {
+          // Check for significant price mismatch (>10% difference from cached price)
+          const priceDiff = Math.abs(update.yes_price - update.old_price);
+          if (priceDiff > 0.10) {
+            priceMismatches++;
+            console.log(`[POLY-SYNC-24H] PRICE MISMATCH: ${update.condition_id} cached=${(update.old_price * 100).toFixed(0)}¢ CLOB=${(update.yes_price * 100).toFixed(0)}¢ (diff=${(priceDiff * 100).toFixed(0)}¢)`);
+          }
+          
+          const { error: updateError } = await supabase
+            .from('polymarket_h2h_cache')
+            .update({
+              yes_price: update.yes_price,
+              no_price: update.no_price,
+              best_bid: update.best_bid,
+              best_ask: update.best_ask,
+              last_price_update: now.toISOString(),
+              source: 'clob_verified', // Mark as CLOB-verified
+            })
+            .eq('condition_id', update.condition_id);
+          
+          if (!updateError) clobUpdated++;
+        }
+        
+        console.log(`[POLY-SYNC-24H] CLOB REFRESH COMPLETE: ${clobUpdated} markets updated, ${priceMismatches} had >10% price mismatches`);
+      }
+    } else {
+      console.log('[POLY-SYNC-24H] No H2H markets with token IDs found for CLOB refresh');
+    }
+
     // Expire events that have started
     const { data: expiredEvents } = await supabase
       .from('event_watch_state')
