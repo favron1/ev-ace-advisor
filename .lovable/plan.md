@@ -1,79 +1,100 @@
 
-# Signal Generation Pipeline Failure: Root Cause Analysis
+# Fix: Polymarket Price Accuracy Issues
 
-## ✅ ALL FIXES IMPLEMENTED (Feb 4, 2026)
+## Problem Summary
 
----
+Your signal shows **45¢** for the OKC vs Spurs game, but the actual Polymarket price is **23¢** for OKC (78¢ for Spurs). This is a significant data quality bug causing false edge calculations.
 
-## Critical Issues Fixed
+## Technical Root Causes
 
-### ✅ Fix 1: Token ID Repair Pipeline (CRITICAL)
-**File: `polymarket-monitor/index.ts`**
+### 1. Firecrawl Scraper Parsing Wrong Prices
+The Firecrawl markdown parser is extracting incorrect prices. The NBA games page has changed its format, and the regex pattern is no longer matching correctly.
 
-Added self-healing token repair that:
-1. Detects markets with missing `token_id_yes`
-2. Attempts CLOB API lookup by `condition_id`
-3. Updates cache with resolved token IDs
-4. Only blocks after repair fails
+**Current behavior**: Extracting "OKC55¢" when real price is "OKC23¢"
 
-### ✅ Fix 2: Cache Price Update in Monitor
-**File: `polymarket-monitor/index.ts`**
+### 2. Token IDs Point to Old/Dead Markets
+When the system searches for token IDs:
+- Gamma API finds the event but reports "no H2H market with tokens"
+- CLOB Search fallback returns tokens from a **2023 game** (which is finished)
+- This explains the "No orderbook exists" error
 
-When CLOB prices are fetched successfully, cache is now updated:
-```typescript
-if (livePolyPrice !== null && livePolyPrice !== 0.5) {
-  cacheUpdate.yes_price = livePolyPrice;
-  cacheUpdate.no_price = 1 - livePolyPrice;
-}
-```
-
-### ✅ Fix 3: Relax Mapping Inversion Gate
-**File: `polymarket-monitor/index.ts`**
-
-Disabled aggressive blocking logic:
-```typescript
-const shouldBlock = false; // DISABLED - was too aggressive
-```
-Now logs for monitoring but doesn't block legitimate signals.
-
-### ✅ Fix 4: Remove Volume Filter from Edge Calculation
-**File: `polymarket-monitor/index.ts`**
-
-Changed from:
-```typescript
-if (yesFairProb !== null && noFairProb !== null && liveVolume >= 5000)
-```
-To:
-```typescript
-if (yesFairProb !== null && noFairProb !== null)
-```
-
-### ✅ Fix 5: Populate Probability Snapshots for Movement Detection
-**File: `ingest-odds/index.ts`**
-
-Added population of `probability_snapshots` table:
-- Extracts fair probabilities from H2H signals
-- Stores them for velocity calculation
-- Enables movement-confirmed signal tiers (STRONG, ELITE)
+### 3. NBA Markets Not Yet CLOB-Tradeable
+Many NBA H2H markets are visible on the Polymarket UI but not yet enabled for CLOB API trading. This is a Polymarket platform limitation that makes these markets untradeable through their API.
 
 ---
 
-## Expected Outcome After Fixes
+## Implementation Plan
 
-| Metric | Before | Expected After Fix |
-|--------|--------|-----------|
-| Markets with tokens | 17/73 (23%) | 60+ (80%+) |
-| Markets with real prices | 0 | 60+ |
-| Edges calculated | 9 | 60+ |
-| Edges over threshold | 0 | 5-15 per scan |
-| Signals created | 0 | 3-10 per day |
-| Movement-confirmed signals | 0 | 1-5 per day |
+### Phase 1: Validate Token-Price Consistency (Critical)
+
+**File**: `supabase/functions/polymarket-monitor/index.ts`
+
+Add a validation check that detects stale/invalid tokens:
+
+```text
+Before using a token for pricing:
+1. Fetch orderbook for token
+2. If "No orderbook exists" → mark as untradeable
+3. Skip signal creation for this market
+```
+
+This prevents creating signals with garbage 2023 data.
+
+### Phase 2: Fix Firecrawl Price Extraction
+
+**File**: `supabase/functions/_shared/firecrawl-scraper.ts`
+
+Update the price parsing logic to handle the current Polymarket page format:
+
+```text
+1. Parse multiple price formats from markdown
+2. Validate price pairs sum to ~100%
+3. If prices don't validate, skip that market
+```
+
+### Phase 3: Add Token Freshness Validation
+
+**File**: `supabase/functions/tokenize-market/index.ts`
+
+When CLOB Search returns a result:
+
+```text
+1. Check if the market question contains a date
+2. If date is older than 7 days → reject as stale
+3. Only use tokens from current/upcoming games
+```
+
+### Phase 4: NBA Market Handling Strategy
+
+For NBA markets where CLOB API isn't available:
+
+```text
+Option A: Use Firecrawl prices only (lower confidence)
+- Create signals with is_clob_verified = false
+- Display warning in UI: "Price from UI scrape, not CLOB"
+
+Option B: Block NBA H2H signals until CLOB-tradeable
+- Mark these as untradeable with reason "NBA_CLOB_NOT_AVAILABLE"
+- Focus on NHL games which have proper CLOB support
+```
 
 ---
 
-## Deployment Status
+## Expected Outcome
 
-- [x] `polymarket-monitor` deployed
-- [x] `ingest-odds` deployed
+| Before Fix | After Fix |
+|------------|-----------|
+| Signal shows 45¢ (wrong) | Signal blocked (untradeable) or shows 23¢ (correct) |
+| Uses 2023 token IDs | Validates token freshness |
+| Creates signals for untradeable markets | Only creates signals for CLOB-verified markets |
 
-**Next step:** Run a scan to verify signals are generating.
+---
+
+## Files to Modify
+
+| File | Changes |
+|------|---------|
+| `polymarket-monitor/index.ts` | Add token validation check before pricing |
+| `tokenize-market/index.ts` | Add date filter to CLOB search results |
+| `firecrawl-scraper.ts` | Fix price parsing regex patterns |
+| `polymarket-sync-24h/index.ts` | Validate scraped prices before caching |
