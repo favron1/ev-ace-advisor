@@ -1786,8 +1786,10 @@ Deno.serve(async (req) => {
         // Use repaired token for rest of pipeline
         const effectiveTokenIdYes = repairedTokenIdYes;
         
-        // Check if market is explicitly marked untradeable
-        if (cache?.tradeable === false) {
+        // FIX: Check tradeable ONLY if we didn't just repair the token
+        // After repair, tradeable flag in cache is stale - we updated DB but not local object
+        const wasJustRepaired = repairedTokenIdYes && !tokenIdYes;
+        if (!wasJustRepaired && cache?.tradeable === false) {
           console.log(`[POLY-MONITOR] HARD_GATE_BLOCKED: Market untradeable (${cache?.untradeable_reason}) for "${event.event_name}"`);
           funnelStats.blocked_untradeable++;
           continue;
@@ -1811,20 +1813,50 @@ Deno.serve(async (req) => {
         }
 
         // Get price from CLOB batch results (preferred) or fallback to cache/event_watch_state
-        // CRITICAL: Use cache.yes_price first (more frequently updated), then event_watch_state
-        // PHASE 2b: Remove 0.5 fallback - null price triggers explicit skip
-        let livePolyPrice: number | null = cache?.yes_price || event.polymarket_yes_price || null;
+        // CRITICAL FIX: DON'T use cache prices that are 1.0 or 0 (resolved games)
+        // These are garbage values from finished games
+        let cachedPrice = cache?.yes_price ?? event.polymarket_yes_price ?? null;
+        
+        // FILTER OUT RESOLVED PRICES FROM CACHE: If cache shows 1.0/0.0 or near-extremes, ignore it
+        if (cachedPrice !== null && (cachedPrice >= 0.98 || cachedPrice <= 0.02)) {
+          console.log(`[POLY-MONITOR] CACHE_PRICE_RESOLVED_SKIP`, {
+            event: event.event_name,
+            cachedPrice,
+            reason: 'cache_price_indicates_resolved_game',
+          });
+          
+          // Mark as resolved in DB
+          if (event.polymarket_condition_id) {
+            await supabase
+              .from('polymarket_h2h_cache')
+              .update({ status: 'resolved' })
+              .eq('condition_id', event.polymarket_condition_id);
+            
+            await supabase
+              .from('event_watch_state')
+              .update({ watch_state: 'expired', updated_at: now.toISOString() })
+              .eq('id', event.id);
+          }
+          
+          eventsExpired++;
+          continue;
+        }
+        
+        // Use cache price initially, but will be overwritten by CLOB if available
+        let livePolyPrice: number | null = cachedPrice;
         let liveVolume = cache?.volume || event.polymarket_volume || 0;
         let bestBid: number | null = null;
         let bestAsk: number | null = null;
         let spreadPct: number | null = null;
         
         // PHASE 2c: Skip markets with no valid price (prevents false 50% edges)
-        if (livePolyPrice === null) {
+        // But allow null if we have a token - we'll fetch from CLOB
+        const hasTokenForClobFetch = effectiveTokenIdYes != null;
+        if (livePolyPrice === null && !hasTokenForClobFetch) {
           console.log(`[POLY-MONITOR] NO_VALID_PRICE_SKIP`, {
             event: event.event_name,
             conditionId: event.polymarket_condition_id,
-            reason: 'no_clob_or_cache_price'
+            reason: 'no_clob_or_cache_price_and_no_token'
           });
           funnelStats.skipped_no_price = (funnelStats.skipped_no_price || 0) + 1;
           continue;
@@ -1974,6 +2006,18 @@ Deno.serve(async (req) => {
               // Use cached price
             }
           }
+        }
+        
+        // FINAL PRICE VALIDATION: Ensure we have a valid price after all fetch attempts
+        // This is the last gate before edge calculation
+        if (livePolyPrice === null) {
+          console.log(`[POLY-MONITOR] FINAL_PRICE_NULL_SKIP`, {
+            event: event.event_name,
+            conditionId: event.polymarket_condition_id,
+            reason: 'no_valid_price_after_clob_fetch'
+          });
+          funnelStats.skipped_no_price = (funnelStats.skipped_no_price || 0) + 1;
+          continue;
         }
 
         // ============= CANONICAL MATCHING STRATEGY (V2) =============
