@@ -1,159 +1,204 @@
 
 
-# Fix: Scan Reliability + Signal Generation Pipeline
+# Fix: Restore 24-Hour H2H-Only Pipeline + Hard Cleanup
 
 ## Problem Summary
 
-### Issue 1: "Scan Failed" - Client Timeout
-The sync function successfully completes (2,000+ markets cached), but takes 30-45 seconds. The browser times out after ~30 seconds, showing "Failed to fetch" even though the operation succeeded in the background.
+The sync function is caching markets WAY outside the approved 24-hour window, flooding the system with untradeable data:
 
-### Issue 2: No Signals Despite 2,000+ Markets
-The monitor pipeline shows:
-- 72 markets polled (only imminent games)
-- 8 tokenized (26 blocked - no token IDs)
-- **1 matched** to bookmaker data (87% match failure rate)
-- 1 edge found
-- **0 signals created**
+| Current State | Count | Impact |
+|---------------|-------|--------|
+| Total active markets | 2,778 | Overwhelming |
+| Outside 24h window | 2,569 (93%) | Untradeable |
+| Within 24h window | 207 (7%) | Actionable |
+| Default 50c price | 1,700 (61%) | No real pricing |
+| Non-H2H markets | 1,384 (50%) | Wrong market type |
+| event_watch_state with book price | 14 (0.8%) | Pipeline broken |
 
-Root cause: Most Polymarket games don't have corresponding Odds API data at the exact time the scan runs, OR the existing active signal blocks a duplicate.
+### Root Cause
 
----
-
-## Solution Architecture
-
-### Phase 1: Split Sync + Monitor with Progress Feedback
-
-Instead of one long-running call that times out, split into:
-
-1. **Sync Phase** - Fire-and-forget with toast feedback
-   - Trigger sync but don't await completion
-   - Show "Syncing markets..." toast immediately
-   - Poll database for sync completion (check `last_bulk_sync` timestamp)
-
-2. **Monitor Phase** - Run after sync completes
-   - Only runs when sync is confirmed complete
-   - Shows progress: "Checking X markets for edges..."
-
-### Phase 2: Fix Bookmaker Data Coverage Gap
-
-The monitor only finds matches for games where:
-- Odds API has data for that game
-- AND the game is within 24 hours
-- AND team names match
-
-**Problem**: Odds API doesn't always have data for games 12-24h out until closer to game time.
-
-**Solution**: 
-- Store matched bookmaker data in cache during sync
-- Allow monitor to use cached fair probabilities when live API fails
-- Track which games have bookmaker coverage
-
-### Phase 3: Signal Deduplication Fix
-
-Current: If an active signal exists for an event, new edge calculations are blocked.
-
-**Problem**: Old signals may be stale but still "active", preventing new signals.
-
-**Solution**:
-- Before creating signal, check if existing signal's edge has improved
-- Update existing signal's edge/prices if improvement found
-- Only block if signal was recently updated (within 15 minutes)
+Despite your explicit approval of "24 hours" for market horizon, the sync function was changed to "cache ALL - don't reject based on date", filling the database with future games that have no active orderbooks (hence 50c prices) and no Odds API coverage (hence no book prices).
 
 ---
 
-## Implementation Plan
+## Solution: Three-Part Fix
 
-### File: `src/hooks/useScanConfig.ts`
+### Part 1: Hard Cleanup (Database)
 
-Modify `runManualScan` to:
-1. Fire sync in background (don't await full completion)
-2. Poll `polymarket_h2h_cache` for `last_bulk_sync` update
-3. Show progress toasts during sync
-4. Run monitor after sync completes
+Run cleanup queries to expire and remove:
+- Markets with event_date > 24h from now
+- Non-H2H market types (futures, totals, spreads, props)
+- event_watch_state entries for expired/cleaned markets
 
 ```text
-BEFORE:
-  const syncResult = await supabase.functions.invoke('polymarket-sync-24h');
-  if (syncError) throw syncError;
+-- Expire markets outside 24h window
+UPDATE polymarket_h2h_cache 
+SET status = 'expired', monitoring_status = 'idle'
+WHERE event_date > NOW() + INTERVAL '26 hours'
+  AND status = 'active';
 
-AFTER:
-  // Fire sync without blocking
-  supabase.functions.invoke('polymarket-sync-24h').catch(console.error);
-  toast({ title: 'Syncing markets...' });
-  
-  // Poll for completion (check last_bulk_sync updated within last 60s)
-  let syncComplete = false;
-  for (let i = 0; i < 12; i++) { // 60 seconds max
-    await sleep(5000);
-    const { data } = await supabase
-      .from('polymarket_h2h_cache')
-      .select('last_bulk_sync')
-      .order('last_bulk_sync', { ascending: false })
-      .limit(1)
-      .single();
-    
-    if (data?.last_bulk_sync && Date.now() - new Date(data.last_bulk_sync).getTime() < 60000) {
-      syncComplete = true;
-      break;
-    }
-  }
-  
-  if (!syncComplete) {
-    toast({ title: 'Sync taking longer than expected...' });
-  }
-  
-  // Run monitor
-  await supabase.functions.invoke('polymarket-monitor');
+-- Expire non-H2H market types
+UPDATE polymarket_h2h_cache 
+SET status = 'expired', monitoring_status = 'idle'
+WHERE market_type != 'h2h'
+  AND status = 'active';
+
+-- Expire matching event_watch_state entries
+UPDATE event_watch_state 
+SET watch_state = 'expired'
+WHERE polymarket_condition_id IN (
+  SELECT condition_id FROM polymarket_h2h_cache 
+  WHERE status = 'expired'
+);
 ```
 
-### File: `supabase/functions/polymarket-sync-24h/index.ts`
+### Part 2: Restore 24h Filter in Sync Function
 
-Add early response + background processing:
-1. Respond to client immediately with "processing" status
-2. Continue processing in background
-3. Use streaming response pattern or background job
+File: `supabase/functions/polymarket-sync-24h/index.ts`
 
-**Alternative**: Add a faster "lightweight sync" mode that only syncs imminent games (next 6 hours) for quick scans.
+#### Change 1: Restore rejection in parseEventDate()
 
-### File: `supabase/functions/polymarket-monitor/index.ts`
+Around line 476, change from:
 
-Fix match rate:
-1. Expand date matching window from ±24h to ±36h for discovery
-2. Use cached bookmaker fair probs when live API returns no data
-3. Improve logging for match failures
+```text
+// CACHE ALL - don't reject based on date
+return { resolvedDate: slugDate, dateSource: 'slug', priority, hoursUntilEvent: hoursUntil };
+```
+
+To:
+
+```text
+// ENFORCE 24h WINDOW: Only cache imminent H2H games
+if (hoursUntil > 24) {
+  return { resolvedDate: null, dateSource: 'rejected-future', priority: 'distant', hoursUntilEvent: hoursUntil };
+}
+return { resolvedDate: slugDate, dateSource: 'slug', priority, hoursUntilEvent: hoursUntil };
+```
+
+Apply same pattern to lines ~487, ~497, ~511, ~541, ~568 (all date extraction paths).
+
+#### Change 2: Add explicit 24h check in qualifying loop
+
+After line 603 (after past events check), add:
+
+```text
+// RESTORE: Reject events more than 24 hours away
+if (hoursUntilEvent > 24) {
+  continue;
+}
+```
+
+#### Change 3: Filter to H2H only in qualifying loop
+
+Around line 639-641, change from:
+
+```text
+// Skip futures markets (championship, MVP, etc.)
+if (marketType === 'futures') {
+  continue;
+}
+```
+
+To:
+
+```text
+// H2H ONLY: Skip all non-H2H market types
+if (marketType !== 'h2h') {
+  continue;
+}
+```
+
+#### Change 4: Reduce event cap
+
+Line 415-416, change from:
+
+```text
+if (allEvents.length >= 2000)
+```
+
+To:
+
+```text
+if (allEvents.length >= 500)
+```
+
+With proper 24h+H2H filtering, we should only have ~50-150 markets.
+
+#### Change 5: Restrict CLOB refresh to 24h window
+
+Lines 1161-1165, add date filter:
+
+```text
+.eq('status', 'active')
+.eq('market_type', 'h2h')  // ADD: H2H only
+.not('token_id_yes', 'is', null)
+.gte('event_date', new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())  // ADD: Started in last 2h (live)
+.lte('event_date', new Date(Date.now() + 26 * 60 * 60 * 1000).toISOString()); // ADD: Within 26h
+```
+
+### Part 3: Update Console Logs
+
+Change line 239 from:
+
+```text
+console.log('[POLY-SYNC-24H] FIX v2: FULL discovery mode - caching ALL markets, no date rejection');
+```
+
+To:
+
+```text
+console.log('[POLY-SYNC-24H] STRICT MODE: 24h window, H2H markets only');
+```
 
 ---
 
-## Expected Outcomes
+## Expected Results After Fix
 
 | Metric | Current | After Fix |
 |--------|---------|-----------|
-| Scan timeout rate | ~50% | <5% |
-| User feedback during scan | None until fail | Progress toasts every 5s |
-| Match rate | 13% | 50%+ |
-| Signal generation | Blocked by stale signals | Updates existing signals |
+| Cached markets | 2,778 | ~100-200 |
+| Within 24h window | 7% | 100% |
+| Markets with real CLOB prices | 39% | 90%+ |
+| event_watch_state with book price | 0.8% | 60%+ |
+| Non-H2H markets in cache | 1,384 | 0 |
+| Sync execution time | 45s+ (timeout) | ~15s |
+| Signal generation | Broken | Restored |
 
 ---
 
 ## Technical Details
 
-### Why 0 Signals Despite 1 Edge Found
+### Why 50c Prices Everywhere
 
-The monitor log shows `edges_over_threshold: 1` but `signals_created: 0`. This happens when:
+The Gamma API returns prices from market metadata, but:
+1. Future games (3-7 days out) don't have active trading yet
+2. Without active orderbooks, Gamma returns no price data
+3. The sync defaults to 0.5 when no price found
+4. CLOB refresh fails for these markets (no active orderbook)
 
-1. **Existing active signal** for same event blocks creation
-2. **Suppression check** finds signal was recently dismissed
-3. **Gate failure** at final creation step (missing condition_id, etc.)
+Result: 61% of markets stuck at 50c placeholder.
 
-We need to add logging at signal creation to diagnose the specific failure.
+### Why No Book Prices
 
-### Sync Performance Breakdown
+The Odds API only provides data for games starting within 24-48 hours. Markets 5+ days out:
+1. Don't exist in Odds API response
+2. Can't be matched to bookmaker fair probabilities
+3. Show `null` for `current_probability` in `event_watch_state`
 
-Current sync takes ~45 seconds:
-- Gamma API pagination: ~10s (2000 events)
-- Firecrawl scraping: ~8s (40 games)
-- CLOB price refresh: ~15s (1900 tokens in batches)
-- Database upserts: ~12s (2000 individual upserts)
+Result: 99.2% of watched events have no bookmaker price to compare against.
 
-Optimization: Batch database upserts (10-50 at a time) instead of individual calls.
+### Files to Modify
+
+| File | Changes |
+|------|---------|
+| `supabase/functions/polymarket-sync-24h/index.ts` | Restore 24h rejection, H2H filter, reduce cap |
+| Database | Hard cleanup of existing bad data |
+
+### Cleanup Scope
+
+This will expire ~2,600 markets currently in the database:
+- 2,569 outside 24h window
+- ~1,384 non-H2H (some overlap with above)
+
+Remaining: ~150-200 H2H markets within 24h - all tradeable with real pricing.
 
