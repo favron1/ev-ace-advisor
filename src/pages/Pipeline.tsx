@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { RefreshCw, Eye, Zap, CheckCircle, AlertTriangle, Clock, TrendingUp, Activity, ArrowUp, ArrowDown, ArrowLeft, Plus } from 'lucide-react';
+import { RefreshCw, Eye, Zap, CheckCircle, AlertTriangle, Clock, TrendingUp, Activity, ArrowUp, ArrowDown, ArrowLeft, Plus, Upload } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
 type SortField = 'edge' | 'movement' | 'volume' | 'updated' | 'samples' | 'confidence' | 'probability' | 'time';
@@ -34,6 +34,7 @@ interface WatchEvent {
   last_poly_refresh: string | null;
   updated_at: string;
   created_at: string;
+  source?: string | null;
 }
 
 interface Signal {
@@ -306,7 +307,7 @@ export default function Pipeline() {
       const [watchRes, signalsRes, snapshotsRes] = await Promise.all([
         supabase
           .from('event_watch_state')
-          .select('*')
+        .select('*, source')
           .order('updated_at', { ascending: false })
           .limit(100),
         supabase
@@ -453,6 +454,12 @@ export default function Pipeline() {
                                   {getStateIcon(event.watch_state)}
                                   <span className="ml-1">{event.watch_state}</span>
                                 </Badge>
+                              {event.source === 'batch_import' && (
+                                <Badge variant="outline" className="bg-warning/20 text-warning border-warning/30 text-[10px] px-1.5">
+                                  <Upload className="h-2.5 w-2.5 mr-0.5" />
+                                  BATCH
+                                </Badge>
+                              )}
                                 <span className="font-medium truncate">{event.event_name}</span>
                               </div>
                               <div className="text-xs text-muted-foreground space-y-1">
