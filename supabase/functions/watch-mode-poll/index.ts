@@ -14,6 +14,7 @@
 // ============================================================================
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { getTeamMappings } from '../_shared/team-mapping-cache.ts';
 
 const CORE_LOGIC_VERSION = 'v1.3';
 
@@ -302,6 +303,8 @@ function normalizeTeamName(name: string): string {
 function getCanonicalName(name: string): string {
   const normalized = normalizeTeamName(name);
   
+  // Note: User mappings are now handled at a higher level via userMappingsLookup
+  // This function still provides fallback to hardcoded TEAM_ALIASES
   for (const [canonical, aliases] of Object.entries(TEAM_ALIASES)) {
     if (normalized === canonical || 
         normalized.includes(canonical) || 
@@ -311,6 +314,85 @@ function getCanonicalName(name: string): string {
   }
   
   return normalized;
+}
+
+/**
+ * Enhanced canonical name resolution with user-defined mappings priority.
+ * User mappings from team_mappings table take precedence over TEAM_ALIASES.
+ */
+function getCanonicalNameWithUserMappings(
+  name: string, 
+  userMappings: Map<string, string>
+): string {
+  const normalized = normalizeTeamName(name);
+  
+  // Priority 1: Check user-defined mappings (self-healing mechanism)
+  if (userMappings.has(normalized)) {
+    return normalizeTeamName(userMappings.get(normalized)!);
+  }
+  
+  // Priority 2: Check hardcoded aliases
+  for (const [canonical, aliases] of Object.entries(TEAM_ALIASES)) {
+    if (normalized === canonical || 
+        normalized.includes(canonical) || 
+        aliases.some(a => normalized.includes(a) || a.includes(normalized))) {
+      return canonical;
+    }
+  }
+  
+  return normalized;
+}
+
+/**
+ * Enhanced team matching with user-defined mappings.
+ */
+function teamsMatchWithUserMappings(
+  polyTeams: string[], 
+  bookmakerEvent: string,
+  userMappings: Map<string, string>
+): boolean {
+  if (polyTeams.length !== 2) return false;
+  
+  const bookTeams = extractTeamsFromEvent(bookmakerEvent);
+  if (bookTeams.length !== 2) return false;
+  
+  const polyCanon = polyTeams.map(t => getCanonicalNameWithUserMappings(t, userMappings));
+  const bookCanon = bookTeams.map(t => getCanonicalNameWithUserMappings(t, userMappings));
+  
+  const match1 = polyCanon[0] === bookCanon[0] && polyCanon[1] === bookCanon[1];
+  const match2 = polyCanon[0] === bookCanon[1] && polyCanon[1] === bookCanon[0];
+  
+  return match1 || match2;
+}
+
+/**
+ * Enhanced outcome matching with user-defined mappings.
+ */
+function findMatchingOutcomeWithUserMappings(
+  polyTeam: string | null,
+  bookmakerSignals: BookmakerSignal[],
+  userMappings: Map<string, string>
+): BookmakerSignal | null {
+  if (!polyTeam) return null;
+  
+  const polyCanon = getCanonicalNameWithUserMappings(polyTeam, userMappings);
+  
+  for (const signal of bookmakerSignals) {
+    const outcomeCanon = getCanonicalNameWithUserMappings(signal.outcome, userMappings);
+    
+    // Direct match
+    if (polyCanon === outcomeCanon) return signal;
+    
+    // Check if canonical names share an alias (fallback)
+    for (const [canonical, aliases] of Object.entries(TEAM_ALIASES)) {
+      const polyInGroup = polyCanon === canonical || aliases.some(a => polyCanon.includes(a) || a.includes(polyCanon));
+      const outcomeInGroup = outcomeCanon === canonical || aliases.some(a => outcomeCanon.includes(a) || a.includes(outcomeCanon));
+      
+      if (polyInGroup && outcomeInGroup) return signal;
+    }
+  }
+  
+  return null;
 }
 
 function extractTeamsFromEvent(eventName: string): string[] {
@@ -650,6 +732,31 @@ Deno.serve(async (req) => {
 
     console.log(`[WATCH-MODE-POLL] Loaded ${bookmakerSignals.length} bookmaker H2H signals`);
 
+    // ========================================================================
+    // STEP 2.5: Load user-defined team mappings (self-healing mechanism)
+    // ========================================================================
+    // Fetch ALL user mappings - we'll filter per-sport when matching
+    let allUserMappings = new Map<string, string>();
+    try {
+      const { data: mappingData } = await supabase
+        .from('team_mappings')
+        .select('source_name, canonical_name, sport_code');
+      
+      if (mappingData && mappingData.length > 0) {
+        // Build composite key map: "sport_code|normalized_source" → canonical_name
+        // Also build simple normalized map for general lookups
+        for (const row of mappingData) {
+          const normalizedSource = row.source_name.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+          allUserMappings.set(normalizedSource, row.canonical_name);
+          // Also store with sport prefix for sport-specific lookups
+          allUserMappings.set(`${row.sport_code}|${normalizedSource}`, row.canonical_name);
+        }
+        console.log(`[WATCH-MODE-POLL] Loaded ${mappingData.length} user-defined team mappings`);
+      }
+    } catch (mapErr) {
+      console.warn('[WATCH-MODE-POLL] Failed to load user mappings:', mapErr);
+    }
+
     // Group bookmaker signals by event
     const signalsByEvent: Map<string, BookmakerSignal[]> = new Map();
     for (const signal of bookmakerSignals as BookmakerSignal[]) {
@@ -737,7 +844,7 @@ Deno.serve(async (req) => {
       let matchedSignals: BookmakerSignal[] = [];
 
       for (const [eventKey, signals] of signalsByEvent) {
-        if (teamsMatch(polyTeams, signals[0].event_name)) {
+        if (teamsMatchWithUserMappings(polyTeams, signals[0].event_name, allUserMappings)) {
           matchedEventKey = eventKey;
           matchedSignals = signals;
           break;
@@ -781,7 +888,7 @@ Deno.serve(async (req) => {
 
       // Find the specific outcome matching Polymarket's team_home (the YES side)
       const homeTeam = polyMarket.team_home || polyTeams[0];
-      const matchedOutcome = findMatchingOutcome(homeTeam, matchedSignals);
+      const matchedOutcome = findMatchingOutcomeWithUserMappings(homeTeam, matchedSignals, allUserMappings);
 
       if (!matchedOutcome) {
         console.log(`[${CORE_LOGIC_VERSION}] TEAM_ALIAS_MISSING: ${homeTeam} in ${polyEventName}`);
@@ -815,7 +922,8 @@ Deno.serve(async (req) => {
       const avgProbs: Map<string, number> = new Map();
       for (const [outcome, probs] of outcomeProbs) {
         const avg = probs.reduce((a, b) => a + b, 0) / probs.length;
-        avgProbs.set(outcome, avg);
+        // Use user mappings for outcome canonicalization too
+        avgProbs.set(getCanonicalNameWithUserMappings(outcome, allUserMappings), avg);
         totalRawProb += avg;
       }
 
@@ -839,7 +947,7 @@ Deno.serve(async (req) => {
       }
 
       // Vig-free probability for matched outcome (now normalized to 2-way for NHL)
-      const matchedOutcomeCanon = getCanonicalName(matchedOutcome.outcome);
+      const matchedOutcomeCanon = getCanonicalNameWithUserMappings(matchedOutcome.outcome, allUserMappings);
       const rawProb = avgProbs.get(matchedOutcomeCanon) || matchedOutcome.implied_probability;
       const vigFreeFairProb = totalRawProb > 0 ? rawProb / totalRawProb : rawProb;
 
