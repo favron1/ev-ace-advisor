@@ -235,8 +235,7 @@ Deno.serve(async (req) => {
   }
 
   const startTime = Date.now();
-  console.log('[POLY-SYNC-24H] Starting universal sports scan with 24-HOUR window + ALL market types...');
-  console.log('[POLY-SYNC-24H] FIX v2: FULL discovery mode - caching ALL markets, no date rejection');
+  console.log('[POLY-SYNC-24H] STRICT MODE: 24h window, H2H markets only');
 
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
@@ -411,9 +410,9 @@ Deno.serve(async (req) => {
         }
         offset += limit;
         
-        // INCREASED: Safety cap at 2000 sports events (was 500)
-        if (allEvents.length >= 2000) {
-          console.log(`[POLY-SYNC-24H] Hit 2000 event cap, stopping pagination`);
+        // STRICT: Safety cap at 500 with proper 24h+H2H filtering
+        if (allEvents.length >= 500) {
+          console.log(`[POLY-SYNC-24H] Hit 500 event cap, stopping pagination`);
           hasMore = false;
         }
       }
@@ -458,7 +457,7 @@ Deno.serve(async (req) => {
     }
 
     // Helper: Parse event date and calculate priority (NO LONGER REJECTS)
-    // Returns date info for all events - let downstream decide what's actionable
+    // Returns date info - RESTORED 24h window rejection
     function parseEventDate(event: any, now: Date, in24Hours: Date, in7Days: Date): { 
       resolvedDate: Date | null; 
       dateSource: string; 
@@ -473,7 +472,10 @@ Deno.serve(async (req) => {
         if (!isNaN(slugDate.getTime())) {
           const hoursUntil = (slugDate.getTime() - now.getTime()) / (1000 * 60 * 60);
           const priority = categorizeEventPriority(hoursUntil);
-          // CACHE ALL - don't reject based on date
+          // ENFORCE 24h WINDOW: Only cache imminent H2H games
+          if (hoursUntil > 24) {
+            return { resolvedDate: null, dateSource: 'rejected-future', priority: 'distant', hoursUntilEvent: hoursUntil };
+          }
           return { resolvedDate: slugDate, dateSource: 'slug', priority, hoursUntilEvent: hoursUntil };
         }
       }
@@ -484,6 +486,9 @@ Deno.serve(async (req) => {
         if (!isNaN(startDate.getTime()) && startDate >= now) {
           const hoursUntil = (startDate.getTime() - now.getTime()) / (1000 * 60 * 60);
           const priority = categorizeEventPriority(hoursUntil);
+          if (hoursUntil > 24) {
+            return { resolvedDate: null, dateSource: 'rejected-future', priority: 'distant', hoursUntilEvent: hoursUntil };
+          }
           return { resolvedDate: startDate, dateSource: 'startDate', priority, hoursUntilEvent: hoursUntil };
         }
       }
@@ -494,6 +499,9 @@ Deno.serve(async (req) => {
         if (!isNaN(endDate.getTime()) && endDate >= now) {
           const hoursUntil = (endDate.getTime() - now.getTime()) / (1000 * 60 * 60);
           const priority = categorizeEventPriority(hoursUntil);
+          if (hoursUntil > 24) {
+            return { resolvedDate: null, dateSource: 'rejected-future', priority: 'distant', hoursUntilEvent: hoursUntil };
+          }
           return { resolvedDate: endDate, dateSource: 'endDate', priority, hoursUntilEvent: hoursUntil };
         }
       }
@@ -508,6 +516,9 @@ Deno.serve(async (req) => {
         if (!isNaN(parsedDate.getTime()) && parsedDate >= now) {
           const hoursUntil = (parsedDate.getTime() - now.getTime()) / (1000 * 60 * 60);
           const priority = categorizeEventPriority(hoursUntil);
+          if (hoursUntil > 24) {
+            return { resolvedDate: null, dateSource: 'rejected-future', priority: 'distant', hoursUntilEvent: hoursUntil };
+          }
           return { resolvedDate: parsedDate, dateSource: 'question-iso', priority, hoursUntilEvent: hoursUntil };
         }
       }
@@ -538,6 +549,9 @@ Deno.serve(async (req) => {
           if (parsedDate >= now) {
             const hoursUntil = (parsedDate.getTime() - now.getTime()) / (1000 * 60 * 60);
             const priority = categorizeEventPriority(hoursUntil);
+            if (hoursUntil > 24) {
+              return { resolvedDate: null, dateSource: 'rejected-future', priority: 'distant', hoursUntilEvent: hoursUntil };
+            }
             return { resolvedDate: parsedDate, dateSource: 'question-natural', priority, hoursUntilEvent: hoursUntil };
           }
         }
@@ -565,6 +579,9 @@ Deno.serve(async (req) => {
           if (!isNaN(gameTime.getTime()) && gameTime >= now) {
             const hoursUntil = (gameTime.getTime() - now.getTime()) / (1000 * 60 * 60);
             const priority = categorizeEventPriority(hoursUntil);
+            if (hoursUntil > 24) {
+              return { resolvedDate: null, dateSource: 'rejected-future', priority: 'distant', hoursUntilEvent: hoursUntil };
+            }
             return { resolvedDate: gameTime, dateSource: 'odds-api', priority, hoursUntilEvent: hoursUntil };
           }
         }
@@ -603,6 +620,11 @@ Deno.serve(async (req) => {
         continue;
       }
       
+      // RESTORE: Reject events more than 24 hours away
+      if (hoursUntilEvent > 24) {
+        continue;
+      }
+      
       // Track which date source is being used
       statsByDateSource[dateSource] = (statsByDateSource[dateSource] || 0) + 1;
       
@@ -635,8 +657,8 @@ Deno.serve(async (req) => {
           marketType = detectMarketType(market.question || '');
         }
         
-        // Skip futures markets (championship, MVP, etc.) - not tradable in 24h window
-        if (marketType === 'futures') {
+        // H2H ONLY: Skip all non-H2H market types
+        if (marketType !== 'h2h') {
           continue;
         }
         
@@ -1162,7 +1184,10 @@ Deno.serve(async (req) => {
       .from('polymarket_h2h_cache')
       .select('condition_id, token_id_yes, yes_price, source')
       .eq('status', 'active')
-      .not('token_id_yes', 'is', null);
+      .eq('market_type', 'h2h')
+      .not('token_id_yes', 'is', null)
+      .gte('event_date', new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+      .lte('event_date', new Date(Date.now() + 26 * 60 * 60 * 1000).toISOString());
     
     if (fetchH2hError) {
       console.error('[POLY-SYNC-24H] Error fetching markets for CLOB refresh:', fetchH2hError);
