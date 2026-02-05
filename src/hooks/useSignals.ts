@@ -235,8 +235,7 @@ export function useSignals() {
   // Enrich signals with execution analysis, filtering out non-tradeable signals
   const enrichedSignals: EnrichedSignal[] = useMemo(() => {
     return signals
-      // Only show signals matched to Polymarket (tradeable)
-      .filter(signal => signal.is_true_arbitrage === true)
+      // Show ALL signals - let user decide what to execute
       .map(signal => ({
         ...signal,
         execution: analyzeExecution(signal, 100), // Default $100 stake

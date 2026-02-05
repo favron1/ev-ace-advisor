@@ -271,28 +271,14 @@ export function SignalCard({
       }
     }
     
-    // Gate 2: Must have fresh price data (≤5 minutes)
-    const stalenessMinutes = polyUpdatedAt 
-      ? (Date.now() - new Date(polyUpdatedAt).getTime()) / 60000 
-      : Infinity;
-    if (stalenessMinutes > 5) {
-      return { allowed: false, reason: 'Stale price data' };
-    }
-    
-    // Gate 3: Must have minimum liquidity ($5K)
-    if (!polyVolume || polyVolume < 5000) {
-      return { allowed: false, reason: 'Insufficient liquidity' };
-    }
+    // Gate 2 & 3: REMOVED - User can see staleness/liquidity indicators and decide
     
     // Gate 4: High-prob artifact check (85%+ fair prob needs very fresh data)
     if (bookmakerProbFair >= 0.85 && signal.edge_percent > 40) {
       return { allowed: false, reason: 'Artifact edge detected' };
     }
     
-    // Gate 5: Must have positive execution decision
-    if (!signal.execution || signal.execution.execution_decision === 'NO_BET') {
-      return { allowed: false, reason: 'No bet recommended' };
-    }
+    // Gate 5: REMOVED - Let user execute any signal they like
     
     return { allowed: true, reason: 'Ready to execute' };
   };
