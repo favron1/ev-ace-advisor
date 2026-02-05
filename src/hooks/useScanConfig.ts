@@ -3,6 +3,9 @@ import { supabase } from '@/integrations/supabase/client';
 import type { ScanConfig, ScanStatus, AdaptiveScanResult } from '@/types/scan-config';
 import { useToast } from '@/hooks/use-toast';
 
+// Helper function for sleep
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 const DEFAULT_CONFIG: Partial<ScanConfig> = {
   base_frequency_minutes: 30,
   turbo_frequency_minutes: 5, // Legacy - kept for DB compatibility
@@ -172,30 +175,86 @@ export function useScanConfig() {
     setStatus(prev => ({ ...prev, isScanning: true }));
 
     try {
-      // Step 1: Sync all Polymarket sports events within 24h
-      toast({ title: 'Discovering markets...', description: 'Scanning Polymarket for sports events' });
+      // Step 1: Fire sync in background (don't await completion)
+      // This prevents client timeout on long-running sync operations
+      toast({ title: 'Syncing markets...', description: 'Scanning Polymarket (this runs in background)' });
       
-      const { data: syncResult, error: syncError } = await supabase.functions.invoke('polymarket-sync-24h');
+      // Capture timestamp before triggering sync
+      const syncStartTime = Date.now();
       
-      if (syncError) {
-        console.error('Sync error:', syncError);
-        toast({
-          title: 'Sync Failed',
-          description: syncError.message || 'Failed to sync Polymarket events',
-          variant: 'destructive',
+      // Fire-and-forget: trigger sync without awaiting full completion
+      supabase.functions.invoke('polymarket-sync-24h').catch(err => {
+        console.error('Background sync error (non-blocking):', err);
+      });
+      
+      // Step 2: Poll database for sync completion
+      // Check if last_bulk_sync timestamp updated within the last 60 seconds
+      let syncComplete = false;
+      let eventsFound = 0;
+      
+      for (let i = 0; i < 15; i++) { // 75 seconds max (15 * 5s)
+        await sleep(5000);
+        
+        try {
+          // Check for recent sync completion
+          const { data: latestSync, error: pollError } = await supabase
+            .from('polymarket_h2h_cache')
+            .select('last_bulk_sync')
+            .order('last_bulk_sync', { ascending: false })
+            .limit(1)
+            .single();
+          
+          if (!pollError && latestSync?.last_bulk_sync) {
+            const lastSyncTime = new Date(latestSync.last_bulk_sync).getTime();
+            
+            // Sync is complete if last_bulk_sync is after we started
+            if (lastSyncTime > syncStartTime) {
+              syncComplete = true;
+              
+              // Get count of active markets
+              const { count } = await supabase
+                .from('polymarket_h2h_cache')
+                .select('*', { count: 'exact', head: true })
+                .eq('status', 'active');
+              
+              eventsFound = count || 0;
+              
+              toast({ 
+                title: `Sync complete: ${eventsFound} markets`, 
+                description: 'Now checking for edges...' 
+              });
+              break;
+            }
+          }
+        } catch (pollErr) {
+          console.warn('Poll error (continuing):', pollErr);
+        }
+        
+        // Update progress toast every 15 seconds
+        if (i > 0 && i % 3 === 0) {
+          toast({ 
+            title: 'Still syncing...', 
+            description: `${(i * 5)}s elapsed, waiting for sync to complete` 
+          });
+        }
+      }
+      
+      if (!syncComplete) {
+        toast({ 
+          title: 'Sync taking longer than expected', 
+          description: 'Running monitor with current cache. Background sync will continue.' 
         });
-        throw syncError;
+        
+        // Get approximate count anyway
+        const { count } = await supabase
+          .from('polymarket_h2h_cache')
+          .select('*', { count: 'exact', head: true })
+          .eq('status', 'active');
+        
+        eventsFound = count || 0;
       }
 
-      console.log('Sync result:', syncResult);
-      
-      const eventsFound = syncResult?.qualifying_events || 0;
-      toast({ 
-        title: `Found ${eventsFound} events`, 
-        description: 'Now checking for edges against bookmakers...' 
-      });
-
-      // Step 2: Run monitor to check for edges
+      // Step 3: Run monitor to check for edges
       const { data: monitorResult, error: monitorError } = await supabase.functions.invoke('polymarket-monitor');
       
       if (monitorError) {
@@ -230,10 +289,11 @@ export function useScanConfig() {
 
       const edgesFound = monitorResult?.edges_found || 0;
       const matched = monitorResult?.events_matched || 0;
+      const signalsCreated = monitorResult?.signals_created || 0;
       
       toast({
         title: 'Scan Complete',
-        description: `${eventsFound} markets scanned, ${matched} matched to bookmakers, ${edgesFound} edges detected`,
+        description: `${eventsFound} markets, ${matched} matched, ${edgesFound} edges, ${signalsCreated} signals`,
       });
 
       return result;
