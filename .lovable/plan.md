@@ -1,185 +1,159 @@
 
 
-# Fix: Restore Market Discovery Volume + Multi-Source Data Reliability
+# Fix: Scan Reliability + Signal Generation Pipeline
 
-## Problem Analysis
+## Problem Summary
 
-### The Core Issue: Market Discovery Dropped 90%
+### Issue 1: "Scan Failed" - Client Timeout
+The sync function successfully completes (2,000+ markets cached), but takes 30-45 seconds. The browser times out after ~30 seconds, showing "Failed to fetch" even though the operation succeeded in the background.
 
-| Date | Total Markets | Active | With Tokens |
-|------|---------------|--------|-------------|
-| Jan 31 | **1,073** | 250 | 1,017 |
-| Feb 1 | 22 | 7 | 15 |
-| Feb 4 | 97 | 38 | 66 |
-| Feb 5 | 25 | 25 | 25 |
+### Issue 2: No Signals Despite 2,000+ Markets
+The monitor pipeline shows:
+- 72 markets polled (only imminent games)
+- 8 tokenized (26 blocked - no token IDs)
+- **1 matched** to bookmaker data (87% match failure rate)
+- 1 edge found
+- **0 signals created**
 
-The drop from 1,073 to ~25-97 markets correlates directly with the performance decline. Your winning streak happened when the sync was discovering 10x more markets.
+Root cause: Most Polymarket games don't have corresponding Odds API data at the exact time the scan runs, OR the existing active signal blocks a duplicate.
 
-### Root Cause 1: Aggressive 24-Hour Window Filtering
+---
 
-The `polymarket-sync-24h` function restricts market discovery to only events occurring within 24 hours:
+## Solution Architecture
 
-```text
-// Current behavior:
-1. Event has slug date like "nhl-det-col-2026-02-02"
-2. If date is >24h away → IMMEDIATELY REJECTED
-3. If no date in slug → Falls through to complex multi-source matching
-4. Many valid markets get dropped because their dates are 2-7 days out
-```
+### Phase 1: Split Sync + Monitor with Progress Feedback
 
-The original `sync-polymarket-h2h` function fetched ALL active sports events without date filtering, then let the monitor decide which were actionable. This preserved 1000+ markets in the cache for opportunity scanning.
+Instead of one long-running call that times out, split into:
 
-### Root Cause 2: 500-Event Cap Is Too Low
+1. **Sync Phase** - Fire-and-forget with toast feedback
+   - Trigger sync but don't await completion
+   - Show "Syncing markets..." toast immediately
+   - Poll database for sync completion (check `last_bulk_sync` timestamp)
 
-```typescript
-// Safety cap at 500 sports events (line 281)
-if (allEvents.length >= 500) {
-  hasMore = false;
-}
-```
+2. **Monitor Phase** - Run after sync completes
+   - Only runs when sync is confirmed complete
+   - Shows progress: "Checking X markets for edges..."
 
-Polymarket has 1000+ active sports events. The cap prevents full discovery.
+### Phase 2: Fix Bookmaker Data Coverage Gap
 
-### Root Cause 3: Missing Sports-Specific API Endpoints
+The monitor only finds matches for games where:
+- Odds API has data for that game
+- AND the game is within 24 hours
+- AND team names match
 
-The Polymarket documentation reveals a better approach:
+**Problem**: Odds API doesn't always have data for games 12-24h out until closer to game time.
 
-```text
-# Get all supported sports leagues
-curl "https://gamma-api.polymarket.com/sports"
+**Solution**: 
+- Store matched bookmaker data in cache during sync
+- Allow monitor to use cached fair probabilities when live API fails
+- Track which games have bookmaker coverage
 
-# Get events for a specific league (e.g., NBA series_id=10345)
-curl "https://gamma-api.polymarket.com/events?series_id=10345&active=true"
+### Phase 3: Signal Deduplication Fix
 
-# Filter to just game bets (not futures) using tag_id=100639
-curl "https://gamma-api.polymarket.com/events?series_id=10345&tag_id=100639"
-```
+Current: If an active signal exists for an event, new edge calculations are blocked.
 
-Currently we use `tag_slug=sports` which is less reliable than the dedicated `/sports` endpoint with `series_id` filtering.
+**Problem**: Old signals may be stale but still "active", preventing new signals.
+
+**Solution**:
+- Before creating signal, check if existing signal's edge has improved
+- Update existing signal's edge/prices if improvement found
+- Only block if signal was recently updated (within 15 minutes)
 
 ---
 
 ## Implementation Plan
 
-### Phase 1: Remove 24-Hour Window Restriction
+### File: `src/hooks/useScanConfig.ts`
 
-**File**: `supabase/functions/polymarket-sync-24h/index.ts`
-
-Remove the aggressive date filtering that rejects events >24h away. Instead:
-
-1. Cache ALL active sports H2H markets regardless of date
-2. Add a `days_until_event` field to help downstream filtering
-3. Let the monitor decide what's actionable (it already has the 24h logic)
+Modify `runManualScan` to:
+1. Fire sync in background (don't await full completion)
+2. Poll `polymarket_h2h_cache` for `last_bulk_sync` update
+3. Show progress toasts during sync
+4. Run monitor after sync completes
 
 ```text
 BEFORE:
-  if (slugDate > 24h away) → REJECT IMMEDIATELY
+  const syncResult = await supabase.functions.invoke('polymarket-sync-24h');
+  if (syncError) throw syncError;
 
 AFTER:
-  if (slugDate parseable) → Store with calculated days_until_event
-  Mark as "future" if >7 days away (still cache, just flag it)
+  // Fire sync without blocking
+  supabase.functions.invoke('polymarket-sync-24h').catch(console.error);
+  toast({ title: 'Syncing markets...' });
+  
+  // Poll for completion (check last_bulk_sync updated within last 60s)
+  let syncComplete = false;
+  for (let i = 0; i < 12; i++) { // 60 seconds max
+    await sleep(5000);
+    const { data } = await supabase
+      .from('polymarket_h2h_cache')
+      .select('last_bulk_sync')
+      .order('last_bulk_sync', { ascending: false })
+      .limit(1)
+      .single();
+    
+    if (data?.last_bulk_sync && Date.now() - new Date(data.last_bulk_sync).getTime() < 60000) {
+      syncComplete = true;
+      break;
+    }
+  }
+  
+  if (!syncComplete) {
+    toast({ title: 'Sync taking longer than expected...' });
+  }
+  
+  // Run monitor
+  await supabase.functions.invoke('polymarket-monitor');
 ```
 
-### Phase 2: Increase Event Cap + Add Pagination Improvements
+### File: `supabase/functions/polymarket-sync-24h/index.ts`
 
-**File**: `supabase/functions/polymarket-sync-24h/index.ts`
+Add early response + background processing:
+1. Respond to client immediately with "processing" status
+2. Continue processing in background
+3. Use streaming response pattern or background job
 
-```text
-1. Increase safety cap from 500 to 2000 events
-2. Add per-page logging to debug API responses
-3. Add retry logic for failed pages
-```
+**Alternative**: Add a faster "lightweight sync" mode that only syncs imminent games (next 6 hours) for quick scans.
 
-### Phase 3: Use Sports-Specific API Endpoints
+### File: `supabase/functions/polymarket-monitor/index.ts`
 
-**File**: `supabase/functions/polymarket-sync-24h/index.ts`
+Fix match rate:
+1. Expand date matching window from ±24h to ±36h for discovery
+2. Use cached bookmaker fair probs when live API returns no data
+3. Improve logging for match failures
 
-Add a new discovery strategy that queries the `/sports` endpoint first:
+---
 
-```text
-1. Fetch https://gamma-api.polymarket.com/sports
-2. For each sport (NBA, NHL, NFL, CBB):
-   - Get series_id from /sports response
-   - Query /events?series_id=X&active=true&closed=false
-3. Merge results with existing tag_slug=sports approach
-4. Deduplicate by condition_id
-```
+## Expected Outcomes
 
-This provides redundant discovery paths - if one fails, the other still works.
-
-### Phase 4: Add CLOB Price Verification to All Cached Markets
-
-**File**: `supabase/functions/polymarket-sync-24h/index.ts`
-
-The CLOB price refresh (lines 988-1070) only runs on `market_type='h2h'` markets. Extend to all cached markets to ensure price accuracy across the board.
-
-### Phase 5: Add Discovery Health Monitoring
-
-**File**: New column in `polymarket_h2h_cache` or log output
-
-Track sync health metrics:
-
-```text
-- Total events fetched vs expected
-- Markets per sport discovered
-- Token extraction success rate
-- CLOB price match rate
-```
-
-This enables quick detection of future API changes.
+| Metric | Current | After Fix |
+|--------|---------|-----------|
+| Scan timeout rate | ~50% | <5% |
+| User feedback during scan | None until fail | Progress toasts every 5s |
+| Match rate | 13% | 50%+ |
+| Signal generation | Blocked by stale signals | Updates existing signals |
 
 ---
 
 ## Technical Details
 
-### Recommended API Strategy
+### Why 0 Signals Despite 1 Edge Found
 
-```text
-PRIMARY: /sports endpoint + series_id queries
-  - More targeted, returns only game markets
-  - Avoids futures/outrights that pollute discovery
-  - Polymarket maintains this for automated sports
+The monitor log shows `edges_over_threshold: 1` but `signals_created: 0`. This happens when:
 
-SECONDARY: tag_slug=sports (current approach)
-  - Broader but includes more noise
-  - Good fallback if /sports endpoint changes
+1. **Existing active signal** for same event blocks creation
+2. **Suppression check** finds signal was recently dismissed
+3. **Gate failure** at final creation step (missing condition_id, etc.)
 
-TERTIARY: Firecrawl scraping
-  - Already implemented for NBA/CBB
-  - Useful for markets not yet in API
-```
+We need to add logging at signal creation to diagnose the specific failure.
 
-### Date Handling Strategy
+### Sync Performance Breakdown
 
-```text
-Instead of rejecting events, categorize them:
+Current sync takes ~45 seconds:
+- Gamma API pagination: ~10s (2000 events)
+- Firecrawl scraping: ~8s (40 games)
+- CLOB price refresh: ~15s (1900 tokens in batches)
+- Database upserts: ~12s (2000 individual upserts)
 
-1. "imminent" - Game within 24 hours (highest priority)
-2. "upcoming" - Game in 1-3 days (monitor for line movement)
-3. "future" - Game in 3-7 days (cache for reference)
-4. "distant" - Game >7 days (cache but don't poll frequently)
-
-This allows the pipeline to prioritize without losing discovery.
-```
-
----
-
-## Files to Modify
-
-| File | Changes |
-|------|---------|
-| `polymarket-sync-24h/index.ts` | Remove 24h window rejection, add /sports discovery, increase cap |
-
-## Expected Outcome
-
-| Metric | Current | After Fix |
-|--------|---------|-----------|
-| Markets discovered | ~25-100 | 500-1500 |
-| Sports covered | 4 spotty | 4 comprehensive |
-| Cache freshness | Stale | CLOB-verified |
-| Signal opportunity pool | Low | 10x larger |
-
-## Why This Fixes the Win Rate
-
-The winning streak wasn't about v1.0 thresholds - it was about having 1,073 markets to scan versus 25. More markets = more opportunities = more high-quality edges found. The logic thresholds filter from the pool; if the pool is 90% smaller, the output drops proportionally.
+Optimization: Batch database upserts (10-50 at a time) instead of individual calls.
 
