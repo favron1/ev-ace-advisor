@@ -1357,15 +1357,17 @@ Deno.serve(async (req) => {
       if (allTokenIds.length > 0) {
         // Batch fetch CLOB prices
         const CLOB_API_BASE = 'https://clob.polymarket.com';
-        const batchSize = 50;
+        const batchSize = 25; // Reduced from 50 since we send 2 requests per token (BUY + SELL)
         const allPrices: Record<string, { BUY?: string; SELL?: string }> = {};
         
         for (let i = 0; i < allTokenIds.length; i += batchSize) {
           const batch = allTokenIds.slice(i, i + batchSize);
-          const requestBody = batch.map(token_id => ({
-            token_id,
-            side: 'BUY' as const
-          }));
+          // Request BOTH BUY and SELL for each token to validate orderbook exists
+          const requestBody: Array<{ token_id: string; side: 'BUY' | 'SELL' }> = [];
+          for (const token_id of batch) {
+            requestBody.push({ token_id, side: 'BUY' });
+            requestBody.push({ token_id, side: 'SELL' });
+          }
           
           try {
             const response = await fetch(`${CLOB_API_BASE}/prices`, {
