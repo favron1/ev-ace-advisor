@@ -858,6 +858,35 @@ Deno.serve(async (req) => {
       const batch = firecrawlGames.slice(i, i + BATCH_SIZE);
       
       await Promise.all(batch.map(async ({ game, sport, sportCode }) => {
+        // ============= PART 1: DUPLICATE DETECTION =============
+        // Before creating Firecrawl entry, check if a CLOB-verified market already exists
+        // This prevents synthetic condition_ids like "firecrawl_nba_hou_okc" from duplicating real markets
+        const teamLastWord1 = game.team1Name.split(' ').pop()?.toLowerCase() || '';
+        const teamLastWord2 = game.team2Name.split(' ').pop()?.toLowerCase() || '';
+        
+        if (teamLastWord1.length > 2 && teamLastWord2.length > 2) {
+          const { data: existingClobMarket } = await supabase
+            .from('polymarket_h2h_cache')
+            .select('condition_id, yes_price, token_id_yes')
+            .eq('source', 'clob_verified')
+            .eq('status', 'active')
+            .or(`team_home_normalized.ilike.%${teamLastWord1}%,team_away_normalized.ilike.%${teamLastWord1}%`)
+            .limit(10);
+          
+          // Check if any of the results match BOTH teams
+          const matchingMarket = existingClobMarket?.find(market => {
+            const homeNorm = (market as any).team_home_normalized?.toLowerCase() || '';
+            const awayNorm = (market as any).team_away_normalized?.toLowerCase() || '';
+            const combined = `${homeNorm} ${awayNorm}`;
+            return combined.includes(teamLastWord1) && combined.includes(teamLastWord2);
+          });
+          
+          if (matchingMarket?.condition_id) {
+            console.log(`[FIRECRAWL] SKIP_DUPLICATE: ${game.team1Name} vs ${game.team2Name} - CLOB market exists (${matchingMarket.condition_id.slice(0, 12)}...)`);
+            return; // Skip Firecrawl entry - real CLOB market exists
+          }
+        }
+        
         let conditionId = `firecrawl_${sportCode}_${game.team1Code}_${game.team2Code}`;
         let volume = 0;
         let liquidity = 0;
@@ -977,7 +1006,125 @@ Deno.serve(async (req) => {
       }
       console.log(`[POLY-SYNC-24H] Backfilled ${backfilled} rows with missing token IDs`);
     }
-    
+
+    // ============= PART 2: AGGRESSIVE TOKEN RESOLUTION =============
+    // For markets still missing tokens, try the tokenize-market service
+    // This uses tiered extraction: CLOB API → Gamma API → CLOB Search
+    const { data: stillMissingTokens } = await supabase
+      .from('polymarket_h2h_cache')
+      .select('condition_id, team_home, team_away, sport_category, polymarket_slug')
+      .is('token_id_yes', null)
+      .eq('status', 'active')
+      .eq('market_type', 'h2h')
+      .limit(20);
+
+    let tokenResolved = 0;
+    if (stillMissingTokens && stillMissingTokens.length > 0) {
+      console.log(`[POLY-SYNC-24H] Running tiered token resolution for ${stillMissingTokens.length} markets...`);
+      
+      for (const market of stillMissingTokens) {
+        if (!market.team_home || !market.team_away) continue;
+        
+        const isSyntheticId = market.condition_id.startsWith('firecrawl_');
+        
+        try {
+          // Try CLOB Search API for token resolution (Tier 4 in the cascade)
+          const CLOB_API_BASE = 'https://clob.polymarket.com';
+          const clobSearchResponse = await fetch(`${CLOB_API_BASE}/markets?limit=200`);
+          
+          if (clobSearchResponse.ok) {
+            const clobData = await clobSearchResponse.json();
+            const markets = Array.isArray(clobData) ? clobData : (clobData.data || []);
+            
+            const normalizeTeam = (name: string): string => 
+              name.toLowerCase().replace(/[^a-z0-9]/g, '');
+            
+            const homeNorm = normalizeTeam(market.team_home);
+            const awayNorm = normalizeTeam(market.team_away);
+            const homeNickname = market.team_home.split(' ').pop()?.toLowerCase() || '';
+            const awayNickname = market.team_away.split(' ').pop()?.toLowerCase() || '';
+            
+            for (const clobMarket of markets) {
+              const question = (clobMarket.question || '').toLowerCase();
+              const questionNorm = normalizeTeam(clobMarket.question || '');
+              
+              const hasHome = questionNorm.includes(homeNorm) || 
+                              (homeNickname.length > 2 && question.includes(homeNickname));
+              const hasAway = questionNorm.includes(awayNorm) || 
+                              (awayNickname.length > 2 && question.includes(awayNickname));
+              
+              if (hasHome && hasAway) {
+                const tokens = clobMarket.tokens || [];
+                if (tokens.length >= 2 && clobMarket.condition_id) {
+                  // Found matching market with tokens - update cache
+                  const newConditionId = clobMarket.condition_id;
+                  const tokenIdYes = tokens[0]?.token_id || tokens[0];
+                  const tokenIdNo = tokens[1]?.token_id || tokens[1];
+                  
+                  // If original was synthetic, replace the condition_id
+                  if (isSyntheticId) {
+                    // Delete the old synthetic entry and insert with real condition_id
+                    await supabase
+                      .from('polymarket_h2h_cache')
+                      .delete()
+                      .eq('condition_id', market.condition_id);
+                    
+                    await supabase
+                      .from('polymarket_h2h_cache')
+                      .upsert({
+                        condition_id: newConditionId,
+                        event_title: `${market.team_home} vs ${market.team_away}`,
+                        question: clobMarket.question || `Will ${market.team_home} beat ${market.team_away}?`,
+                        team_home: market.team_home,
+                        team_away: market.team_away,
+                        team_home_normalized: market.team_home.toLowerCase(),
+                        team_away_normalized: market.team_away.toLowerCase(),
+                        sport_category: market.sport_category,
+                        market_type: 'h2h',
+                        token_id_yes: tokenIdYes,
+                        token_id_no: tokenIdNo,
+                        token_source: 'clob_search',
+                        tradeable: true,
+                        untradeable_reason: null,
+                        status: 'active',
+                        source: 'clob_verified',
+                        last_price_update: now.toISOString(),
+                      }, { onConflict: 'condition_id' });
+                    
+                    console.log(`[TOKEN-RESOLVE] Replaced synthetic ${market.condition_id.slice(0, 20)}... with real ${newConditionId.slice(0, 12)}...`);
+                  } else {
+                    // Just update the existing entry with tokens
+                    await supabase
+                      .from('polymarket_h2h_cache')
+                      .update({
+                        token_id_yes: tokenIdYes,
+                        token_id_no: tokenIdNo,
+                        token_source: 'clob_search',
+                        tradeable: true,
+                        untradeable_reason: null,
+                      })
+                      .eq('condition_id', market.condition_id);
+                    
+                    console.log(`[TOKEN-RESOLVE] Updated ${market.condition_id.slice(0, 12)}... with CLOB tokens`);
+                  }
+                  
+                  tokenResolved++;
+                  break; // Found match, move to next market
+                }
+              }
+            }
+          }
+        } catch (error) {
+          console.warn(`[TOKEN-RESOLVE] Error for ${market.condition_id.slice(0, 12)}...:`, error);
+        }
+        
+        // Small delay between lookups
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      
+      console.log(`[POLY-SYNC-24H] Token resolution complete: ${tokenResolved}/${stillMissingTokens.length} resolved`);
+    }
+
     console.log(`[POLY-SYNC-24H] Firecrawl games upserted: ${firecrawlUpserted} (${firecrawlVolumeEnriched} enriched with volume)`);
 
     // ============= COLLECT GAMMA EVENTS FOR BATCH UPSERT =============
@@ -1264,6 +1411,30 @@ Deno.serve(async (req) => {
           const sellPrice = parseFloat(priceData.SELL || '0');
           const oldPrice = tokenIdToOldPrice.get(tokenId) || 0.5;
           
+          // ============= PART 3: ORDERBOOK VALIDATION =============
+          // Validate orderbook has liquidity (both BUY and SELL prices exist)
+          const hasOrderbook = buyPrice > 0 && sellPrice > 0;
+          
+          if (!hasOrderbook) {
+            // Mark as untradeable - no active orderbook
+            await supabase
+              .from('polymarket_h2h_cache')
+              .update({
+                tradeable: false,
+                untradeable_reason: 'NO_ORDERBOOK_EXISTS',
+                last_price_update: now.toISOString(),
+              })
+              .eq('condition_id', conditionId);
+            console.log(`[CLOB] NO_ORDERBOOK: ${conditionId.slice(0, 12)}... BUY=${buyPrice} SELL=${sellPrice}`);
+            continue;
+          }
+          
+          // Validate bid-ask spread is reasonable (< 20%)
+          const spread = buyPrice - sellPrice;
+          if (spread > 0.20) {
+            console.log(`[CLOB] WIDE_SPREAD: ${conditionId.slice(0, 12)}... bid=${(sellPrice*100).toFixed(0)}¢ ask=${(buyPrice*100).toFixed(0)}¢ spread=${(spread*100).toFixed(0)}%`);
+          }
+          
           // Validate price is within sanity bounds (5¢ - 95¢)
           if (buyPrice >= 0.05 && buyPrice <= 0.95) {
             priceUpdates.push({
@@ -1274,6 +1445,15 @@ Deno.serve(async (req) => {
               best_ask: buyPrice,
               old_price: oldPrice,
             });
+            
+            // Mark as tradeable with valid orderbook
+            await supabase
+              .from('polymarket_h2h_cache')
+              .update({
+                tradeable: true,
+                untradeable_reason: null,
+              })
+              .eq('condition_id', conditionId);
           } else if (buyPrice > 0) {
             console.log(`[POLY-SYNC-24H] CLOB price out of bounds: ${conditionId} price=${buyPrice.toFixed(2)} (skipping)`);
           }
