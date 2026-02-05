@@ -1,4 +1,4 @@
-import { Activity, Settings, LogOut, Zap, BarChart3, BookOpen, PlusCircle, GitBranch } from 'lucide-react';
+import { Activity, Settings, LogOut, Zap, BarChart3, BookOpen, PlusCircle, GitBranch, Upload } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { supabase } from '@/integrations/supabase/client';
 import { useNavigate } from 'react-router-dom';
@@ -74,6 +74,9 @@ export function Header({
           <Button variant="ghost" size="icon" onClick={() => navigate('/manual-entry')} title="Manual Entry">
             <PlusCircle className="h-4 w-4" />
           </Button>
+           <Button variant="ghost" size="icon" onClick={() => navigate('/batch-import')} title="Batch Import">
+             <Upload className="h-4 w-4" />
+           </Button>
           <Button variant="ghost" size="icon" onClick={() => navigate('/pipeline')} title="Pipeline Monitor">
             <GitBranch className="h-4 w-4" />
           </Button>
