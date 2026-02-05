@@ -27,6 +27,35 @@ const corsHeaders = {
 // Gamma API for Polymarket events
 const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
 
+// Sports-specific series_id mappings for targeted discovery
+// These provide more reliable discovery than tag_slug=sports
+const SPORTS_SERIES_IDS: Record<string, number[]> = {
+  // NBA - may have multiple series for regular season, playoffs
+  'basketball_nba': [10345],
+  // NHL
+  'icehockey_nhl': [10346],
+  // NFL
+  'americanfootball_nfl': [10347],
+  // NCAA Basketball
+  'basketball_ncaab': [10348],
+  // Soccer (EPL, La Liga, Serie A, Bundesliga, UCL)
+  'soccer_epl': [10360],
+  'soccer_spain_la_liga': [10361],
+  'soccer_italy_serie_a': [10362],
+  'soccer_germany_bundesliga': [10363],
+  'soccer_uefa_champs_league': [10364],
+};
+
+// Event priority categories based on days until event
+type EventPriority = 'imminent' | 'upcoming' | 'future' | 'distant';
+
+function categorizeEventPriority(hoursUntilEvent: number): EventPriority {
+  if (hoursUntilEvent <= 24) return 'imminent';
+  if (hoursUntilEvent <= 72) return 'upcoming';
+  if (hoursUntilEvent <= 168) return 'future';
+  return 'distant';
+}
+
 // Sport detection now uses shared config - this wrapper maintains backward compat
 
 // Detect sport from title/question using keywords
@@ -207,6 +236,7 @@ Deno.serve(async (req) => {
 
   const startTime = Date.now();
   console.log('[POLY-SYNC-24H] Starting universal sports scan with 24-HOUR window + ALL market types...');
+  console.log('[POLY-SYNC-24H] FIX v2: FULL discovery mode - caching ALL markets, no date rejection');
 
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
@@ -216,8 +246,10 @@ Deno.serve(async (req) => {
     // Calculate 24-HOUR window (focused on actionable events)
     const now = new Date();
     const in24Hours = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const in7Days = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
-    console.log(`[POLY-SYNC-24H] Window: now to ${in24Hours.toISOString()} (24 hours)`);
+    console.log(`[POLY-SYNC-24H] Imminent window: now to ${in24Hours.toISOString()} (24 hours)`);
+    console.log(`[POLY-SYNC-24H] Cache window: now to ${in7Days.toISOString()} (7 days)`);
 
     // ============= ODDS API SCHEDULE FETCH =============
     // Pre-fetch today's games from Odds API to cross-reference with Polymarket events
@@ -253,13 +285,107 @@ Deno.serve(async (req) => {
       console.log(`[POLY-SYNC-24H] No ODDS_API_KEY - skipping date cross-reference`);
     }
 
-    // Fetch sports events using tag_slug=sports filter
+    // ============= PHASE 1: SPORTS-SPECIFIC API DISCOVERY (PRIMARY) =============
+    // Query /sports endpoint first for targeted, reliable discovery
     let allEvents: any[] = [];
+    const seenConditionIds = new Set<string>();
+    
+    console.log('[POLY-SYNC-24H] Phase 1: Fetching via sports-specific series_id endpoints...');
+    
+    // Fetch sports configuration from /sports endpoint
+    let sportSeriesMap: Record<string, number> = {};
+    try {
+      const sportsResponse = await fetch(`${GAMMA_API_BASE}/sports`);
+      if (sportsResponse.ok) {
+        const sportsData = await sportsResponse.json();
+        console.log(`[POLY-SYNC-24H] /sports endpoint returned ${sportsData.length} sports`);
+        
+        // Build dynamic series_id map
+        for (const sport of sportsData) {
+          if (sport.series_id && sport.slug) {
+            sportSeriesMap[sport.slug] = sport.series_id;
+          }
+        }
+        console.log(`[POLY-SYNC-24H] Sports series map: ${JSON.stringify(Object.keys(sportSeriesMap))}`);
+      }
+    } catch (e) {
+      console.log('[POLY-SYNC-24H] /sports endpoint unavailable, using fallback IDs');
+    }
+    
+    // Target series IDs - use dynamic map with fallback to known IDs
+    const targetSports = [
+      { name: 'NBA', seriesId: sportSeriesMap['nba'] || 10345 },
+      { name: 'NHL', seriesId: sportSeriesMap['nhl'] || 10346 },
+      { name: 'NFL', seriesId: sportSeriesMap['nfl'] || 10347 },
+      { name: 'NCAAB', seriesId: sportSeriesMap['ncaab'] || sportSeriesMap['college-basketball'] || 10348 },
+    ];
+    
+    // Fetch events for each sport in parallel
+    const sportsFetchResults = await Promise.allSettled(
+      targetSports.map(async ({ name, seriesId }) => {
+        const events: any[] = [];
+        let offset = 0;
+        const limit = 100;
+        let hasMore = true;
+        
+        while (hasMore) {
+          try {
+            // Query with series_id for targeted sport discovery
+            const url = `${GAMMA_API_BASE}/events?series_id=${seriesId}&active=true&closed=false&limit=${limit}&offset=${offset}`;
+            const response = await fetch(url);
+            
+            if (!response.ok) {
+              console.log(`[POLY-SYNC-24H] Series ${name}(${seriesId}) fetch failed: ${response.status}`);
+              break;
+            }
+            
+            const data = await response.json();
+            if (!Array.isArray(data) || data.length === 0) {
+              hasMore = false;
+            } else {
+              events.push(...data);
+              offset += limit;
+              
+              // Safety cap per sport
+              if (events.length >= 500 || offset >= 1000) {
+                hasMore = false;
+              }
+            }
+          } catch (e) {
+            console.log(`[POLY-SYNC-24H] Series ${name} fetch error:`, e);
+            break;
+          }
+        }
+        
+        console.log(`[POLY-SYNC-24H] Series ${name}(${seriesId}): fetched ${events.length} events`);
+        return { name, events };
+      })
+    );
+    
+    // Collect events from sports-specific queries
+    for (const result of sportsFetchResults) {
+      if (result.status === 'fulfilled' && result.value.events.length > 0) {
+        for (const event of result.value.events) {
+          const conditionId = event.markets?.[0]?.conditionId || event.id;
+          if (conditionId && !seenConditionIds.has(conditionId)) {
+            seenConditionIds.add(conditionId);
+            allEvents.push(event);
+          }
+        }
+      }
+    }
+    
+    console.log(`[POLY-SYNC-24H] Phase 1 complete: ${allEvents.length} unique events from sports-specific endpoints`);
+    
+    // ============= PHASE 2: TAG_SLUG=SPORTS FALLBACK (SECONDARY) =============
+    // Also fetch via tag_slug=sports for redundancy
+    console.log('[POLY-SYNC-24H] Phase 2: Fetching via tag_slug=sports fallback...');
+    
     let offset = 0;
     const limit = 100;
     let hasMore = true;
+    let fallbackEvents = 0;
 
-    // Primary: Fetch events tagged with "sports"
     while (hasMore) {
       const url = `${GAMMA_API_BASE}/events?active=true&closed=false&tag_slug=sports&limit=${limit}&offset=${offset}`;
       const response = await fetch(url);
@@ -274,17 +400,27 @@ Deno.serve(async (req) => {
       if (events.length === 0) {
         hasMore = false;
       } else {
-        allEvents = allEvents.concat(events);
+        // Deduplicate against already-fetched events
+        for (const event of events) {
+          const conditionId = event.markets?.[0]?.conditionId || event.id;
+          if (conditionId && !seenConditionIds.has(conditionId)) {
+            seenConditionIds.add(conditionId);
+            allEvents.push(event);
+            fallbackEvents++;
+          }
+        }
         offset += limit;
         
-        // Safety cap at 500 sports events
-        if (allEvents.length >= 500) {
+        // INCREASED: Safety cap at 2000 sports events (was 500)
+        if (allEvents.length >= 2000) {
+          console.log(`[POLY-SYNC-24H] Hit 2000 event cap, stopping pagination`);
           hasMore = false;
         }
       }
     }
 
-    console.log(`[POLY-SYNC-24H] Fetched ${allEvents.length} sports-tagged events from Gamma API`);
+    console.log(`[POLY-SYNC-24H] Phase 2 complete: added ${fallbackEvents} additional events from tag_slug=sports`);
+    console.log(`[POLY-SYNC-24H] TOTAL DISCOVERY: ${allEvents.length} unique events from all sources`);
 
     // ============= FIRECRAWL SCRAPING FOR ALL CONFIGURED SPORTS =============
     // Uses unified sports config - automatically scrapes all configured sports
@@ -321,53 +457,58 @@ Deno.serve(async (req) => {
         .trim();
     }
 
-    // Helper: Check if event is within 24-hour window using multiple date sources
-    // This fixes NBA/Tennis where endDate is set to season end, not game day
-    function isWithin24HourWindow(event: any, now: Date, in24Hours: Date): { inWindow: boolean; dateSource: string; resolvedDate: Date | null } {
-      // 0. NEW PRIORITY: Parse date from Polymarket slug (e.g., "nhl-det-col-2026-02-02")
-      // This is the MOST RELIABLE source for sports events - prevents cross-game contamination
+    // Helper: Parse event date and calculate priority (NO LONGER REJECTS)
+    // Returns date info for all events - let downstream decide what's actionable
+    function parseEventDate(event: any, now: Date, in24Hours: Date, in7Days: Date): { 
+      resolvedDate: Date | null; 
+      dateSource: string; 
+      priority: EventPriority;
+      hoursUntilEvent: number;
+    } {
+      // 1. PRIORITY: Parse date from Polymarket slug (e.g., "nhl-det-col-2026-02-02")
       const eventSlug = event.slug || '';
       const slugDateMatch = eventSlug.match(/(\d{4}-\d{2}-\d{2})$/);
       if (slugDateMatch) {
         const slugDate = new Date(slugDateMatch[1] + 'T23:59:59Z');
         if (!isNaN(slugDate.getTime())) {
-          // If slug date is within 24h window, use it as authoritative source
-          if (slugDate >= now && slugDate <= in24Hours) {
-            console.log(`[POLY-SYNC-24H] SLUG DATE MATCH: "${event.title}" slug=${eventSlug} → ${slugDateMatch[1]} (in window)`);
-            return { inWindow: true, dateSource: 'slug', resolvedDate: slugDate };
-          }
-          // If slug date is OUTSIDE 24h window, reject IMMEDIATELY
-          // This prevents Odds API from matching to wrong game (e.g., today's game for a Feb 2 market)
-          console.log(`[POLY-SYNC-24H] SLUG DATE OUTSIDE WINDOW: "${event.title}" slug=${eventSlug} → ${slugDateMatch[1]} (>24h away) - REJECTING`);
-          return { inWindow: false, dateSource: 'slug-outside', resolvedDate: null };
+          const hoursUntil = (slugDate.getTime() - now.getTime()) / (1000 * 60 * 60);
+          const priority = categorizeEventPriority(hoursUntil);
+          // CACHE ALL - don't reject based on date
+          return { resolvedDate: slugDate, dateSource: 'slug', priority, hoursUntilEvent: hoursUntil };
         }
       }
       
-      // 1. Try startDate first (most accurate for actual game time)
+      // 2. Try startDate first (most accurate for actual game time)
       if (event.startDate) {
         const startDate = new Date(event.startDate);
-        if (!isNaN(startDate.getTime()) && startDate >= now && startDate <= in24Hours) {
-          return { inWindow: true, dateSource: 'startDate', resolvedDate: startDate };
+        if (!isNaN(startDate.getTime()) && startDate >= now) {
+          const hoursUntil = (startDate.getTime() - now.getTime()) / (1000 * 60 * 60);
+          const priority = categorizeEventPriority(hoursUntil);
+          return { resolvedDate: startDate, dateSource: 'startDate', priority, hoursUntilEvent: hoursUntil };
         }
       }
       
-      // 2. Try endDate (works for NHL where endDate = game day)
+      // 3. Try endDate (works for NHL where endDate = game day)
       if (event.endDate) {
         const endDate = new Date(event.endDate);
-        if (!isNaN(endDate.getTime()) && endDate >= now && endDate <= in24Hours) {
-          return { inWindow: true, dateSource: 'endDate', resolvedDate: endDate };
+        if (!isNaN(endDate.getTime()) && endDate >= now) {
+          const hoursUntil = (endDate.getTime() - now.getTime()) / (1000 * 60 * 60);
+          const priority = categorizeEventPriority(hoursUntil);
+          return { resolvedDate: endDate, dateSource: 'endDate', priority, hoursUntilEvent: hoursUntil };
         }
       }
       
-      // 3. Parse date from market question text (e.g., "on 2026-01-31?" or "January 31")
+      // 4. Parse date from market question text (e.g., "on 2026-01-31?" or "January 31")
       const questionText = event.markets?.[0]?.question || event.question || '';
       
       // Try ISO format first: "on 2026-01-31"
       const isoMatch = questionText.match(/on\s+(\d{4}-\d{2}-\d{2})/i);
       if (isoMatch) {
         const parsedDate = new Date(isoMatch[1] + 'T23:59:59Z');
-        if (!isNaN(parsedDate.getTime()) && parsedDate >= now && parsedDate <= in24Hours) {
-          return { inWindow: true, dateSource: 'question-iso', resolvedDate: parsedDate };
+        if (!isNaN(parsedDate.getTime()) && parsedDate >= now) {
+          const hoursUntil = (parsedDate.getTime() - now.getTime()) / (1000 * 60 * 60);
+          const priority = categorizeEventPriority(hoursUntil);
+          return { resolvedDate: parsedDate, dateSource: 'question-iso', priority, hoursUntilEvent: hoursUntil };
         }
       }
       
@@ -394,14 +535,15 @@ Deno.serve(async (req) => {
             parsedDate = new Date(Date.UTC(currentYear + 1, monthIndex, day, 23, 59, 59));
           }
           
-          if (parsedDate >= now && parsedDate <= in24Hours) {
-            return { inWindow: true, dateSource: 'question-natural', resolvedDate: parsedDate };
+          if (parsedDate >= now) {
+            const hoursUntil = (parsedDate.getTime() - now.getTime()) / (1000 * 60 * 60);
+            const priority = categorizeEventPriority(hoursUntil);
+            return { resolvedDate: parsedDate, dateSource: 'question-natural', priority, hoursUntilEvent: hoursUntil };
           }
         }
       }
       
-      // 4. Cross-reference with Odds API schedule (ONLY if no slug date available)
-      // This is a fallback for markets without date-formatted slugs
+      // 5. Cross-reference with Odds API schedule
       const title = event.title || '';
       const titleNorm = normalizeForMatch(title);
       
@@ -420,24 +562,25 @@ Deno.serve(async (req) => {
         
         if (matchesHome && matchesAway) {
           const gameTime = new Date(game.commence_time);
-          if (!isNaN(gameTime.getTime()) && gameTime >= now && gameTime <= in24Hours) {
-            console.log(`[POLY-SYNC-24H] Matched via Odds API: "${title}" -> ${game.home_team} vs ${game.away_team} at ${game.commence_time}`);
-            return { inWindow: true, dateSource: 'odds-api', resolvedDate: gameTime };
+          if (!isNaN(gameTime.getTime()) && gameTime >= now) {
+            const hoursUntil = (gameTime.getTime() - now.getTime()) / (1000 * 60 * 60);
+            const priority = categorizeEventPriority(hoursUntil);
+            return { resolvedDate: gameTime, dateSource: 'odds-api', priority, hoursUntilEvent: hoursUntil };
           }
         }
       }
       
-      return { inWindow: false, dateSource: 'none', resolvedDate: null };
+      // Fallback: no date found, mark as distant but still cache
+      return { resolvedDate: null, dateSource: 'none', priority: 'distant', hoursUntilEvent: 999 };
     }
 
-    // Filter: Check if within 24 HOURS using multi-source date detection
-    // Now process ALL market types, not just H2H
+    // Process ALL events - categorize by priority instead of filtering
     const qualifying: any[] = [];
     let statsNoEndDate = 0;
-    let statsOutsideWindow = 0;
     let statsNoMarkets = 0;
     let statsByMarketType: Record<string, number> = { h2h: 0, total: 0, spread: 0, player_prop: 0, futures: 0 };
     let statsByDateSource: Record<string, number> = {};
+    let statsByPriority: Record<EventPriority, number> = { imminent: 0, upcoming: 0, future: 0, distant: 0 };
 
     for (const event of allEvents) {
       const title = event.title || '';
@@ -448,16 +591,15 @@ Deno.serve(async (req) => {
       // from the parent event title, not from their individual market question (e.g., "Over 220.5?" won't match)
       const eventLevelSport = detectSport(title, question) || detectSport(title, firstMarketQuestion);
 
-      // Check 24h window using multiple date sources (startDate, endDate, question text)
-      const { inWindow, dateSource, resolvedDate } = isWithin24HourWindow(event, now, in24Hours);
+      // Parse date - NO LONGER REJECTS based on window
+      const { resolvedDate, dateSource, priority, hoursUntilEvent } = parseEventDate(event, now, in24Hours, in7Days);
       
-      if (!inWindow) {
-        // Determine why it failed for logging
-        if (!event.endDate && !event.startDate) {
-          statsNoEndDate++;
-        } else {
-          statsOutsideWindow++;
-        }
+      // Track stats
+      statsByPriority[priority]++;
+      
+      // Skip events in the past (already started)
+      if (hoursUntilEvent < -0.5) {
+        statsNoEndDate++;
         continue;
       }
       
@@ -515,6 +657,8 @@ Deno.serve(async (req) => {
           endDate: eventDate,
           detectedSport: marketSport,
           marketType,
+            priority,
+            hoursUntilEvent,
         });
       }
     }
@@ -524,10 +668,10 @@ Deno.serve(async (req) => {
 
     console.log(`[POLY-SYNC-24H] Filtering stats:`);
     console.log(`  - No end date: ${statsNoEndDate}`);
-    console.log(`  - Outside 24h window: ${statsOutsideWindow}`);
     console.log(`  - No markets: ${statsNoMarkets}`);
     console.log(`  - Markets by type: ${JSON.stringify(statsByMarketType)}`);
     console.log(`  - Date sources used: ${JSON.stringify(statsByDateSource)}`);
+    console.log(`  - By priority: ${JSON.stringify(statsByPriority)}`);
     console.log(`  - QUALIFYING FROM GAMMA: ${qualifying.length}`);
     console.log(`  - QUALIFYING FROM FIRECRAWL: ${firecrawlGames.length}`);
 
@@ -985,22 +1129,21 @@ Deno.serve(async (req) => {
       }
     }
 
-    // ============= CLOB PRICE REFRESH (CRITICAL) =============
-    // Fetch real executable prices from Polymarket CLOB API
+    // ============= CLOB PRICE REFRESH (CRITICAL) - EXTENDED TO ALL MARKETS =============
+    // Fetch real executable prices from Polymarket CLOB API for ALL cached markets
     // This replaces stale Gamma/Firecrawl prices with live orderbook data
-    console.log('[POLY-SYNC-24H] Starting CLOB price refresh for cached H2H markets...');
+    console.log('[POLY-SYNC-24H] Starting CLOB price refresh for ALL cached markets with tokens...');
     
     const { data: h2hMarkets, error: fetchH2hError } = await supabase
       .from('polymarket_h2h_cache')
       .select('condition_id, token_id_yes, yes_price, source')
       .eq('status', 'active')
-      .eq('market_type', 'h2h')
       .not('token_id_yes', 'is', null);
     
     if (fetchH2hError) {
-      console.error('[POLY-SYNC-24H] Error fetching H2H markets for CLOB refresh:', fetchH2hError);
+      console.error('[POLY-SYNC-24H] Error fetching markets for CLOB refresh:', fetchH2hError);
     } else if (h2hMarkets && h2hMarkets.length > 0) {
-      console.log(`[POLY-SYNC-24H] Refreshing CLOB prices for ${h2hMarkets.length} H2H markets with token IDs`);
+      console.log(`[POLY-SYNC-24H] Refreshing CLOB prices for ${h2hMarkets.length} markets with token IDs`);
       
       // Collect all YES token IDs
       const tokenIdToCondition: Map<string, string> = new Map();
@@ -1119,7 +1262,7 @@ Deno.serve(async (req) => {
         console.log(`[POLY-SYNC-24H] CLOB REFRESH COMPLETE: ${clobUpdated} markets updated, ${priceMismatches} had >10% price mismatches`);
       }
     } else {
-      console.log('[POLY-SYNC-24H] No H2H markets with token IDs found for CLOB refresh');
+      console.log('[POLY-SYNC-24H] No markets with token IDs found for CLOB refresh');
     }
 
     // Expire events that have started
@@ -1159,6 +1302,7 @@ Deno.serve(async (req) => {
         qualifying_events: qualifying.length,
         qualifying_from_gamma: qualifying.length,
         qualifying_from_firecrawl: firecrawlGames.length,
+        priority_breakdown: statsByPriority,
         firecrawl_upserted: firecrawlUpserted,
         upserted_to_cache: upserted,
         now_monitored: monitored,
@@ -1168,10 +1312,10 @@ Deno.serve(async (req) => {
         duration_ms: duration,
         filter_stats: {
           no_end_date: statsNoEndDate,
-          outside_window: statsOutsideWindow,
           no_markets: statsNoMarkets,
           markets_by_type: statsByMarketType,
           date_sources: statsByDateSource,
+          priority_breakdown: statsByPriority,
         },
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
