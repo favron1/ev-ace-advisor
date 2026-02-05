@@ -1,143 +1,147 @@
 
-# Batch Import: Morning Market Data ("Last Resort" Fixer)
 
-## Overview
+# Batch Import: Pipeline Integration & Matching Strategy
 
-Build a batch import feature that allows pasting structured morning market data (sport, time, teams, prices) to populate missing markets or update prices that the automated pipeline missed.
+## Current Status
 
-This serves as a **last resort** safety net - when Firecrawl, Gamma API, and CLOB all fail to discover or price a market correctly, you can manually import verified data from the Polymarket UI.
+The batch import feature is **already implemented** and working:
+- **Frontend**: `/batch-import` page with JSON parsing and preview
+- **Backend**: `batch-market-import` edge function that inserts into `polymarket_h2h_cache`
+- **Matching**: Uses the canonical matching system (`canonicalize.ts` + `sports-config.ts`)
 
-## User Flow
-
-```text
-+-------------------+       +-------------------+       +-------------------+
-|  Copy text from   |  -->  |  Paste into       |  -->  |  System parses,   |
-|  Polymarket UI    |       |  batch import     |       |  matches to       |
-|  (NHL, NBA, etc)  |       |  textarea         |       |  bookmakers, and  |
-+-------------------+       +-------------------+       |  updates cache    |
-                                                        +-------------------+
-```
-
-## Implementation
-
-### 1. New Page: `/batch-import`
-
-Create `src/pages/BatchImport.tsx` - a simple page with:
-- Large textarea for pasting raw text
-- "Parse & Preview" button to show what will be imported
-- Preview table showing: Sport, Time, Home Team, Away Team, Home Price, Away Price, Match Status
-- "Import All" button to process confirmed entries
-
-### 2. Parser Logic
-
-Parse the format you provided:
+## How It Connects to the Pipeline
 
 ```text
-[SPORT EMOJI] [LEAGUE] - Head-to-Head Markets
-
-[TIME]
-
-[AWAY TEAM] vs [HOME TEAM]
-
-[AWAY TEAM]: [PRICE]c
-
-[HOME TEAM]: [PRICE]c
+                                              ┌─────────────────────────────┐
+   BATCH IMPORT                               │   polymarket_h2h_cache      │
+   ─────────────                              │   (central market cache)    │
+   Your JSON paste ─────────────────────────▶ │                             │
+                                              │   ✓ event_title             │
+                                              │   ✓ yes_price / no_price    │
+                                              │   ✓ team_home_normalized    │
+                                              │   ✓ team_away_normalized    │
+                                              │   ✓ source = 'batch_import' │
+                                              └───────────────┬─────────────┘
+                                                              │
+                    ┌─────────────────────────────────────────┼─────────────────────────────────────────┐
+                    │                                         │                                         │
+                    ▼                                         ▼                                         ▼
+        ┌───────────────────┐                   ┌───────────────────┐                   ┌───────────────────┐
+        │  watch-mode-poll  │                   │  polymarket-monitor│                  │  active-mode-poll │
+        │  (every 5 min)    │                   │  (on-demand)       │                  │  (every 60 sec)   │
+        └─────────┬─────────┘                   └─────────┬─────────┘                   └─────────┬─────────┘
+                  │                                       │                                       │
+                  │  1. Query polymarket_h2h_cache        │                                       │
+                  │  2. Query bookmaker_signals           │                                       │
+                  │  3. Match by team_set_key             │                                       │
+                  │  4. Calculate edge                    │                                       │
+                  │  5. Store in event_watch_state        │                                       │
+                  │  6. Escalate if edge >= 2%            │                                       │
+                  ▼                                       ▼                                       ▼
+        ┌───────────────────────────────────────────────────────────────────────────────────────────────┐
+        │                               event_watch_state                                                │
+        │                        (edges, probabilities, signal state)                                    │
+        └───────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Detection patterns:
-- Sport headers: `/^[^a-z]*(?:NHL|NBA|NFL|NCAA|EPL|UCL)/i`
-- Time: `/^\d{1,2}:\d{2}\s*(?:AM|PM)$/i`
-- Teams line: `/^(.+?)\s+vs\s+(.+)$/i`
-- Price line: `/^(.+?):\s*(\d+)(?:c|¢)?$/i`
-
-### 3. New Edge Function: `batch-market-import`
-
-`supabase/functions/batch-market-import/index.ts`
-
-Accepts an array of parsed markets:
-```typescript
-interface BatchMarket {
-  sport: 'NHL' | 'NBA' | 'NFL' | 'NCAA' | 'EPL';
-  gameTime: string;         // "10:30 AM"
-  homeTeam: string;         // Full name from paste
-  awayTeam: string;         // Full name from paste
-  homePrice: number;        // 0.67 (converted from 67c)
-  awayPrice: number;        // 0.34 (converted from 34c)
-}
-```
-
-For each entry:
-1. **Resolve team names** using existing `canonicalize.ts` and `sports-config.ts` team maps
-2. **Check if market exists** in `polymarket_h2h_cache` (by normalized team names + date)
-3. **Update or insert**:
-   - If exists: Update `yes_price`, `no_price`, `last_price_update`, set `source = 'batch_import'`
-   - If new: Insert with synthetic `condition_id`, `tradeable = true`, `source = 'batch_import'`
-4. **Attempt bookmaker match** using canonical matching (build index from fresh odds)
-5. **Return summary**: Markets updated, created, matched to bookies, failed
-
-### 4. Integration with Existing Pipeline
-
-Markets created/updated via batch import:
-- Are picked up by `watch-mode-poll` and `active-mode-poll` automatically
-- Have `source = 'batch_import'` for tracking
-- Skip the CLOB token validation (assumed tradeable since you verified on UI)
-- Will generate signals when edges are detected
-
-### 5. UI Preview Table
-
-Before importing, show a preview:
-
-| Status | Sport | Time | Match | Home | Away | Bookie Match |
-|--------|-------|------|-------|------|------|--------------|
-| NEW | NHL | 10:30 AM | Panthers @ Lightning | 0.37 | 0.65 | Pending |
-| UPDATE | NBA | 11:00 AM | Pacers @ Bucks | 0.51 | 0.50 | Pending |
-
-Color coding:
-- Green = new market
-- Yellow = updating existing
-- Red = parse error (team names not resolved)
-
-## File Changes Summary
-
-### New Files
-1. `src/pages/BatchImport.tsx` - Batch import UI page
-2. `src/lib/batch-parser.ts` - Text parsing utility
-3. `supabase/functions/batch-market-import/index.ts` - Edge function
-
-### Modified Files
-4. `src/App.tsx` - Add route `/batch-import`
-5. `src/pages/Terminal.tsx` or navigation - Add link to batch import
-
-## Technical Details
+## Matching Mechanism
 
 ### Team Name Resolution Chain
 
-The batch import reuses the existing canonicalization system:
+When you paste `"Detroit Pistons"`:
 
-1. Parse "Miami Heat" from paste
-2. `resolveTeamName("Miami Heat", "nba", teamMap)` returns "Miami Heat" (exact match)
-3. Generate `teamId`: "miami_heat"
-4. Generate `teamSetKey`: "boston_celtics|miami_heat" (alphabetical)
-5. Match to bookmaker via `lookupKey`: "NBA|boston_celtics|miami_heat"
+1. **Resolve to canonical name**: `resolveTeamName("Detroit Pistons", "nba", teamMap)` 
+   - Checks exact match in `SPORTS_CONFIG.nba.teamMap` values
+   - Returns: `"Detroit Pistons"` (exact match)
 
-This ensures batch-imported markets can be matched to bookmaker odds using the same O(1) indexed lookup as automated markets.
+2. **Generate team ID**: `teamId("Detroit Pistons")`
+   - Slugify: `"detroit_pistons"`
 
-### Handling 0c Prices
+3. **Generate team set key**: `makeTeamSetKey("detroit_pistons", "new_york_knicks")`
+   - Alphabetical sort: `"detroit_pistons|new_york_knicks"`
 
-Your sample included:
+4. **Store normalized**: Both `team_home_normalized` and `team_away_normalized` stored in cache
+
+### Bookmaker Matching (O(1) Lookup)
+
+The `watch-mode-poll` function:
+
+1. **Loads bookmaker_signals** (from The Odds API via `ingest-odds`)
+2. **Indexes by canonical key**: `NBA|detroit_pistons|new_york_knicks`
+3. **Looks up your batch-imported market** using the same canonical key
+4. **If match found**: Calculates edge = `book_fair_prob - polymarket_price`
+
+### What Happens After Import
+
+| Step | Timing | Action |
+|------|--------|--------|
+| 1 | Immediate | Market inserted into `polymarket_h2h_cache` with normalized teams |
+| 2 | Next 5 min | `watch-mode-poll` picks up the market, attempts bookie match |
+| 3 | If match found | Edge calculated, stored in `event_watch_state` |
+| 4 | If edge >= 2% | Escalated to `active` state, appears in Signal Feed |
+| 5 | Every 60 sec | `active-mode-poll` refreshes prices, recalculates edge |
+| 6 | If tradeable | Signal shown with BET/STRONG_BET recommendation |
+
+## Current Limitations
+
+There are two gaps in the current implementation:
+
+### 1. Missing Token IDs (Token Gate)
+
+Markets imported via batch import do **NOT** have `token_id_yes` and `token_id_no` populated. This means:
+- The market is marked as `tradeable = true` based on price (non-zero)
+- But the **Token Gate** in `active-mode-poll` will fail to refresh CLOB prices
+- The signal may be marked `untradeable_reason = 'unverified_polymarket_price'`
+
+**Solution needed**: Either:
+- A) Skip the token gate for `source = 'batch_import'` markets (trust your manual prices)
+- B) Add a token repair step that searches CLOB API by team names after batch import
+- C) Accept that batch-imported markets won't have real-time CLOB refresh (use your pasted prices as-is)
+
+### 2. Synthetic Condition IDs
+
+Batch imports use synthetic condition IDs: `batch_nba_detroit_pistons|new_york_knicks_2026-02-05`
+
+These don't map to real Polymarket markets. When a real sync happens later, we might create duplicates.
+
+**Solution needed**: Before creating, search for existing market by `team_home_normalized + team_away_normalized + event_date` (already implemented in the edge function).
+
+## Recommended Next Steps
+
+1. **Test the full flow**: Import some markets, wait 5 minutes, check if they appear in Pipeline with bookie matches
+
+2. **Add token repair queue**: After batch import, trigger `tokenize-market` function to resolve real token IDs via CLOB Search API
+
+3. **Add link in Terminal header**: Quick access to `/batch-import` when you need the manual fix
+
+4. **Show import source in Pipeline**: Badge "BATCH" on cards that came from batch import vs automated discovery
+
+## Technical Details
+
+### Edge Function: `batch-market-import`
+
 ```
-NY Islanders: 0c
-NJ Devils: 0c
+POST /functions/v1/batch-market-import
+Body: { markets: [...] }
+
+For each market:
+├─ getSportCodeFromLeague(sport) → 'nba'
+├─ resolveTeamName(homeTeam, 'nba', teamMap) → canonical name
+├─ teamId(canonical) → normalized slug
+├─ makeTeamSetKey(homeId, awayId) → order-independent key
+├─ Check existing by normalized teams + date
+├─ INSERT or UPDATE polymarket_h2h_cache
+└─ Build bookie index → check for immediate matches
 ```
 
-These indicate markets that exist on Polymarket but have no liquidity yet. The parser will:
-- Detect 0c as `0.00` price
-- Mark these as `tradeable = false` with `untradeable_reason = 'NO_LIQUIDITY'`
-- Still insert them so they're monitored for when liquidity arrives
+### Files Involved
 
-### Price Normalization
+| File | Purpose |
+|------|---------|
+| `supabase/functions/batch-market-import/index.ts` | Edge function handling import |
+| `supabase/functions/_shared/canonicalize.ts` | Team name resolution utilities |
+| `supabase/functions/_shared/sports-config.ts` | Team maps for NBA, NHL, NFL, etc. |
+| `supabase/functions/watch-mode-poll/index.ts` | Picks up markets, matches to bookies |
+| `src/pages/BatchImport.tsx` | Frontend UI |
+| `src/lib/batch-parser.ts` | JSON/text parsing logic |
 
-Input: `67c` or `67¢` or `0.67`
-Output: `0.67` (decimal)
-
-The parser handles all formats and normalizes to decimal.
