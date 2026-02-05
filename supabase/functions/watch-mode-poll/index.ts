@@ -608,6 +608,7 @@ Deno.serve(async (req) => {
     
     // Load API-sourced markets - NO volume filter (volume is unreliable for fresh markets)
     // FIXED: Filter out stale 50¢ placeholder prices and prioritize fresh data
+   // FIXED: Exclude 1H Moneyline (first-half) markets - they have wrong prices
     const { data: apiMarkets, error: apiError } = await supabase
       .from('polymarket_h2h_cache')
       .select('*')
@@ -617,6 +618,9 @@ Deno.serve(async (req) => {
       .lte('event_date', maxEventDate)
       .or('source.is.null,source.neq.firecrawl')
       .neq('yes_price', 0.5) // Exclude stale 50/50 placeholder prices
+     .not('question', 'ilike', '%1H%') // Exclude first-half markets
+     .not('question', 'ilike', '%1st Half%') // Exclude first-half markets
+     .not('question', 'ilike', '%First Half%') // Exclude first-half markets
       .order('last_price_update', { ascending: false }) // Prioritize freshest
       .order('event_date', { ascending: true }) // Nearest events first
       .limit(MAX_MARKETS_PER_SCAN);
@@ -634,6 +638,9 @@ Deno.serve(async (req) => {
       .lte('event_date', maxEventDate)
       .in('extracted_league', ['NBA', 'NCAA', 'NFL'])
       .neq('yes_price', 0.5) // Exclude stale 50/50 placeholder prices
+     .not('question', 'ilike', '%1H%') // Exclude first-half markets
+     .not('question', 'ilike', '%1st Half%')
+     .not('question', 'ilike', '%First Half%')
       .order('last_price_update', { ascending: false })
       .order('event_date', { ascending: true })
       .limit(50);
@@ -652,6 +659,9 @@ Deno.serve(async (req) => {
       .not('event_date', 'is', null)
       .lte('event_date', maxEventDate)
       .neq('yes_price', 0.5) // Exclude stale 50/50 placeholder prices
+     .not('question', 'ilike', '%1H%') // Exclude first-half markets
+     .not('question', 'ilike', '%1st Half%')
+     .not('question', 'ilike', '%First Half%')
       .order('last_price_update', { ascending: false })
       .order('event_date', { ascending: true })
       .limit(50);
