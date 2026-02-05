@@ -958,11 +958,10 @@ Deno.serve(async (req) => {
     
     console.log(`[POLY-SYNC-24H] Firecrawl games upserted: ${firecrawlUpserted} (${firecrawlVolumeEnriched} enriched with volume)`);
 
-    // Upsert qualifying events from Gamma API
-    let upserted = 0;
-    let monitored = 0;
-
+    // ============= COLLECT GAMMA EVENTS FOR BATCH UPSERT =============
+    // Process qualifying events and collect records for efficient batch insertion
     let skippedNonTradeable = 0;
+    const gammaBatchRecords: any[] = [];
     
     for (const { event, market, endDate, detectedSport, marketType } of qualifying) {
       const conditionId = market.conditionId || market.id || event.id;
@@ -1061,73 +1060,98 @@ Deno.serve(async (req) => {
       // PHASE 3b: Mark tradeability based on token presence
       const isTradeable = !!(tokenIdYes && tokenIdNo);
       const untradeableReason = isTradeable ? null : 'MISSING_TOKENS';
+
+      // Collect record for batch upsert instead of individual upserts
+      gammaBatchRecords.push({
+        condition_id: conditionId,
+        event_title: title,
+        question: question,
+        team_home: teamHome,
+        team_away: teamAway,
+        team_home_normalized: teamHomeNormalized,
+        team_away_normalized: teamAwayNormalized,
+        event_date: endDate.toISOString(),
+        bookmaker_commence_time: bookmakerCommenceTime,
+        yes_price: yesPrice,
+        no_price: noPrice,
+        volume: volume,
+        liquidity: liquidity,
+        sport_category: detectedSport,
+        extracted_league: detectedSport,
+        extracted_entity: extractedEntity,
+        market_type: marketType,
+        extracted_threshold: extractedThreshold,
+        token_id_yes: tokenIdYes,
+        token_id_no: tokenIdNo,
+        tradeable: isTradeable,
+        untradeable_reason: untradeableReason,
+        polymarket_slug: eventSlug,
+        status: 'active',
+        monitoring_status: 'watching',
+        last_price_update: now.toISOString(),
+        last_bulk_sync: now.toISOString(),
+      });
+    }
+
+    // ============= BATCH UPSERT FOR PERFORMANCE =============
+    // Process records in batches of 50 instead of individual upserts
+    // This reduces DB round trips from ~2000 to ~40
+    console.log(`[POLY-SYNC-24H] Starting batch upsert of ${gammaBatchRecords.length} records...`);
+    const GAMMA_BATCH_SIZE = 50;
+    let gammaUpserted = 0;
+    let gammaMonitored = 0;
+    
+    for (let i = 0; i < gammaBatchRecords.length; i += GAMMA_BATCH_SIZE) {
+      const batch = gammaBatchRecords.slice(i, i + GAMMA_BATCH_SIZE);
       
-      // Upsert to polymarket_h2h_cache
-      const { error: cacheError } = await supabase
+      const { error: batchError } = await supabase
         .from('polymarket_h2h_cache')
-        .upsert({
-          condition_id: conditionId,
-          event_title: title,
-          question: question,
-          team_home: teamHome,
-          team_away: teamAway,
-          team_home_normalized: teamHomeNormalized,
-          team_away_normalized: teamAwayNormalized,
-          event_date: endDate.toISOString(),
-          bookmaker_commence_time: bookmakerCommenceTime, // PHASE 1b: Bookmaker authoritative time
-          yes_price: yesPrice,
-          no_price: noPrice,
-          volume: volume,
-          liquidity: liquidity,
-          sport_category: detectedSport,
-          extracted_league: detectedSport,
-          extracted_entity: extractedEntity,
-          market_type: marketType,
-          extracted_threshold: extractedThreshold,
-          token_id_yes: tokenIdYes,
-          token_id_no: tokenIdNo,
-          tradeable: isTradeable,              // PHASE 3b: Mark tradeability
-          untradeable_reason: untradeableReason, // PHASE 3b: Reason if untradeable
-          polymarket_slug: eventSlug, // Store event slug for direct URLs
-          status: 'active',
-          monitoring_status: 'watching', // Mark for continuous monitoring
-          last_price_update: now.toISOString(),
-          last_bulk_sync: now.toISOString(),
-        }, {
+        .upsert(batch, {
           onConflict: 'condition_id',
         });
-
-      if (cacheError) {
-        console.error(`[POLY-SYNC-24H] Cache upsert error: ${cacheError.message}`);
+      
+      if (batchError) {
+        console.error(`[POLY-SYNC-24H] Batch upsert error at ${i}: ${batchError.message}`);
         continue;
       }
-      upserted++;
-
-      // Create/update event_watch_state entry
-      const eventKey = `poly_${conditionId}`;
+      
+      gammaUpserted += batch.length;
+    }
+    
+    console.log(`[POLY-SYNC-24H] Batch upsert complete: ${gammaUpserted}/${gammaBatchRecords.length} records`);
+    
+    // ============= BATCH UPDATE EVENT_WATCH_STATE =============
+    // Update event_watch_state for all upserted records
+    console.log(`[POLY-SYNC-24H] Updating event_watch_state entries...`);
+    
+    for (let i = 0; i < gammaBatchRecords.length; i += GAMMA_BATCH_SIZE) {
+      const batch = gammaBatchRecords.slice(i, i + GAMMA_BATCH_SIZE);
+      
+      // Create watch state entries
+      const watchStateRecords = batch.map(record => ({
+        event_key: `poly_${record.condition_id}`,
+        event_name: record.event_title || record.question.substring(0, 100),
+        watch_state: 'monitored',
+        commence_time: record.event_date,
+        polymarket_condition_id: record.condition_id,
+        polymarket_question: record.question,
+        polymarket_yes_price: record.yes_price,
+        polymarket_volume: record.volume,
+        polymarket_matched: false,
+        last_poly_refresh: now.toISOString(),
+        updated_at: now.toISOString(),
+      }));
       
       const { error: stateError } = await supabase
         .from('event_watch_state')
-        .upsert({
-          event_key: eventKey,
-          event_name: title || question.substring(0, 100),
-          watch_state: 'monitored',
-          commence_time: endDate.toISOString(),
-          polymarket_condition_id: conditionId,
-          polymarket_question: question,
-          polymarket_yes_price: yesPrice,
-          polymarket_volume: volume,
-          polymarket_matched: false,
-          last_poly_refresh: now.toISOString(),
-          updated_at: now.toISOString(),
-        }, {
-          onConflict: 'event_key',
-        });
-
+        .upsert(watchStateRecords, { onConflict: 'event_key' });
+      
       if (!stateError) {
-        monitored++;
+        gammaMonitored += batch.length;
       }
     }
+    
+    console.log(`[POLY-SYNC-24H] Event watch state complete: ${gammaMonitored} entries updated`);
 
     // ============= CLOB PRICE REFRESH (CRITICAL) - EXTENDED TO ALL MARKETS =============
     // Fetch real executable prices from Polymarket CLOB API for ALL cached markets
@@ -1286,7 +1310,7 @@ Deno.serve(async (req) => {
       .eq('status', 'active');
 
     const duration = Date.now() - startTime;
-    console.log(`[POLY-SYNC-24H] Complete: ${upserted} cached, ${monitored} monitored, ${expiredCount} expired, ${skippedNonTradeable} non-tradeable skipped in ${duration}ms`);
+    console.log(`[POLY-SYNC-24H] Complete: ${gammaUpserted} cached, ${gammaMonitored} monitored, ${expiredCount} expired, ${skippedNonTradeable} non-tradeable skipped in ${duration}ms`);
 
     // Query total watching count from cache for accurate stats
     const { count: totalWatchingCount } = await supabase
@@ -1304,9 +1328,9 @@ Deno.serve(async (req) => {
         qualifying_from_firecrawl: firecrawlGames.length,
         priority_breakdown: statsByPriority,
         firecrawl_upserted: firecrawlUpserted,
-        upserted_to_cache: upserted,
-        now_monitored: monitored,
-        total_watching: totalWatchingCount || (upserted + firecrawlUpserted),
+        upserted_to_cache: gammaUpserted,
+        now_monitored: gammaMonitored,
+        total_watching: totalWatchingCount || (gammaUpserted + firecrawlUpserted),
         expired: expiredCount,
         skipped_non_tradeable: skippedNonTradeable,
         duration_ms: duration,
