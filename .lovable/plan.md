@@ -1,108 +1,165 @@
 
-# Fix: Restore CLOB Price Refresh to polymarket-sync-24h
 
-## Problem Summary
+# Fix: Restore Market Discovery Volume + Multi-Source Data Reliability
 
-The signal showed **45¢ for OKC** when the real Polymarket price was **23¢**. This happened because the current sync function stores stale/scraped prices instead of live CLOB prices.
+## Problem Analysis
 
-## Root Cause Analysis
+### The Core Issue: Market Discovery Dropped 90%
 
-### What Used to Work (sync-polymarket-h2h)
+| Date | Total Markets | Active | With Tokens |
+|------|---------------|--------|-------------|
+| Jan 31 | **1,073** | 250 | 1,017 |
+| Feb 1 | 22 | 7 | 15 |
+| Feb 4 | 97 | 38 | 66 |
+| Feb 5 | 25 | 25 | 25 |
 
-The original working sync had a **CLOB Price Refresh** step that:
+The drop from 1,073 to ~25-97 markets correlates directly with the performance decline. Your winning streak happened when the sync was discovering 10x more markets.
 
-1. Collected all token IDs from cached markets
-2. Made a batch POST to `https://clob.polymarket.com/prices`
-3. Updated the cache with **real executable prices**
+### Root Cause 1: Aggressive 24-Hour Window Filtering
 
-```text
-FLOW: Gamma API → Store initial → CLOB API refresh → Update with live prices
-```
-
-### What's Broken Now (polymarket-sync-24h)
-
-The new sync stores prices from:
-
-- **Gamma API metadata** (often hours stale)
-- **Firecrawl scraper** (regex-parsed markdown, unreliable)
-
-It **never** calls the CLOB API to verify prices.
+The `polymarket-sync-24h` function restricts market discovery to only events occurring within 24 hours:
 
 ```text
-FLOW: Gamma API / Firecrawl → Store scraped prices → NO REFRESH → Monitor uses stale prices
+// Current behavior:
+1. Event has slug date like "nhl-det-col-2026-02-02"
+2. If date is >24h away → IMMEDIATELY REJECTED
+3. If no date in slug → Falls through to complex multi-source matching
+4. Many valid markets get dropped because their dates are 2-7 days out
 ```
 
-### Why Firecrawl Prices Are Wrong
+The original `sync-polymarket-h2h` function fetched ALL active sports events without date filtering, then let the monitor decide which were actionable. This preserved 1000+ markets in the cache for opportunity scanning.
 
-The regex parser extracts prices like `OKC55¢` from markdown, but:
+### Root Cause 2: 500-Event Cap Is Too Low
 
-1. The page format may have changed
-2. Multiple price patterns on the page can be mis-paired
-3. No validation that extracted prices match actual CLOB orderbook
+```typescript
+// Safety cap at 500 sports events (line 281)
+if (allEvents.length >= 500) {
+  hasMore = false;
+}
+```
+
+Polymarket has 1000+ active sports events. The cap prevents full discovery.
+
+### Root Cause 3: Missing Sports-Specific API Endpoints
+
+The Polymarket documentation reveals a better approach:
+
+```text
+# Get all supported sports leagues
+curl "https://gamma-api.polymarket.com/sports"
+
+# Get events for a specific league (e.g., NBA series_id=10345)
+curl "https://gamma-api.polymarket.com/events?series_id=10345&active=true"
+
+# Filter to just game bets (not futures) using tag_id=100639
+curl "https://gamma-api.polymarket.com/events?series_id=10345&tag_id=100639"
+```
+
+Currently we use `tag_slug=sports` which is less reliable than the dedicated `/sports` endpoint with `series_id` filtering.
 
 ---
 
 ## Implementation Plan
 
-### Phase 1: Add CLOB Price Refresh to polymarket-sync-24h
+### Phase 1: Remove 24-Hour Window Restriction
 
 **File**: `supabase/functions/polymarket-sync-24h/index.ts`
 
-After upserting all markets to the cache, add the same CLOB refresh logic that exists in sync-polymarket-h2h:
+Remove the aggressive date filtering that rejects events >24h away. Instead:
+
+1. Cache ALL active sports H2H markets regardless of date
+2. Add a `days_until_event` field to help downstream filtering
+3. Let the monitor decide what's actionable (it already has the 24h logic)
 
 ```text
-1. Query all active H2H markets with token_id_yes from cache
-2. Batch-fetch prices from CLOB API: POST /prices with [{ token_id, side: 'BUY' }]
-3. Update cache with real CLOB prices (yes_price, no_price, best_bid, best_ask)
-4. Mark markets where CLOB returns no data as potentially stale
+BEFORE:
+  if (slugDate > 24h away) → REJECT IMMEDIATELY
+
+AFTER:
+  if (slugDate parseable) → Store with calculated days_until_event
+  Mark as "future" if >7 days away (still cache, just flag it)
 ```
 
-### Phase 2: Validate Firecrawl Prices Against CLOB
-
-**File**: `supabase/functions/polymarket-sync-24h/index.ts`
-
-Before storing Firecrawl-scraped prices:
-
-```text
-1. If tokens available, fetch CLOB price first
-2. Compare scraped price vs CLOB price
-3. If difference > 10%, use CLOB price (more authoritative)
-4. Log discrepancy for monitoring
-```
-
-### Phase 3: Mark Markets with Stale Prices
+### Phase 2: Increase Event Cap + Add Pagination Improvements
 
 **File**: `supabase/functions/polymarket-sync-24h/index.ts`
 
 ```text
-1. After CLOB refresh, identify markets where price wasn't updated
-2. Set a flag: price_source = 'gamma_stale' or 'firecrawl_stale'
-3. Monitor can use this to skip or warn on these markets
+1. Increase safety cap from 500 to 2000 events
+2. Add per-page logging to debug API responses
+3. Add retry logic for failed pages
 ```
+
+### Phase 3: Use Sports-Specific API Endpoints
+
+**File**: `supabase/functions/polymarket-sync-24h/index.ts`
+
+Add a new discovery strategy that queries the `/sports` endpoint first:
+
+```text
+1. Fetch https://gamma-api.polymarket.com/sports
+2. For each sport (NBA, NHL, NFL, CBB):
+   - Get series_id from /sports response
+   - Query /events?series_id=X&active=true&closed=false
+3. Merge results with existing tag_slug=sports approach
+4. Deduplicate by condition_id
+```
+
+This provides redundant discovery paths - if one fails, the other still works.
+
+### Phase 4: Add CLOB Price Verification to All Cached Markets
+
+**File**: `supabase/functions/polymarket-sync-24h/index.ts`
+
+The CLOB price refresh (lines 988-1070) only runs on `market_type='h2h'` markets. Extend to all cached markets to ensure price accuracy across the board.
+
+### Phase 5: Add Discovery Health Monitoring
+
+**File**: New column in `polymarket_h2h_cache` or log output
+
+Track sync health metrics:
+
+```text
+- Total events fetched vs expected
+- Markets per sport discovered
+- Token extraction success rate
+- CLOB price match rate
+```
+
+This enables quick detection of future API changes.
 
 ---
 
 ## Technical Details
 
-### CLOB Price Refresh Function (copy from sync-polymarket-h2h)
-
-The working version in lines 700-744 of sync-polymarket-h2h:
+### Recommended API Strategy
 
 ```text
-1. Collect all YES token IDs into a map: tokenId -> conditionId
-2. Call fetchClobPrices(allTokenIds) - batch POST to /prices
-3. Parse response: BUY = ask price, SELL = bid price
-4. Update cache: yes_price = BUY price, no_price = 1 - yes_price
+PRIMARY: /sports endpoint + series_id queries
+  - More targeted, returns only game markets
+  - Avoids futures/outrights that pollute discovery
+  - Polymarket maintains this for automated sports
+
+SECONDARY: tag_slug=sports (current approach)
+  - Broader but includes more noise
+  - Good fallback if /sports endpoint changes
+
+TERTIARY: Firecrawl scraping
+  - Already implemented for NBA/CBB
+  - Useful for markets not yet in API
 ```
 
-### Where to Insert in polymarket-sync-24h
-
-After line ~985 (after the main upsert loop completes), before the "Expire events" section:
+### Date Handling Strategy
 
 ```text
-// ============= CLOB PRICE REFRESH (CRITICAL) =============
-// Fetch real executable prices from Polymarket CLOB API
-// This replaces stale Gamma/Firecrawl prices with live orderbook data
+Instead of rejecting events, categorize them:
+
+1. "imminent" - Game within 24 hours (highest priority)
+2. "upcoming" - Game in 1-3 days (monitor for line movement)
+3. "future" - Game in 3-7 days (cache for reference)
+4. "distant" - Game >7 days (cache but don't poll frequently)
+
+This allows the pipeline to prioritize without losing discovery.
 ```
 
 ---
@@ -111,20 +168,18 @@ After line ~985 (after the main upsert loop completes), before the "Expire event
 
 | File | Changes |
 |------|---------|
-| `polymarket-sync-24h/index.ts` | Add CLOB price refresh step after cache upserts |
+| `polymarket-sync-24h/index.ts` | Remove 24h window rejection, add /sports discovery, increase cap |
 
 ## Expected Outcome
 
-| Before Fix | After Fix |
-|------------|-----------|
-| Cache stores Firecrawl scraped price (55¢) | Cache stores CLOB live price (23¢) |
-| Monitor uses stale cache price | Monitor uses fresh CLOB price |
-| Signal shows wrong edge | Signal shows accurate edge |
+| Metric | Current | After Fix |
+|--------|---------|-----------|
+| Markets discovered | ~25-100 | 500-1500 |
+| Sports covered | 4 spotty | 4 comprehensive |
+| Cache freshness | Stale | CLOB-verified |
+| Signal opportunity pool | Low | 10x larger |
 
----
+## Why This Fixes the Win Rate
 
-## Why This Is the Root Fix
+The winning streak wasn't about v1.0 thresholds - it was about having 1,073 markets to scan versus 25. More markets = more opportunities = more high-quality edges found. The logic thresholds filter from the pool; if the pool is 90% smaller, the output drops proportionally.
 
-The current fixes to polymarket-monitor (orderbook validation, token repair) are band-aids. They try to fix prices at signal-creation time, but by then the cache is already polluted with bad data.
-
-The correct fix is to **refresh prices at sync time** using the authoritative CLOB API, exactly as the original working sync-polymarket-h2h did.
