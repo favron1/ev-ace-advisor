@@ -62,53 +62,65 @@ interface JsonMarketInput {
  }
  
  /**
- * Detect if input is JSON array
+ * Try to parse as JSON (array or single object)
+ * Returns null if not valid JSON
  */
-function isJsonInput(text: string): boolean {
+function tryParseJson(text: string): JsonMarketInput[] | null {
   const trimmed = text.trim();
-  return trimmed.startsWith('[') && trimmed.endsWith(']');
+  
+  // Quick check - must start with [ or {
+  if (!trimmed.startsWith('[') && !trimmed.startsWith('{')) {
+    return null;
+  }
+  
+  try {
+    const parsed = JSON.parse(trimmed);
+    
+    // Handle single object - wrap in array
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return [parsed as JsonMarketInput];
+    }
+    
+    // Handle array
+    if (Array.isArray(parsed)) {
+      return parsed as JsonMarketInput[];
+    }
+    
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Parse JSON format input
+ * Parse JSON format input from pre-parsed data
  */
-function parseJsonInput(text: string): ParseResult {
+function parseJsonData(data: JsonMarketInput[]): ParseResult {
   const markets: ParsedMarket[] = [];
   const errors: string[] = [];
   
-  try {
-    const data = JSON.parse(text) as JsonMarketInput[];
+  for (let i = 0; i < data.length; i++) {
+    const item = data[i];
     
-    if (!Array.isArray(data)) {
-      errors.push('Input must be a JSON array');
-      return { markets, errors, summary: { total: 0, parsed: 0, failed: 1 } };
+    // Validate required fields
+    if (!item.sport || !item.homeTeam || !item.awayTeam) {
+      errors.push(`Item ${i + 1}: Missing required fields (sport, homeTeam, awayTeam)`);
+      continue;
     }
     
-    for (let i = 0; i < data.length; i++) {
-      const item = data[i];
-      
-      // Validate required fields
-      if (!item.sport || !item.homeTeam || !item.awayTeam) {
-        errors.push(`Item ${i + 1}: Missing required fields (sport, homeTeam, awayTeam)`);
-        continue;
-      }
-      
-      // Convert cents to decimal
-      const homePrice = typeof item.homePriceCents === 'number' ? item.homePriceCents / 100 : 0;
-      const awayPrice = typeof item.awayPriceCents === 'number' ? item.awayPriceCents / 100 : 0;
-      
-      markets.push({
-        sport: item.sport.toUpperCase(),
-        gameTime: item.gameTime || '',
-        homeTeam: item.homeTeam,
-        awayTeam: item.awayTeam,
-        homePrice,
-        awayPrice,
-        rawText: `${item.awayTeam} @ ${item.homeTeam}`,
-      });
-    }
-  } catch (e) {
-    errors.push(`JSON parse error: ${e instanceof Error ? e.message : 'Invalid JSON'}`);
+    // Convert cents to decimal
+    const homePrice = typeof item.homePriceCents === 'number' ? item.homePriceCents / 100 : 0;
+    const awayPrice = typeof item.awayPriceCents === 'number' ? item.awayPriceCents / 100 : 0;
+    
+    markets.push({
+      sport: item.sport.toUpperCase(),
+      gameTime: item.gameTime || '',
+      homeTeam: item.homeTeam,
+      awayTeam: item.awayTeam,
+      homePrice,
+      awayPrice,
+      rawText: `${item.awayTeam} @ ${item.homeTeam}`,
+    });
   }
   
   return {
@@ -126,9 +138,10 @@ function parseJsonInput(text: string): ParseResult {
  * Parse the batch import text into structured market data (JSON or text format)
   */
  export function parseBatchImport(text: string): ParseResult {
-  // Detect JSON format
-  if (isJsonInput(text)) {
-    return parseJsonInput(text);
+  // Try JSON format first
+  const jsonData = tryParseJson(text);
+  if (jsonData !== null) {
+    return parseJsonData(jsonData);
   }
   
   // Fall back to text format parsing
