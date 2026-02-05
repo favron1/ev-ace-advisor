@@ -1,204 +1,262 @@
 
 
-# Fix: Restore 24-Hour H2H-Only Pipeline + Hard Cleanup
+# Fix: Tiered Polymarket Price Verification System
 
 ## Problem Summary
 
-The sync function is caching markets WAY outside the approved 24-hour window, flooding the system with untradeable data:
+The current pricing pipeline has significant gaps:
 
-| Current State | Count | Impact |
-|---------------|-------|--------|
-| Total active markets | 2,778 | Overwhelming |
-| Outside 24h window | 2,569 (93%) | Untradeable |
-| Within 24h window | 207 (7%) | Actionable |
-| Default 50c price | 1,700 (61%) | No real pricing |
-| Non-H2H markets | 1,384 (50%) | Wrong market type |
-| event_watch_state with book price | 14 (0.8%) | Pipeline broken |
+| Source | Count | Status | Issue |
+|--------|-------|--------|-------|
+| CLOB Verified | 105 | Working | Real executable prices |
+| Firecrawl | 53 | Broken | 32 no orderbook, 21 missing tokens |
+| Gamma API | 8 | Partial | Stuck at 50c placeholder |
 
-### Root Cause
-
-Despite your explicit approval of "24 hours" for market horizon, the sync function was changed to "cache ALL - don't reject based on date", filling the database with future games that have no active orderbooks (hence 50c prices) and no Odds API coverage (hence no book prices).
+The core issue: Firecrawl creates synthetic condition_ids (`firecrawl_nba_hou_okc`) that don't map to real Polymarket markets. Meanwhile, valid CLOB markets exist for the same games but with different condition_ids.
 
 ---
 
-## Solution: Three-Part Fix
+## Solution: Implement Tiered Price Verification
 
-### Part 1: Hard Cleanup (Database)
-
-Run cleanup queries to expire and remove:
-- Markets with event_date > 24h from now
-- Non-H2H market types (futures, totals, spreads, props)
-- event_watch_state entries for expired/cleaned markets
+Create a robust fallback chain that always attempts to resolve real executable prices:
 
 ```text
--- Expire markets outside 24h window
-UPDATE polymarket_h2h_cache 
-SET status = 'expired', monitoring_status = 'idle'
-WHERE event_date > NOW() + INTERVAL '26 hours'
-  AND status = 'active';
-
--- Expire non-H2H market types
-UPDATE polymarket_h2h_cache 
-SET status = 'expired', monitoring_status = 'idle'
-WHERE market_type != 'h2h'
-  AND status = 'active';
-
--- Expire matching event_watch_state entries
-UPDATE event_watch_state 
-SET watch_state = 'expired'
-WHERE polymarket_condition_id IN (
-  SELECT condition_id FROM polymarket_h2h_cache 
-  WHERE status = 'expired'
-);
+Tier 1: CLOB API Direct (highest confidence - 100%)
+   ↓ if fails
+Tier 2: Gamma API Search (high confidence - 95%)
+   ↓ if fails  
+Tier 3: Firecrawl HTML Scrape with __NEXT_DATA__ extraction (medium - 80%)
+   ↓ if fails
+Tier 4: CLOB Search API by team names (medium-low - 75%)
+   ↓ if fails
+Tier 5: On-chain CTF Exchange event validation (low - 60%)
+   ↓ if all fail
+Mark as UNTRADEABLE with specific reason
 ```
 
-### Part 2: Restore 24h Filter in Sync Function
+---
+
+## Implementation Details
+
+### Part 1: Fix Duplicate Market Problem
 
 File: `supabase/functions/polymarket-sync-24h/index.ts`
 
-#### Change 1: Restore rejection in parseEventDate()
+**Problem**: Firecrawl creates `firecrawl_nba_hou_okc` condition IDs that never match CLOB.
 
-Around line 476, change from:
-
-```text
-// CACHE ALL - don't reject based on date
-return { resolvedDate: slugDate, dateSource: 'slug', priority, hoursUntilEvent: hoursUntil };
-```
-
-To:
+**Fix**: Before creating Firecrawl entries, check if a CLOB-verified market already exists for the same teams:
 
 ```text
-// ENFORCE 24h WINDOW: Only cache imminent H2H games
-if (hoursUntil > 24) {
-  return { resolvedDate: null, dateSource: 'rejected-future', priority: 'distant', hoursUntilEvent: hoursUntil };
-}
-return { resolvedDate: slugDate, dateSource: 'slug', priority, hoursUntilEvent: hoursUntil };
-```
+// In Firecrawl processing loop (~line 860)
+// BEFORE creating synthetic condition_id, check for existing real market
+const { data: existingMarket } = await supabase
+  .from('polymarket_h2h_cache')
+  .select('condition_id, yes_price, token_id_yes')
+  .eq('source', 'clob_verified')
+  .or(`team_home.ilike.%${game.team1Name.split(' ').pop()}%,team_home.ilike.%${game.team2Name.split(' ').pop()}%`)
+  .maybeSingle();
 
-Apply same pattern to lines ~487, ~497, ~511, ~541, ~568 (all date extraction paths).
-
-#### Change 2: Add explicit 24h check in qualifying loop
-
-After line 603 (after past events check), add:
-
-```text
-// RESTORE: Reject events more than 24 hours away
-if (hoursUntilEvent > 24) {
-  continue;
+if (existingMarket?.condition_id) {
+  // Skip Firecrawl entry - real market exists
+  console.log(`[FIRECRAWL] Skipping ${game.team1Name} vs ${game.team2Name} - CLOB market exists`);
+  return;
 }
 ```
 
-#### Change 3: Filter to H2H only in qualifying loop
+### Part 2: Aggressive Token Resolution for Firecrawl Markets
 
-Around line 639-641, change from:
+File: `supabase/functions/polymarket-sync-24h/index.ts`
+
+**Problem**: 21 Firecrawl markets have `MISSING_TOKENS`.
+
+**Fix**: After main sync, run tokenize-market for all markets missing tokens:
 
 ```text
-// Skip futures markets (championship, MVP, etc.)
-if (marketType === 'futures') {
-  continue;
+// After line 978 (after existing backfill)
+// PHASE 2: Use tokenize-market edge function for remaining untokenized markets
+const { data: stillMissingTokens } = await supabase
+  .from('polymarket_h2h_cache')
+  .select('condition_id, team_home, team_away, sport_category, polymarket_slug')
+  .is('token_id_yes', null)
+  .eq('status', 'active')
+  .limit(20);
+
+if (stillMissingTokens && stillMissingTokens.length > 0) {
+  console.log(`[POLY-SYNC-24H] Running tokenize-market for ${stillMissingTokens.length} markets...`);
+  
+  for (const market of stillMissingTokens) {
+    // Build market URL if we have slug
+    const marketUrl = market.polymarket_slug 
+      ? `https://polymarket.com/event/${market.polymarket_slug}`
+      : null;
+    
+    // Call tokenize-market with all available data
+    const tokenResult = await tokenizeMarket({
+      conditionId: market.condition_id.startsWith('firecrawl_') ? undefined : market.condition_id,
+      teamHome: market.team_home,
+      teamAway: market.team_away,
+      sport: market.sport_category,
+      marketUrl,
+    });
+    
+    if (tokenResult.success) {
+      await supabase
+        .from('polymarket_h2h_cache')
+        .update({
+          condition_id: tokenResult.conditionId, // Replace synthetic ID with real one
+          token_id_yes: tokenResult.tokenIdYes,
+          token_id_no: tokenResult.tokenIdNo,
+          token_source: tokenResult.tokenSource,
+          tradeable: true,
+          untradeable_reason: null,
+        })
+        .eq('condition_id', market.condition_id);
+    }
+  }
 }
 ```
 
-To:
+### Part 3: Add CLOB Orderbook Validation
+
+File: `supabase/functions/polymarket-sync-24h/index.ts`
+
+**Problem**: 32 markets have tokens but `NO_ORDERBOOK_EXISTS`.
+
+**Fix**: During CLOB price refresh, validate orderbook depth exists:
 
 ```text
-// H2H ONLY: Skip all non-H2H market types
-if (marketType !== 'h2h') {
-  continue;
+// In CLOB price refresh section (~line 1258)
+for (const [tokenId, priceData] of Object.entries(allPrices)) {
+  const buyPrice = parseFloat(priceData.BUY || '0');
+  const sellPrice = parseFloat(priceData.SELL || '0');
+  
+  // NEW: Validate orderbook has liquidity (BUY and SELL prices exist)
+  const hasOrderbook = buyPrice > 0 && sellPrice > 0;
+  
+  if (!hasOrderbook) {
+    // Mark as untradeable - no active orderbook
+    await supabase
+      .from('polymarket_h2h_cache')
+      .update({
+        tradeable: false,
+        untradeable_reason: 'NO_ORDERBOOK_EXISTS',
+      })
+      .eq('condition_id', conditionId);
+    continue;
+  }
+  
+  // Validate bid-ask spread is reasonable (< 20%)
+  const spread = buyPrice - sellPrice;
+  if (spread > 0.20) {
+    console.log(`[CLOB] Wide spread detected: ${conditionId} bid=${sellPrice} ask=${buyPrice} spread=${(spread*100).toFixed(0)}%`);
+  }
+  
+  // Continue with price update...
 }
 ```
 
-#### Change 4: Reduce event cap
+### Part 4: On-Chain Validation Tier (Future Enhancement)
 
-Line 415-416, change from:
+File: Create `supabase/functions/_shared/onchain-validator.ts`
+
+For markets that fail API validation, add on-chain CTF Exchange validation:
 
 ```text
-if (allEvents.length >= 2000)
+// Query Polygon for OrderFilled events to validate token exists
+// This uses Bitquery or direct RPC calls
+async function validateOnChain(tokenId: string): Promise<boolean> {
+  // Check if token has any recent trades on CTF Exchange
+  // Contract: 0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E (Polygon)
+  
+  // Option 1: Use Bitquery GraphQL API
+  // Option 2: Use Polygon RPC getLogs for TokenRegistered events
+  // Option 3: Use Alchemy/Infura trace APIs
+  
+  return hasRecentActivity;
+}
 ```
 
-To:
+### Part 5: Cleanup Duplicate Firecrawl Entries
+
+Database migration to remove synthetic Firecrawl entries where real CLOB market exists:
 
 ```text
-if (allEvents.length >= 500)
-```
-
-With proper 24h+H2H filtering, we should only have ~50-150 markets.
-
-#### Change 5: Restrict CLOB refresh to 24h window
-
-Lines 1161-1165, add date filter:
-
-```text
-.eq('status', 'active')
-.eq('market_type', 'h2h')  // ADD: H2H only
-.not('token_id_yes', 'is', null)
-.gte('event_date', new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())  // ADD: Started in last 2h (live)
-.lte('event_date', new Date(Date.now() + 26 * 60 * 60 * 1000).toISOString()); // ADD: Within 26h
-```
-
-### Part 3: Update Console Logs
-
-Change line 239 from:
-
-```text
-console.log('[POLY-SYNC-24H] FIX v2: FULL discovery mode - caching ALL markets, no date rejection');
-```
-
-To:
-
-```text
-console.log('[POLY-SYNC-24H] STRICT MODE: 24h window, H2H markets only');
+-- Find and expire duplicate Firecrawl entries
+WITH real_markets AS (
+  SELECT DISTINCT team_home, team_away
+  FROM polymarket_h2h_cache
+  WHERE source = 'clob_verified' AND status = 'active'
+)
+UPDATE polymarket_h2h_cache fc
+SET status = 'expired', 
+    untradeable_reason = 'DUPLICATE_OF_CLOB_MARKET'
+FROM real_markets rm
+WHERE fc.source = 'firecrawl'
+  AND fc.status = 'active'
+  AND (
+    fc.team_home = rm.team_home OR fc.team_home = rm.team_away
+  )
+  AND (
+    fc.team_away = rm.team_home OR fc.team_away = rm.team_away
+  );
 ```
 
 ---
 
-## Expected Results After Fix
+## Expected Results
 
 | Metric | Current | After Fix |
 |--------|---------|-----------|
-| Cached markets | 2,778 | ~100-200 |
-| Within 24h window | 7% | 100% |
-| Markets with real CLOB prices | 39% | 90%+ |
-| event_watch_state with book price | 0.8% | 60%+ |
-| Non-H2H markets in cache | 1,384 | 0 |
-| Sync execution time | 45s+ (timeout) | ~15s |
-| Signal generation | Broken | Restored |
+| CLOB-verified markets | 105 | 140+ |
+| Untradeable (missing tokens) | 21 | 5 |
+| Untradeable (no orderbook) | 32 | 20* |
+| Duplicate Firecrawl entries | ~30 | 0 |
+| Markets with real prices | 63% | 90%+ |
+
+*Some markets genuinely have no orderbook - these are correctly marked untradeable.
 
 ---
 
-## Technical Details
-
-### Why 50c Prices Everywhere
-
-The Gamma API returns prices from market metadata, but:
-1. Future games (3-7 days out) don't have active trading yet
-2. Without active orderbooks, Gamma returns no price data
-3. The sync defaults to 0.5 when no price found
-4. CLOB refresh fails for these markets (no active orderbook)
-
-Result: 61% of markets stuck at 50c placeholder.
-
-### Why No Book Prices
-
-The Odds API only provides data for games starting within 24-48 hours. Markets 5+ days out:
-1. Don't exist in Odds API response
-2. Can't be matched to bookmaker fair probabilities
-3. Show `null` for `current_probability` in `event_watch_state`
-
-Result: 99.2% of watched events have no bookmaker price to compare against.
-
-### Files to Modify
+## Files to Modify
 
 | File | Changes |
 |------|---------|
-| `supabase/functions/polymarket-sync-24h/index.ts` | Restore 24h rejection, H2H filter, reduce cap |
-| Database | Hard cleanup of existing bad data |
+| `supabase/functions/polymarket-sync-24h/index.ts` | Duplicate detection, token resolution, orderbook validation |
+| `supabase/functions/tokenize-market/index.ts` | No changes - already implements tiered extraction |
+| Database | Cleanup duplicate Firecrawl entries |
+| Future: `_shared/onchain-validator.ts` | On-chain CTF Exchange validation |
 
-### Cleanup Scope
+---
 
-This will expire ~2,600 markets currently in the database:
-- 2,569 outside 24h window
-- ~1,384 non-H2H (some overlap with above)
+## Technical Notes
 
-Remaining: ~150-200 H2H markets within 24h - all tradeable with real pricing.
+### Why Firecrawl Creates Duplicate Markets
+
+The current flow:
+1. Gamma API returns some games with condition_ids
+2. Firecrawl scrapes NBA page and creates synthetic IDs like `firecrawl_nba_hou_okc`
+3. Both get inserted, but only Gamma-sourced ones have real CLOB tokens
+4. Firecrawl entries fail token resolution because the synthetic ID doesn't exist in CLOB
+
+### Why NO_ORDERBOOK_EXISTS
+
+Some Polymarket markets are created but not yet trading:
+- Pre-game markets with no liquidity providers
+- Markets created by API but not listed on UI
+- Markets awaiting resolution
+
+These should remain marked untradeable until orderbook activity appears.
+
+### The Tiered System You Described
+
+The existing `tokenize-market` function already implements this:
+1. CLOB API Direct (confidence: 100%)
+2. Gamma API Search (confidence: 95%)
+3. Firecrawl HTML __NEXT_DATA__ (confidence: 80%)
+4. CLOB Search API (confidence: 75%)
+
+The fix is to:
+- Call this during sync for all markets
+- Replace synthetic condition_ids with real ones when found
+- Skip Firecrawl entry creation when CLOB market already exists
 
