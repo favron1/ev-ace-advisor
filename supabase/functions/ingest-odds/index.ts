@@ -290,6 +290,7 @@ Deno.serve(async (req) => {
               confirming_books: oddsArray.length,
               is_sharp_book: hasSharpBook,
               commence_time: null,
+              source: 'odds_api',
             });
           }
         }
@@ -382,6 +383,7 @@ Deno.serve(async (req) => {
               confirming_books: oddsArray.length,
               is_sharp_book: hasSharpBook,
               commence_time: event.commence_time,
+              source: 'odds_api',
             });
           }
         }
@@ -497,6 +499,41 @@ Deno.serve(async (req) => {
       return hoursUntil <= 12;
     }).length;
 
+    // Phase 3: Check NBA coverage and trigger backup scraper if needed
+    const nbaH2hSignals = allSignals.filter(s => 
+      s.market_type === 'h2h' && 
+      s.event_name && 
+      !s.event_name.includes(':') // Exclude futures which have sport: format
+    );
+    const uniqueNbaGames = Math.floor(new Set(nbaH2hSignals.map(s => s.event_name)).size / 2);
+    
+    console.log(`[INGEST-ODDS] NBA H2H coverage: ${uniqueNbaGames} unique games from Odds API`);
+    
+    let backupResult: { gamesFound?: number } | null = null;
+    if (uniqueNbaGames < 8) {
+      console.log('[INGEST-ODDS] Low NBA coverage, triggering backup scraper...');
+      try {
+        const backupResponse = await fetch(
+          `${supabaseUrl}/functions/v1/scrape-backup-odds`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${supabaseKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ sport: 'nba', source: 'draftkings' }),
+          }
+        );
+        
+        if (backupResponse.ok) {
+          backupResult = await backupResponse.json();
+          console.log(`[INGEST-ODDS] Backup scraper found ${backupResult?.gamesFound || 0} games`);
+        }
+      } catch (backupErr) {
+        console.error('[INGEST-ODDS] Backup scraper error:', backupErr);
+      }
+    }
+
     return new Response(
       JSON.stringify({
         success: true,
@@ -508,6 +545,11 @@ Deno.serve(async (req) => {
         event_horizon_hours: eventHorizonHours,
         sharp_weighting_enabled: sharpBookWeighting,
         vig_removal: true,
+        nba_coverage: {
+          odds_api_games: uniqueNbaGames,
+          backup_triggered: uniqueNbaGames < 8,
+          backup_games: backupResult?.gamesFound || 0,
+        },
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );

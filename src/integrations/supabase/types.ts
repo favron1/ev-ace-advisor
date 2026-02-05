@@ -108,6 +108,7 @@ export type Database = {
           odds_movement: number | null
           outcome: string
           previous_odds: number | null
+          source: string | null
         }
         Insert: {
           bookmaker: string
@@ -124,6 +125,7 @@ export type Database = {
           odds_movement?: number | null
           outcome: string
           previous_odds?: number | null
+          source?: string | null
         }
         Update: {
           bookmaker?: string
@@ -140,6 +142,7 @@ export type Database = {
           odds_movement?: number | null
           outcome?: string
           previous_odds?: number | null
+          source?: string | null
         }
         Relationships: []
       }
