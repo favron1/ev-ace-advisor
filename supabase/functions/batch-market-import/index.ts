@@ -89,6 +89,17 @@ type BookieIndexEntry = {
        const marketLabel = `${market.awayTeam} @ ${market.homeTeam}`;
  
        try {
+          // Skip women's games - no bookmaker coverage, causes cross-gender mismatches
+          const isWomensGame = 
+            market.homeTeam.includes('(W)') || 
+            market.awayTeam.includes('(W)') ||
+            (market.rawText && market.rawText.includes('(W)'));
+          if (isWomensGame) {
+            result.failed++;
+            result.details.push({ market: marketLabel, status: 'skipped', error: 'Womens game - no bookie coverage' });
+            continue;
+          }
+
          // Get sport code
          const sportCode = getSportCodeFromLeague(market.sport);
          if (!sportCode) {

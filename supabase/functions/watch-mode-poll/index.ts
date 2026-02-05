@@ -621,6 +621,7 @@ Deno.serve(async (req) => {
      .not('question', 'ilike', '%1H%') // Exclude first-half markets
      .not('question', 'ilike', '%1st Half%') // Exclude first-half markets
      .not('question', 'ilike', '%First Half%') // Exclude first-half markets
+      .not('question', 'ilike', '%(W)%') // Exclude women's games - no bookmaker coverage
       .order('last_price_update', { ascending: false }) // Prioritize freshest
       .order('event_date', { ascending: true }) // Nearest events first
       .limit(MAX_MARKETS_PER_SCAN);
@@ -641,6 +642,7 @@ Deno.serve(async (req) => {
      .not('question', 'ilike', '%1H%') // Exclude first-half markets
      .not('question', 'ilike', '%1st Half%')
      .not('question', 'ilike', '%First Half%')
+      .not('question', 'ilike', '%(W)%') // Exclude women's games - no bookmaker coverage
       .order('last_price_update', { ascending: false })
       .order('event_date', { ascending: true })
       .limit(50);
@@ -662,6 +664,7 @@ Deno.serve(async (req) => {
      .not('question', 'ilike', '%1H%') // Exclude first-half markets
      .not('question', 'ilike', '%1st Half%')
      .not('question', 'ilike', '%First Half%')
+      .not('question', 'ilike', '%(W)%') // Exclude women's games - no bookmaker coverage
       .order('last_price_update', { ascending: false })
       .order('event_date', { ascending: true })
       .limit(50);
