@@ -9,6 +9,25 @@
  import { useToast } from "@/hooks/use-toast";
  import { supabase } from "@/integrations/supabase/client";
  import { parseBatchImport, ParsedMarket, ParseResult } from "@/lib/batch-parser";
+
+// After successful import, trigger token repair for batch-imported markets
+async function triggerTokenRepair(markets: Array<{ sport: string; homeTeam: string; awayTeam: string }>) {
+  const repairPromises = markets.slice(0, 10).map(async (market) => {
+    try {
+      await supabase.functions.invoke('tokenize-market', {
+        body: {
+          teamHome: market.homeTeam,
+          teamAway: market.awayTeam,
+          sport: market.sport,
+        },
+      });
+    } catch (err) {
+      console.log(`[token-repair] Failed for ${market.homeTeam} vs ${market.awayTeam}:`, err);
+    }
+  });
+  
+  await Promise.allSettled(repairPromises);
+}
  
  type ImportStatus = 'idle' | 'parsing' | 'previewing' | 'importing' | 'done';
  
@@ -78,6 +97,13 @@
          title: "Import complete",
          description: `Created: ${data.created}, Updated: ${data.updated}, Bookie matches: ${data.bookieMatches}`,
        });
+
+        // Trigger token repair in background for the first 10 markets
+        triggerTokenRepair(previewMarkets.slice(0, 10));
+        toast({
+          title: "Token repair started",
+          description: "Attempting to resolve CLOB token IDs for imported markets...",
+        });
      } catch (err) {
        console.error('Import failed:', err);
        toast({

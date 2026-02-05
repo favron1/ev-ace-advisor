@@ -171,6 +171,7 @@ export type Database = {
           polymarket_yes_price: number | null
           reverted: boolean | null
           samples_since_hold: number | null
+          source: string | null
           updated_at: string | null
           watch_state: string | null
         }
@@ -201,6 +202,7 @@ export type Database = {
           polymarket_yes_price?: number | null
           reverted?: boolean | null
           samples_since_hold?: number | null
+          source?: string | null
           updated_at?: string | null
           watch_state?: string | null
         }
@@ -231,6 +233,7 @@ export type Database = {
           polymarket_yes_price?: number | null
           reverted?: boolean | null
           samples_since_hold?: number | null
+          source?: string | null
           updated_at?: string | null
           watch_state?: string | null
         }
