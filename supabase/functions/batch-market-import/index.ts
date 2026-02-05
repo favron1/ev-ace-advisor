@@ -32,6 +32,15 @@
    bookieMatches: number;
   details: Array<{ market: string; status: string; error?: string; conditionId?: string }>;
  }
+
+type BookieIndexEntry = {
+  // Vig-free fair probs keyed by canonical team id
+  fairProbByTeamId: Record<string, number>;
+  // Best available commence time (if present in signals)
+  commence_time: string | null;
+  // Debug: one sample event name used to build this entry
+  sample_event_name: string;
+};
  
  Deno.serve(async (req) => {
    if (req.method === 'OPTIONS') {
@@ -180,9 +189,38 @@
  
          // Check for bookmaker match
          const lookupKey = `${market.sport.toUpperCase()}|${teamSetKey}`;
-         if (bookieIndex.has(lookupKey)) {
-           result.bookieMatches++;
-         }
+        const bookie = bookieIndex.get(lookupKey);
+        if (bookie) {
+          result.bookieMatches++;
+
+          // Attach bookmaker fair prob to event_watch_state immediately so Pipeline always shows Book: %
+          // We map "book" to the HOME team fair probability (same as watch-mode-poll's matchedTeam)
+          const homeFair = bookie.fairProbByTeamId[homeId];
+          if (typeof homeFair === 'number' && !Number.isNaN(homeFair)) {
+            const eventKey = `poly_${existingMarket?.condition_id || `batch_${sportCode}_${teamSetKey}_${today}`}`;
+            const condition = existingMarket?.condition_id || `batch_${sportCode}_${teamSetKey}_${today}`;
+            const commence = bookie.commence_time || market.gameTime || null;
+
+            await supabase
+              .from('event_watch_state')
+              .upsert({
+                event_key: eventKey,
+                event_name: eventTitle,
+                watch_state: 'monitored',
+                commence_time: commence,
+                polymarket_condition_id: condition,
+                polymarket_question: eventTitle,
+                polymarket_yes_price: market.homePrice,
+                polymarket_volume: null,
+                bookmaker_market_key: homeResolved || market.homeTeam,
+                bookmaker_source: sportCode,
+                // Don't overwrite initial_probability if it already exists
+                current_probability: homeFair,
+                polymarket_matched: true,
+                updated_at: new Date().toISOString(),
+              }, { onConflict: 'event_key' });
+          }
+        }
  
        } catch (err) {
          console.error(`[batch-import] Failed to process ${marketLabel}:`, err);
@@ -215,42 +253,103 @@
   * Build an index of bookmaker signals for O(1) matching
   * Key format: "SPORT|teamA_id|teamB_id" (alphabetical)
   */
-async function buildBookieIndex(supabase: any): Promise<Map<string, boolean>> {
-   const index = new Map<string, boolean>();
+async function buildBookieIndex(supabase: any): Promise<Map<string, BookieIndexEntry>> {
+   const index = new Map<string, BookieIndexEntry>();
  
    try {
      // Get recent bookmaker signals (last 24h)
-     const { data: signals } = await supabase
+      const { data: signals } = await supabase
        .from('bookmaker_signals')
-       .select('event_name, market_type')
+        .select('event_name, market_type, outcome, implied_probability, commence_time, captured_at')
        .eq('market_type', 'h2h')
        .gte('captured_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
  
      if (!signals) return index;
  
-     for (const sig of signals) {
-       // Parse event name to extract teams
-      const eventName = (sig as any).event_name as string;
-      const match = eventName.match(/^(.+?)\s+vs\s+(.+)$/i);
-       if (!match) continue;
- 
-       const team1 = match[1].trim();
-       const team2 = match[2].trim();
- 
-       // Detect sport from team names
-       for (const [code, config] of Object.entries(SPORTS_CONFIG)) {
-         const team1Resolved = resolveTeamName(team1, code as keyof typeof SPORTS_CONFIG, config.teamMap);
-         const team2Resolved = resolveTeamName(team2, code as keyof typeof SPORTS_CONFIG, config.teamMap);
- 
-         if (team1Resolved && team2Resolved) {
-           const id1 = teamId(team1Resolved);
-           const id2 = teamId(team2Resolved);
-           const key = `${config.name.toUpperCase()}|${makeTeamSetKey(id1, id2)}`;
-           index.set(key, true);
-           break;
-         }
-       }
-     }
+      // Group signals by (sport|teamSetKey) so we can compute vig-free fair probs
+      // For each group we keep the latest probability per outcome.
+      const grouped = new Map<
+        string,
+        {
+          sportLabel: string;
+          teamSetKey: string;
+          latestByOutcomeId: Map<string, { prob: number; captured_at: string; commence_time: string | null }>;
+          sample_event_name: string;
+        }
+      >();
+
+      for (const sig of signals) {
+        const s = sig as any;
+        const eventName = String(s.event_name || '');
+        const outcome = String(s.outcome || '');
+        const prob = Number(s.implied_probability);
+        const capturedAt = String(s.captured_at || '');
+        const commence = (s.commence_time ? String(s.commence_time) : null) as string | null;
+        if (!eventName || !outcome || !Number.isFinite(prob)) continue;
+
+        // Parse event name to extract teams
+        const match = eventName.match(/^(.+?)\s+vs\s+(.+)$/i);
+        if (!match) continue;
+        const team1 = match[1].trim();
+        const team2 = match[2].trim();
+
+        // Detect sport from team names
+        for (const [code, config] of Object.entries(SPORTS_CONFIG)) {
+          const team1Resolved = resolveTeamName(team1, code as keyof typeof SPORTS_CONFIG, config.teamMap);
+          const team2Resolved = resolveTeamName(team2, code as keyof typeof SPORTS_CONFIG, config.teamMap);
+          const outcomeResolved = resolveTeamName(outcome, code as keyof typeof SPORTS_CONFIG, config.teamMap);
+          if (!team1Resolved || !team2Resolved || !outcomeResolved) continue;
+
+          const id1 = teamId(team1Resolved);
+          const id2 = teamId(team2Resolved);
+          const outcomeId = teamId(outcomeResolved);
+          const teamSetKey = makeTeamSetKey(id1, id2);
+          const key = `${config.name.toUpperCase()}|${teamSetKey}`;
+
+          if (!grouped.has(key)) {
+            grouped.set(key, {
+              sportLabel: config.name.toUpperCase(),
+              teamSetKey,
+              latestByOutcomeId: new Map(),
+              sample_event_name: eventName,
+            });
+          }
+
+          const g = grouped.get(key)!;
+          const prev = g.latestByOutcomeId.get(outcomeId);
+          if (!prev || (capturedAt && capturedAt > prev.captured_at)) {
+            g.latestByOutcomeId.set(outcomeId, {
+              prob,
+              captured_at: capturedAt,
+              commence_time: commence,
+            });
+          }
+          break;
+        }
+      }
+
+      // Compute vig-free probs per group
+      for (const [key, g] of grouped) {
+        const probs = Array.from(g.latestByOutcomeId.entries());
+        if (probs.length < 2) continue; // Need both sides
+
+        const total = probs.reduce((sum, [, v]) => sum + v.prob, 0);
+        if (total <= 0) continue;
+
+        const fairProbByTeamId: Record<string, number> = {};
+        for (const [outcomeId, v] of probs) {
+          fairProbByTeamId[outcomeId] = v.prob / total;
+        }
+
+        // Pick a commence time if any outcome has one
+        const commence_time = probs.map(([, v]) => v.commence_time).find(Boolean) || null;
+
+        index.set(key, {
+          fairProbByTeamId,
+          commence_time,
+          sample_event_name: g.sample_event_name,
+        });
+      }
    } catch (err) {
      console.error('[batch-import] Failed to build bookie index:', err);
    }
