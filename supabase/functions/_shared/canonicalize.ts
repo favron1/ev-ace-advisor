@@ -9,6 +9,22 @@
 import { SPORTS_CONFIG, SportCode } from './sports-config.ts';
 
 // ============================================================================
+// NORMALIZATION HELPER (exported for use by team-mapping-cache)
+// ============================================================================
+
+/**
+ * Normalize a raw team name for matching.
+ * Strips punctuation, lowercases, and trims.
+ */
+export function normalizeRaw(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// ============================================================================
 // TYPES
 // ============================================================================
 
@@ -43,18 +59,6 @@ export function teamId(fullName: string): string {
  */
 export function makeTeamSetKey(teamIdA: string, teamIdB: string): string {
   return teamIdA < teamIdB ? `${teamIdA}|${teamIdB}` : `${teamIdB}|${teamIdA}`;
-}
-
-/**
- * Normalize a raw team name for matching.
- * Strips punctuation, lowercases, and trims.
- */
-function normalizeRaw(raw: string): string {
-  return raw
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
 }
 
 /**
@@ -94,20 +98,32 @@ function extractCity(fullName: string): string {
  * 4. City match (first word(s) match)
  * 5. Substring containment (e.g., "Canadiens" in "Montreal Canadiens")
  * 
+ * @param userMappings - Optional Map from team_mappings table (highest priority)
  * @returns The official full team name, or null if no resolution found
  */
 export function resolveTeamName(
   rawName: string,
   sportCode: SportCode | string,
-  teamMap?: Record<string, string>
+  teamMap?: Record<string, string>,
+  userMappings?: Map<string, string>
 ): string | null {
   if (!rawName || rawName.trim().length === 0) return null;
+  
+  const rawNorm = normalizeRaw(rawName);
+  
+  // Step 0 (HIGHEST PRIORITY): Check user-defined mappings from team_mappings table
+  // This is the self-healing mechanism - manual corrections take precedence
+  if (userMappings && userMappings.size > 0) {
+    const userResolved = userMappings.get(rawNorm);
+    if (userResolved) {
+      return userResolved;
+    }
+  }
   
   // Get teamMap from config if not provided
   const map = teamMap || SPORTS_CONFIG[sportCode as SportCode]?.teamMap || {};
   if (Object.keys(map).length === 0) return null;
   
-  const rawNorm = normalizeRaw(rawName);
   const officialNames = Object.values(map);
   
   // 1. Exact match in official names (values)

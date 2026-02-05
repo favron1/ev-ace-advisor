@@ -8,6 +8,7 @@
  import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
  import { SPORTS_CONFIG, getSportCodeFromLeague } from '../_shared/sports-config.ts';
  import { resolveTeamName, teamId, makeTeamSetKey } from '../_shared/canonicalize.ts';
+import { getAllTeamMappings } from '../_shared/team-mapping-cache.ts';
  
  const corsHeaders = {
    'Access-Control-Allow-Origin': '*',
@@ -64,6 +65,10 @@ type BookieIndexEntry = {
  
      console.log(`[batch-import] Processing ${markets.length} markets`);
  
+      // Fetch user-defined team mappings for all sports (self-healing mechanism)
+      const allUserMappings = await getAllTeamMappings(supabase);
+      console.log(`[batch-import] Loaded ${allUserMappings.size} user-defined team mappings`);
+
      const result: ImportResult = {
        created: 0,
        updated: 0,
@@ -77,7 +82,7 @@ type BookieIndexEntry = {
      const today = new Date().toISOString().split('T')[0];
  
      // Build bookmaker index for matching
-     const bookieIndex = await buildBookieIndex(supabase);
+      const bookieIndex = await buildBookieIndex(supabase, allUserMappings);
      console.log(`[batch-import] Built bookie index with ${bookieIndex.size} entries`);
  
      for (const market of markets) {
@@ -94,9 +99,18 @@ type BookieIndexEntry = {
  
          const teamMap = SPORTS_CONFIG[sportCode]?.teamMap || {};
  
-         // Resolve team names to canonical names
-         const homeResolved = resolveTeamName(market.homeTeam, sportCode, teamMap);
-         const awayResolved = resolveTeamName(market.awayTeam, sportCode, teamMap);
+          // Build sport-specific user mappings lookup
+          const sportPrefix = `${sportCode}|`;
+          const sportUserMappings = new Map<string, string>();
+          for (const [key, value] of allUserMappings) {
+            if (key.startsWith(sportPrefix)) {
+              sportUserMappings.set(key.slice(sportPrefix.length), value);
+            }
+          }
+
+          // Resolve team names to canonical names (user mappings have priority)
+          const homeResolved = resolveTeamName(market.homeTeam, sportCode, teamMap, sportUserMappings);
+          const awayResolved = resolveTeamName(market.awayTeam, sportCode, teamMap, sportUserMappings);
  
          // Generate IDs for matching
          const homeId = homeResolved ? teamId(homeResolved) : teamId(market.homeTeam);
@@ -253,7 +267,10 @@ type BookieIndexEntry = {
   * Build an index of bookmaker signals for O(1) matching
   * Key format: "SPORT|teamA_id|teamB_id" (alphabetical)
   */
-async function buildBookieIndex(supabase: any): Promise<Map<string, BookieIndexEntry>> {
+async function buildBookieIndex(
+  supabase: any,
+  allUserMappings: Map<string, string>
+): Promise<Map<string, BookieIndexEntry>> {
    const index = new Map<string, BookieIndexEntry>();
  
    try {
@@ -302,7 +319,10 @@ async function buildBookieIndex(supabase: any): Promise<Map<string, BookieIndexE
 
           const id1 = teamId(team1Resolved);
           const id2 = teamId(team2Resolved);
-          const outcomeId = teamId(outcomeResolved);
+          
+          // Also try user mappings for outcome resolution
+          const outcomeFromUser = allUserMappings.get(`${code}|${outcome.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim()}`);
+          const outcomeId = teamId(outcomeFromUser || outcomeResolved);
           const teamSetKey = makeTeamSetKey(id1, id2);
           const key = `${config.name.toUpperCase()}|${teamSetKey}`;
 
