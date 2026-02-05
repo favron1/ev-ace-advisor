@@ -130,14 +130,38 @@ type BookieIndexEntry = {
       // Look for any matching market by normalized team names
          const { data: existing } = await supabase
            .from('polymarket_h2h_cache')
-        .select('id, condition_id, source')
+        .select('id, condition_id, source, token_id_yes, token_id_no, yes_price')
            .or(`and(team_home_normalized.eq.${homeId},team_away_normalized.eq.${awayId}),and(team_home_normalized.eq.${awayId},team_away_normalized.eq.${homeId})`)
-        .order('source', { ascending: true }) // Real sources (api, clob, firecrawl) come before 'batch_import'
-        .limit(5);
+        .order('last_price_update', { ascending: false, nullsFirst: false }) // Most recently updated first
+        .limit(10);
  
-      // Prefer real Polymarket entry over batch-created ones
-      const realMarket = existing?.find(m => m.source !== 'batch_import');
-      const existingMarket = realMarket || existing?.[0];
+      // PRIORITY ORDER for selecting which market to update:
+      // 1. Markets with valid token IDs (clob_verified, can actually trade)
+      // 2. Markets with non-placeholder prices (not 0.5/0.5)
+      // 3. Non-batch_import sources
+      const prioritizedMarket = existing?.sort((a, b) => {
+        // Token IDs = highest priority (actually tradeable)
+        const aHasTokens = !!(a.token_id_yes && a.token_id_no);
+        const bHasTokens = !!(b.token_id_yes && b.token_id_no);
+        if (aHasTokens !== bHasTokens) return bHasTokens ? 1 : -1;
+        
+        // Non-placeholder prices (not 0.5) = second priority
+        const aHasRealPrice = a.yes_price && Math.abs(a.yes_price - 0.5) > 0.01;
+        const bHasRealPrice = b.yes_price && Math.abs(b.yes_price - 0.5) > 0.01;
+        if (aHasRealPrice !== bHasRealPrice) return bHasRealPrice ? 1 : -1;
+        
+        // clob_verified > api > firecrawl > batch_import
+        const sourceRank = (s: string | null) => {
+          if (s === 'clob_verified') return 0;
+          if (s === 'api') return 1;
+          if (s === 'firecrawl') return 2;
+          if (s === 'batch_import') return 3;
+          return 4;
+        };
+        return sourceRank(a.source) - sourceRank(b.source);
+      })[0];
+      
+      const existingMarket = prioritizedMarket;
  
          // Prepare upsert data
          const now = new Date().toISOString();
@@ -185,6 +209,37 @@ type BookieIndexEntry = {
         });
         
         console.log(`[batch-import] Updated ${isRealMarket ? 'REAL' : 'batch'} market: ${marketLabel} (${existingMarket.condition_id}) -> YES=${market.homePrice}`);
+        
+        // CASCADE: Also update any existing signal_opportunities with this condition_id
+        if (existingMarket.condition_id && market.homePrice > 0) {
+          const { data: existingSignal } = await supabase
+            .from('signal_opportunities')
+            .select('id, bookmaker_prob_fair, status')
+            .eq('polymarket_condition_id', existingMarket.condition_id)
+            .neq('status', 'expired')
+            .single();
+          
+          if (existingSignal) {
+            const bookProb = existingSignal.bookmaker_prob_fair || 0.5;
+            const polyPrice = market.homePrice;
+            const newEdge = ((bookProb - polyPrice) / polyPrice) * 100;
+            
+            const { error: sigError } = await supabase
+              .from('signal_opportunities')
+              .update({
+                polymarket_yes_price: polyPrice,
+                polymarket_price: polyPrice,
+                polymarket_updated_at: now,
+                edge_percent: Math.max(0, newEdge),
+                is_true_arbitrage: newEdge >= 2,
+              })
+              .eq('id', existingSignal.id);
+            
+            if (!sigError) {
+              console.log(`[batch-import] CASCADE: Updated signal ${existingSignal.id} with new edge ${newEdge.toFixed(1)}%`);
+            }
+          }
+        }
          } else {
            // Create new with synthetic condition_id
            const syntheticConditionId = `batch_${sportCode}_${teamSetKey}_${today}`;
