@@ -1,147 +1,193 @@
 
 
-# Batch Import: Pipeline Integration & Matching Strategy
+# Fix Bookmaker Data Coverage: Multi-Source Strategy
 
-## Current Status
+## Problem Identified
 
-The batch import feature is **already implemented** and working:
-- **Frontend**: `/batch-import` page with JSON parsing and preview
-- **Backend**: `batch-market-import` edge function that inserts into `polymarket_h2h_cache`
-- **Matching**: Uses the canonical matching system (`canonicalize.ts` + `sports-config.ts`)
+Your Polymarket games for Feb 6th are **100% valid NBA matchups**, but The Odds API is NOT returning odds for them:
 
-## How It Connects to the Pipeline
+| Your Polymarket Games (Feb 6) | What The Odds API Has (Feb 6) |
+|-------------------------------|-------------------------------|
+| Knicks vs Pistons ❌ | Pistons vs Wizards |
+| Heat vs Celtics ❌ | Magic vs Nets |
+| Pacers vs Bucks ❌ | Hawks vs Jazz |
+| Pelicans vs Timberwolves ❌ | Raptors vs Bulls |
+| Grizzlies vs Trail Blazers ❌ | Rockets vs Hornets |
+| Clippers vs Kings ❌ | Mavericks vs Spurs |
+
+**Root Cause**: The Odds API has incomplete NBA game coverage. They're only returning ~6 of the 12+ NBA games scheduled for that day.
+
+## Solution: Multi-Source Bookmaker Data
+
+We'll implement redundant data sources to ensure full game coverage:
 
 ```text
-                                              ┌─────────────────────────────┐
-   BATCH IMPORT                               │   polymarket_h2h_cache      │
-   ─────────────                              │   (central market cache)    │
-   Your JSON paste ─────────────────────────▶ │                             │
-                                              │   ✓ event_title             │
-                                              │   ✓ yes_price / no_price    │
-                                              │   ✓ team_home_normalized    │
-                                              │   ✓ team_away_normalized    │
-                                              │   ✓ source = 'batch_import' │
-                                              └───────────────┬─────────────┘
-                                                              │
-                    ┌─────────────────────────────────────────┼─────────────────────────────────────────┐
-                    │                                         │                                         │
-                    ▼                                         ▼                                         ▼
-        ┌───────────────────┐                   ┌───────────────────┐                   ┌───────────────────┐
-        │  watch-mode-poll  │                   │  polymarket-monitor│                  │  active-mode-poll │
-        │  (every 5 min)    │                   │  (on-demand)       │                  │  (every 60 sec)   │
-        └─────────┬─────────┘                   └─────────┬─────────┘                   └─────────┬─────────┘
-                  │                                       │                                       │
-                  │  1. Query polymarket_h2h_cache        │                                       │
-                  │  2. Query bookmaker_signals           │                                       │
-                  │  3. Match by team_set_key             │                                       │
-                  │  4. Calculate edge                    │                                       │
-                  │  5. Store in event_watch_state        │                                       │
-                  │  6. Escalate if edge >= 2%            │                                       │
-                  ▼                                       ▼                                       ▼
-        ┌───────────────────────────────────────────────────────────────────────────────────────────────┐
-        │                               event_watch_state                                                │
-        │                        (edges, probabilities, signal state)                                    │
-        └───────────────────────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     BOOKMAKER DATA SOURCES                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  PRIMARY: The Odds API                                                  │
+│  ├── Coverage: ~60-70% of NBA games                                     │
+│  ├── Updates: Real-time                                                 │
+│  └── Books: Pinnacle, Betfair, DraftKings, etc.                        │
+│                                                                         │
+│  BACKUP: ESPN/Covers.com Scrape (NEW)                                   │
+│  ├── Coverage: 100% of NBA schedule                                     │
+│  ├── Updates: Periodic (every 30 min)                                   │
+│  └── Data: Consensus lines, opening lines                               │
+│                                                                         │
+│  FALLBACK: BallDontLie API (FREE)                                       │
+│  ├── Coverage: 100% NBA schedule                                        │
+│  ├── Updates: Daily                                                     │
+│  └── Data: Game times, matchups (no odds, but confirms games exist)    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Matching Mechanism
+## Implementation Plan
 
-### Team Name Resolution Chain
+### Phase 1: Add ESPN Schedule Verification
 
-When you paste `"Detroit Pistons"`:
+Create a new edge function `verify-nba-schedule` that:
+1. Fetches the full NBA schedule from a free source (ESPN API or BallDontLie)
+2. Compares against The Odds API results
+3. Logs any **missing games** for debugging
+4. Stores verified game schedule to cross-reference during matching
 
-1. **Resolve to canonical name**: `resolveTeamName("Detroit Pistons", "nba", teamMap)` 
-   - Checks exact match in `SPORTS_CONFIG.nba.teamMap` values
-   - Returns: `"Detroit Pistons"` (exact match)
+```
+Files to Create:
+- supabase/functions/verify-nba-schedule/index.ts
+```
 
-2. **Generate team ID**: `teamId("Detroit Pistons")`
-   - Slugify: `"detroit_pistons"`
+### Phase 2: Add Covers.com Scraping (Full Odds Coverage)
 
-3. **Generate team set key**: `makeTeamSetKey("detroit_pistons", "new_york_knicks")`
-   - Alphabetical sort: `"detroit_pistons|new_york_knicks"`
+Create `scrape-covers-odds` edge function that uses Firecrawl to scrape:
+- Covers.com/sports/nba/matchups (has all games + consensus odds)
+- Alternative: Action Network or Oddschecker
 
-4. **Store normalized**: Both `team_home_normalized` and `team_away_normalized` stored in cache
+```
+Files to Create:
+- supabase/functions/scrape-covers-odds/index.ts
+```
 
-### Bookmaker Matching (O(1) Lookup)
+### Phase 3: Merge Multiple Sources in Ingest Pipeline
 
-The `watch-mode-poll` function:
+Update `ingest-odds` to:
+1. First try The Odds API (primary, most accurate)
+2. For any games NOT found, fallback to scraped data
+3. Mark source in bookmaker_signals: `source = 'odds_api' | 'covers_scrape'`
 
-1. **Loads bookmaker_signals** (from The Odds API via `ingest-odds`)
-2. **Indexes by canonical key**: `NBA|detroit_pistons|new_york_knicks`
-3. **Looks up your batch-imported market** using the same canonical key
-4. **If match found**: Calculates edge = `book_fair_prob - polymarket_price`
+```
+Files to Modify:
+- supabase/functions/ingest-odds/index.ts
+```
 
-### What Happens After Import
+### Phase 4: Add Missing Game Detection
 
-| Step | Timing | Action |
-|------|--------|--------|
-| 1 | Immediate | Market inserted into `polymarket_h2h_cache` with normalized teams |
-| 2 | Next 5 min | `watch-mode-poll` picks up the market, attempts bookie match |
-| 3 | If match found | Edge calculated, stored in `event_watch_state` |
-| 4 | If edge >= 2% | Escalated to `active` state, appears in Signal Feed |
-| 5 | Every 60 sec | `active-mode-poll` refreshes prices, recalculates edge |
-| 6 | If tradeable | Signal shown with BET/STRONG_BET recommendation |
+In `watch-mode-poll`, after attempting to match:
+1. Log any Polymarket games that have NO bookmaker match
+2. Flag these in a new table `unmatched_games_queue`
+3. Trigger backup scraping for these specific games
 
-## Current Limitations
+```
+Files to Create:
+- supabase/migrations/add_unmatched_games_table.sql
 
-There are two gaps in the current implementation:
+Files to Modify:
+- supabase/functions/watch-mode-poll/index.ts
+```
 
-### 1. Missing Token IDs (Token Gate)
+## Quick Win Option
 
-Markets imported via batch import do **NOT** have `token_id_yes` and `token_id_no` populated. This means:
-- The market is marked as `tradeable = true` based on price (non-zero)
-- But the **Token Gate** in `active-mode-poll` will fail to refresh CLOB prices
-- The signal may be marked `untradeable_reason = 'unverified_polymarket_price'`
+If you want faster results without building the full multi-source system, we can:
 
-**Solution needed**: Either:
-- A) Skip the token gate for `source = 'batch_import'` markets (trust your manual prices)
-- B) Add a token repair step that searches CLOB API by team names after batch import
-- C) Accept that batch-imported markets won't have real-time CLOB refresh (use your pasted prices as-is)
+**Option A: Increase The Odds API Horizon**
+- Current: 48 hours
+- Sometimes games appear closer to start time
+- May not help if they never add certain games
 
-### 2. Synthetic Condition IDs
+**Option B: Add BallDontLie API for Schedule**
+- Free, no API key required
+- Confirms which games exist
+- We can then flag when Odds API is missing coverage
 
-Batch imports use synthetic condition IDs: `batch_nba_detroit_pistons|new_york_knicks_2026-02-05`
+**Option C: Use Covers.com Scraping (Firecrawl)**
+- You already have Firecrawl configured
+- Covers.com shows ALL NBA games with odds
+- Fastest path to 100% coverage
 
-These don't map to real Polymarket markets. When a real sync happens later, we might create duplicates.
+## Recommended Approach
 
-**Solution needed**: Before creating, search for existing market by `team_home_normalized + team_away_normalized + event_date` (already implemented in the edge function).
-
-## Recommended Next Steps
-
-1. **Test the full flow**: Import some markets, wait 5 minutes, check if they appear in Pipeline with bookie matches
-
-2. **Add token repair queue**: After batch import, trigger `tokenize-market` function to resolve real token IDs via CLOB Search API
-
-3. **Add link in Terminal header**: Quick access to `/batch-import` when you need the manual fix
-
-4. **Show import source in Pipeline**: Badge "BATCH" on cards that came from batch import vs automated discovery
+I recommend **Option C (Covers.com Scraping)** as the immediate fix because:
+1. You already have Firecrawl working for Polymarket
+2. Covers.com has comprehensive odds coverage
+3. We can implement it in one edge function
+4. Falls back gracefully when The Odds API has data
 
 ## Technical Details
 
-### Edge Function: `batch-market-import`
+### Covers.com Scraping Strategy
 
+```typescript
+// Target URL: https://www.covers.com/sport/basketball/nba/matchups
+
+// Expected data structure:
+interface CoversGame {
+  homeTeam: string;
+  awayTeam: string;
+  gameTime: string;
+  spread: { home: number; away: number };
+  moneyline: { home: number; away: number };
+  total: { over: number; under: number };
+  consensus: { homePercent: number; awayPercent: number };
+}
 ```
-POST /functions/v1/batch-market-import
-Body: { markets: [...] }
 
-For each market:
-├─ getSportCodeFromLeague(sport) → 'nba'
-├─ resolveTeamName(homeTeam, 'nba', teamMap) → canonical name
-├─ teamId(canonical) → normalized slug
-├─ makeTeamSetKey(homeId, awayId) → order-independent key
-├─ Check existing by normalized teams + date
-├─ INSERT or UPDATE polymarket_h2h_cache
-└─ Build bookie index → check for immediate matches
+### Integration with Existing System
+
+The scraped data would be converted to `bookmaker_signals` format:
+
+```typescript
+// Convert Covers moneyline to implied probability
+const impliedProb = moneyline > 0 
+  ? 100 / (moneyline + 100) 
+  : Math.abs(moneyline) / (Math.abs(moneyline) + 100);
+
+// Insert into bookmaker_signals with source marker
+await supabase.from('bookmaker_signals').insert({
+  event_name: `${homeTeam} vs ${awayTeam}`,
+  market_type: 'h2h',
+  outcome: homeTeam,
+  bookmaker: 'covers_consensus',
+  odds: americanToDecimal(moneyline),
+  implied_probability: impliedProb,
+  is_sharp_book: false, // Consensus, not individual sharp book
+  commence_time: gameTime,
+});
 ```
 
-### Files Involved
+### Database Changes
 
-| File | Purpose |
-|------|---------|
-| `supabase/functions/batch-market-import/index.ts` | Edge function handling import |
-| `supabase/functions/_shared/canonicalize.ts` | Team name resolution utilities |
-| `supabase/functions/_shared/sports-config.ts` | Team maps for NBA, NHL, NFL, etc. |
-| `supabase/functions/watch-mode-poll/index.ts` | Picks up markets, matches to bookies |
-| `src/pages/BatchImport.tsx` | Frontend UI |
-| `src/lib/batch-parser.ts` | JSON/text parsing logic |
+```sql
+-- Add source column to track data origin
+ALTER TABLE bookmaker_signals 
+ADD COLUMN IF NOT EXISTS source text DEFAULT 'odds_api';
+
+-- Add index for faster source filtering
+CREATE INDEX IF NOT EXISTS idx_bookmaker_signals_source 
+ON bookmaker_signals(source);
+```
+
+## Summary
+
+| Phase | Effort | Impact | Timeline |
+|-------|--------|--------|----------|
+| 1. ESPN Schedule Verify | Low | Medium | 1 hour |
+| 2. Covers.com Scraping | Medium | High | 2-3 hours |
+| 3. Merge Sources | Medium | High | 1-2 hours |
+| 4. Missing Game Detection | Low | Medium | 1 hour |
+
+**Total estimated implementation time: 5-7 hours**
+
+The Covers.com scraping alone (Phase 2) would immediately solve your coverage gap and can be implemented first as a standalone fix.
 
