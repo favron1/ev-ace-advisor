@@ -1,193 +1,202 @@
 
 
-# Fix Bookmaker Data Coverage: Multi-Source Strategy
+# Close the Team Mapping Loop
 
-## Problem Identified
+## Problem
 
-Your Polymarket games for Feb 6th are **100% valid NBA matchups**, but The Odds API is NOT returning odds for them:
+The `team_mappings` table and UI exist, but the matching engine doesn't use them. When you manually map "Wizards" → "Washington Wizards", that mapping is stored but ignored during the next batch import.
 
-| Your Polymarket Games (Feb 6) | What The Odds API Has (Feb 6) |
-|-------------------------------|-------------------------------|
-| Knicks vs Pistons ❌ | Pistons vs Wizards |
-| Heat vs Celtics ❌ | Magic vs Nets |
-| Pacers vs Bucks ❌ | Hawks vs Jazz |
-| Pelicans vs Timberwolves ❌ | Raptors vs Bulls |
-| Grizzlies vs Trail Blazers ❌ | Rockets vs Hornets |
-| Clippers vs Kings ❌ | Mavericks vs Spurs |
-
-**Root Cause**: The Odds API has incomplete NBA game coverage. They're only returning ~6 of the 12+ NBA games scheduled for that day.
-
-## Solution: Multi-Source Bookmaker Data
-
-We'll implement redundant data sources to ensure full game coverage:
+## Current Architecture (Broken Loop)
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                     BOOKMAKER DATA SOURCES                              │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  PRIMARY: The Odds API                                                  │
-│  ├── Coverage: ~60-70% of NBA games                                     │
-│  ├── Updates: Real-time                                                 │
-│  └── Books: Pinnacle, Betfair, DraftKings, etc.                        │
-│                                                                         │
-│  BACKUP: ESPN/Covers.com Scrape (NEW)                                   │
-│  ├── Coverage: 100% of NBA schedule                                     │
-│  ├── Updates: Periodic (every 30 min)                                   │
-│  └── Data: Consensus lines, opening lines                               │
-│                                                                         │
-│  FALLBACK: BallDontLie API (FREE)                                       │
-│  ├── Coverage: 100% NBA schedule                                        │
-│  ├── Updates: Daily                                                     │
-│  └── Data: Game times, matchups (no odds, but confirms games exist)    │
-│                                                                         │
+│  MATCH FAILURE                                                          │
+│  "Wiz" not found                                                        │
+└───────────────┬─────────────────────────────────────────────────────────┘
+                │
+                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Logged to match_failures table                                         │
+│  Shows in Unmatched Teams Panel                                         │
+└───────────────┬─────────────────────────────────────────────────────────┘
+                │
+                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  YOU: Map "Wiz" → "Washington Wizards"                                  │
+│  Saved to team_mappings table ✓                                         │
+└───────────────┬─────────────────────────────────────────────────────────┘
+                │
+                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  NEXT IMPORT: System tries to match "Wiz"...                            │
+│  Still fails! ❌ team_mappings is never queried                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Implementation Plan
+## Solution: Complete the Self-Healing Loop
 
-### Phase 1: Add ESPN Schedule Verification
+Modify `resolveTeamName()` in `canonicalize.ts` to query `team_mappings` table FIRST, before falling back to the hardcoded `teamMap`.
 
-Create a new edge function `verify-nba-schedule` that:
-1. Fetches the full NBA schedule from a free source (ESPN API or BallDontLie)
-2. Compares against The Odds API results
-3. Logs any **missing games** for debugging
-4. Stores verified game schedule to cross-reference during matching
+### New Resolution Order
 
-```
-Files to Create:
-- supabase/functions/verify-nba-schedule/index.ts
-```
+1. **Check `team_mappings` table** (user-curated, highest priority)
+2. **Check hardcoded `teamMap`** (abbreviations like "nyr", "lak")
+3. **Nickname match** (last word matches)
+4. **City match** (first word matches)
+5. **Substring containment** (e.g., "Canadiens")
 
-### Phase 2: Add Covers.com Scraping (Full Odds Coverage)
+### Implementation Plan
 
-Create `scrape-covers-odds` edge function that uses Firecrawl to scrape:
-- Covers.com/sports/nba/matchups (has all games + consensus odds)
-- Alternative: Action Network or Oddschecker
+#### Phase 1: Create Helper Function to Fetch Mappings
 
-```
-Files to Create:
-- supabase/functions/scrape-covers-odds/index.ts
-```
+Create a new shared utility that queries `team_mappings` and builds a lookup cache.
 
-### Phase 3: Merge Multiple Sources in Ingest Pipeline
-
-Update `ingest-odds` to:
-1. First try The Odds API (primary, most accurate)
-2. For any games NOT found, fallback to scraped data
-3. Mark source in bookmaker_signals: `source = 'odds_api' | 'covers_scrape'`
-
-```
-Files to Modify:
-- supabase/functions/ingest-odds/index.ts
-```
-
-### Phase 4: Add Missing Game Detection
-
-In `watch-mode-poll`, after attempting to match:
-1. Log any Polymarket games that have NO bookmaker match
-2. Flag these in a new table `unmatched_games_queue`
-3. Trigger backup scraping for these specific games
-
-```
-Files to Create:
-- supabase/migrations/add_unmatched_games_table.sql
-
-Files to Modify:
-- supabase/functions/watch-mode-poll/index.ts
-```
-
-## Quick Win Option
-
-If you want faster results without building the full multi-source system, we can:
-
-**Option A: Increase The Odds API Horizon**
-- Current: 48 hours
-- Sometimes games appear closer to start time
-- May not help if they never add certain games
-
-**Option B: Add BallDontLie API for Schedule**
-- Free, no API key required
-- Confirms which games exist
-- We can then flag when Odds API is missing coverage
-
-**Option C: Use Covers.com Scraping (Firecrawl)**
-- You already have Firecrawl configured
-- Covers.com shows ALL NBA games with odds
-- Fastest path to 100% coverage
-
-## Recommended Approach
-
-I recommend **Option C (Covers.com Scraping)** as the immediate fix because:
-1. You already have Firecrawl working for Polymarket
-2. Covers.com has comprehensive odds coverage
-3. We can implement it in one edge function
-4. Falls back gracefully when The Odds API has data
-
-## Technical Details
-
-### Covers.com Scraping Strategy
+File: `supabase/functions/_shared/team-mapping-cache.ts`
 
 ```typescript
-// Target URL: https://www.covers.com/sport/basketball/nba/matchups
+// Fetch user-defined team mappings from database
+// Cache for 5 minutes to avoid repeated queries
 
-// Expected data structure:
-interface CoversGame {
-  homeTeam: string;
-  awayTeam: string;
-  gameTime: string;
-  spread: { home: number; away: number };
-  moneyline: { home: number; away: number };
-  total: { over: number; under: number };
-  consensus: { homePercent: number; awayPercent: number };
+interface CachedMappings {
+  data: Map<string, string>;  // source_name → canonical_name
+  fetchedAt: number;
+}
+
+let cache: CachedMappings | null = null;
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+export async function getTeamMappings(
+  supabase: any, 
+  sportCode: string
+): Promise<Map<string, string>> {
+  // Check cache
+  if (cache && Date.now() - cache.fetchedAt < CACHE_TTL_MS) {
+    return cache.data;
+  }
+
+  // Fetch from database
+  const { data } = await supabase
+    .from('team_mappings')
+    .select('source_name, canonical_name')
+    .eq('sport_code', sportCode);
+
+  const map = new Map<string, string>();
+  for (const row of data || []) {
+    map.set(row.source_name.toLowerCase(), row.canonical_name);
+  }
+
+  cache = { data: map, fetchedAt: Date.now() };
+  return map;
 }
 ```
 
-### Integration with Existing System
+#### Phase 2: Modify canonicalize.ts
 
-The scraped data would be converted to `bookmaker_signals` format:
+Update `resolveTeamName()` to accept an optional `userMappings` parameter that takes precedence.
 
 ```typescript
-// Convert Covers moneyline to implied probability
-const impliedProb = moneyline > 0 
-  ? 100 / (moneyline + 100) 
-  : Math.abs(moneyline) / (Math.abs(moneyline) + 100);
+export function resolveTeamName(
+  rawName: string,
+  sportCode: SportCode | string,
+  teamMap?: Record<string, string>,
+  userMappings?: Map<string, string>  // NEW: from team_mappings table
+): string | null {
+  const rawNorm = normalizeRaw(rawName);
 
-// Insert into bookmaker_signals with source marker
-await supabase.from('bookmaker_signals').insert({
-  event_name: `${homeTeam} vs ${awayTeam}`,
-  market_type: 'h2h',
-  outcome: homeTeam,
-  bookmaker: 'covers_consensus',
-  odds: americanToDecimal(moneyline),
-  implied_probability: impliedProb,
-  is_sharp_book: false, // Consensus, not individual sharp book
-  commence_time: gameTime,
-});
+  // Step 0 (NEW): Check user-defined mappings first
+  if (userMappings?.has(rawNorm)) {
+    return userMappings.get(rawNorm)!;
+  }
+
+  // ... rest of existing logic
+}
 ```
 
-### Database Changes
+#### Phase 3: Update watch-mode-poll
+
+Before matching, fetch user mappings and pass to resolution function.
+
+```typescript
+import { getTeamMappings } from '../_shared/team-mapping-cache.ts';
+
+// In the main handler:
+const userMappings = await getTeamMappings(supabase, sportCode);
+
+// Pass to matching function
+const resolved = resolveTeamName(rawTeam, sportCode, teamMap, userMappings);
+```
+
+#### Phase 4: Update batch-market-import
+
+Same pattern - fetch user mappings before processing.
+
+### Database Change (Optional Enhancement)
+
+Add a unique constraint to prevent duplicate mappings:
 
 ```sql
--- Add source column to track data origin
-ALTER TABLE bookmaker_signals 
-ADD COLUMN IF NOT EXISTS source text DEFAULT 'odds_api';
-
--- Add index for faster source filtering
-CREATE INDEX IF NOT EXISTS idx_bookmaker_signals_source 
-ON bookmaker_signals(source);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_team_mappings_unique 
+ON team_mappings(LOWER(source_name), sport_code);
 ```
+
+## Why This Is Better Than ML
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **Lookup Table (This Plan)** | Instant, deterministic, you control mappings, no API costs | Requires initial data entry |
+| **ML/Embedding Matching** | Auto-discovers some mappings | Slow, expensive, prone to errors, needs training data, overkill |
+
+You already have the data (you know what teams are called). ML adds latency and uncertainty for no benefit.
+
+## Self-Healing Flow (After Fix)
+
+```text
+┌─────────────────────────────────────────────────────────────────────────┐
+│  MATCH FAILURE: "Wiz" not found                                         │
+└───────────────┬─────────────────────────────────────────────────────────┘
+                │
+                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Logged to match_failures → Shows in UI                                 │
+└───────────────┬─────────────────────────────────────────────────────────┘
+                │
+                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  YOU: Map "Wiz" → "Washington Wizards"                                  │
+│  Saved to team_mappings ✓                                               │
+└───────────────┬─────────────────────────────────────────────────────────┘
+                │
+                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  NEXT IMPORT: Queries team_mappings first                               │
+│  Finds "wiz" → "Washington Wizards" ✓                                   │
+│  Match succeeds! Bookmaker data attached!                               │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Files to Modify
+
+| File | Change |
+|------|--------|
+| `supabase/functions/_shared/team-mapping-cache.ts` | **Create** - Cache layer for team_mappings queries |
+| `supabase/functions/_shared/canonicalize.ts` | **Modify** - Add userMappings parameter to resolveTeamName |
+| `supabase/functions/watch-mode-poll/index.ts` | **Modify** - Fetch and pass user mappings |
+| `supabase/functions/batch-market-import/index.ts` | **Modify** - Fetch and pass user mappings |
+| `supabase/migrations/xxx.sql` | **Create** - Add unique constraint to team_mappings |
+
+## Bonus: Pre-Populate Common Aliases
+
+Once this is working, I can help you bulk-import common team aliases into `team_mappings` so you don't have to manually add each one:
+
+- "Wiz" → "Washington Wizards"
+- "Clips" → "LA Clippers"
+- "Dubs" → "Golden State Warriors"
+- etc.
 
 ## Summary
 
-| Phase | Effort | Impact | Timeline |
-|-------|--------|--------|----------|
-| 1. ESPN Schedule Verify | Low | Medium | 1 hour |
-| 2. Covers.com Scraping | Medium | High | 2-3 hours |
-| 3. Merge Sources | Medium | High | 1-2 hours |
-| 4. Missing Game Detection | Low | Medium | 1 hour |
-
-**Total estimated implementation time: 5-7 hours**
-
-The Covers.com scraping alone (Phase 2) would immediately solve your coverage gap and can be implemented first as a standalone fix.
+- **Not ML** - Simple database lookup (faster, more reliable)
+- **Closes the loop** - Your manual mappings will actually work
+- **Self-healing** - Every mapping you add improves future matching
+- **5 files** - Minimal changes to existing architecture
 
