@@ -1234,12 +1234,11 @@ Deno.serve(async (req) => {
       .eq('status', 'active')
       .eq('market_type', 'h2h') // CRITICAL: Only H2H markets to match H2H bookmaker odds
       .in('extracted_league', supportedSports)
-      .or('source.is.null,source.eq.api')
-      .gte('volume', 5000) // Volume filter only for API-sourced markets
+      .or('source.is.null,source.eq.api,source.eq.clob_verified') // Include clob_verified markets!
       .gte('event_date', now.toISOString()) // Only future events
       .lte('event_date', in24Hours.toISOString()) // Within 24 hours
       .order('event_date', { ascending: true })
-      .limit(150);
+      .limit(200);
 
     // Second, load Firecrawl-sourced H2H markets WITHOUT volume filter + 24h window
     const { data: firecrawlMarkets, error: fcLoadError } = await supabase
