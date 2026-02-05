@@ -30,7 +30,7 @@
    failed: number;
    noLiquidity: number;
    bookieMatches: number;
-   details: Array<{ market: string; status: string; error?: string }>;
+  details: Array<{ market: string; status: string; error?: string; conditionId?: string }>;
  }
  
  Deno.serve(async (req) => {
@@ -103,23 +103,37 @@
          // Build event title (away @ home format for consistency)
          const eventTitle = `${awayResolved || market.awayTeam} vs ${homeResolved || market.homeTeam}`;
  
-         // Check if market already exists (by team names + date)
+      // Check if market already exists - prioritize REAL Polymarket entries (source != batch_import)
+      // Look for any matching market by normalized team names
          const { data: existing } = await supabase
            .from('polymarket_h2h_cache')
-           .select('id, condition_id')
+        .select('id, condition_id, source')
            .or(`and(team_home_normalized.eq.${homeId},team_away_normalized.eq.${awayId}),and(team_home_normalized.eq.${awayId},team_away_normalized.eq.${homeId})`)
-           .eq('event_date', today)
-           .limit(1);
+        .order('source', { ascending: true }) // Real sources (api, clob, firecrawl) come before 'batch_import'
+        .limit(5);
  
-         const existingMarket = existing?.[0];
+      // Prefer real Polymarket entry over batch-created ones
+      const realMarket = existing?.find(m => m.source !== 'batch_import');
+      const existingMarket = realMarket || existing?.[0];
  
          // Prepare upsert data
          const now = new Date().toISOString();
-         const upsertData = {
-           event_title: eventTitle,
-           question: `Will ${homeResolved || market.homeTeam} win?`,
+      
+      // For existing real markets, only update prices - preserve condition_id and other metadata
+      const priceUpdateData = {
            yes_price: market.homePrice,  // Home team = YES
            no_price: market.awayPrice,   // Away team = NO
+        last_price_update: now,
+        monitoring_status: 'watching',
+        tradeable: !noLiquidity,
+        untradeable_reason: noLiquidity ? 'NO_LIQUIDITY' : null,
+      };
+      
+      // Full data for new entries
+      const fullUpsertData = {
+        event_title: eventTitle,
+        question: `Will ${homeResolved || market.homeTeam} win?`,
+        ...priceUpdateData,
            team_home: homeResolved || market.homeTeam,
            team_away: awayResolved || market.awayTeam,
            team_home_normalized: homeId,
@@ -129,29 +143,32 @@
            market_type: 'h2h',
            event_date: today,
            source: 'batch_import',
-           last_price_update: now,
-           tradeable: !noLiquidity,
-           untradeable_reason: noLiquidity ? 'NO_LIQUIDITY' : null,
-           monitoring_status: 'active',
          };
  
          if (existingMarket) {
-           // Update existing
+        // Update existing - for real markets, only update prices; preserve their condition_id
+        const isRealMarket = existingMarket.source !== 'batch_import';
            const { error } = await supabase
              .from('polymarket_h2h_cache')
-             .update(upsertData)
+          .update(isRealMarket ? priceUpdateData : fullUpsertData)
              .eq('id', existingMarket.id);
  
            if (error) throw error;
            result.updated++;
-           result.details.push({ market: marketLabel, status: 'updated' });
+        result.details.push({ 
+          market: marketLabel, 
+          status: isRealMarket ? 'updated_real' : 'updated',
+          conditionId: existingMarket.condition_id 
+        });
+        
+        console.log(`[batch-import] Updated ${isRealMarket ? 'REAL' : 'batch'} market: ${marketLabel} (${existingMarket.condition_id}) -> YES=${market.homePrice}`);
          } else {
            // Create new with synthetic condition_id
            const syntheticConditionId = `batch_${sportCode}_${teamSetKey}_${today}`;
            const { error } = await supabase
              .from('polymarket_h2h_cache')
              .insert({
-               ...upsertData,
+            ...fullUpsertData,
                condition_id: syntheticConditionId,
                created_at: now,
              });
