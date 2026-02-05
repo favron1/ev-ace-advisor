@@ -1054,7 +1054,7 @@ Deno.serve(async (req) => {
         const matchedTime = findOddsApiCommenceTime(teamHome, teamAway);
         if (matchedTime) {
           bookmakerCommenceTime = matchedTime.toISOString();
-          console.log(`[POLY-SYNC-24H] Gamma → Bookmaker time: ${title} → ${bookmakerCommenceTime}`);
+          // Removed per-market logging to prevent timeout - tracked via summary stats
         }
       }
       
