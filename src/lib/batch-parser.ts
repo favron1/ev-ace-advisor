@@ -1,8 +1,8 @@
  // ============================================================================
  // BATCH IMPORT PARSER
  // ============================================================================
- // Parses structured morning market data from Polymarket UI text.
- // Format: Sport headers, times, "Team A vs Team B", and "Team: XXc" prices
+// Parses structured market data from JSON or Polymarket UI text.
+// JSON format preferred for reliability.
  // ============================================================================
  
  export interface ParsedMarket {
@@ -26,6 +26,17 @@
    };
  }
  
+// JSON input format
+interface JsonMarketInput {
+  sport: string;
+  gameTime: string;
+  homeTeam: string;
+  awayTeam: string;
+  homePriceCents: number;
+  awayPriceCents: number;
+  notes?: string[];
+}
+
  // Patterns for parsing
  const SPORT_HEADER_PATTERN = /^[^a-z]*(?:🏒|🏀|🏈|⚽)?\s*(NHL|NBA|NFL|NCAA|EPL|UCL|La Liga|Serie A|Bundesliga)\s*[-–—]?\s*Head-to-Head/i;
  const TIME_PATTERN = /^(\d{1,2}:\d{2}\s*(?:AM|PM))$/i;
@@ -51,9 +62,76 @@
  }
  
  /**
-  * Parse the batch import text into structured market data
+ * Detect if input is JSON array
+ */
+function isJsonInput(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.startsWith('[') && trimmed.endsWith(']');
+}
+
+/**
+ * Parse JSON format input
+ */
+function parseJsonInput(text: string): ParseResult {
+  const markets: ParsedMarket[] = [];
+  const errors: string[] = [];
+  
+  try {
+    const data = JSON.parse(text) as JsonMarketInput[];
+    
+    if (!Array.isArray(data)) {
+      errors.push('Input must be a JSON array');
+      return { markets, errors, summary: { total: 0, parsed: 0, failed: 1 } };
+    }
+    
+    for (let i = 0; i < data.length; i++) {
+      const item = data[i];
+      
+      // Validate required fields
+      if (!item.sport || !item.homeTeam || !item.awayTeam) {
+        errors.push(`Item ${i + 1}: Missing required fields (sport, homeTeam, awayTeam)`);
+        continue;
+      }
+      
+      // Convert cents to decimal
+      const homePrice = typeof item.homePriceCents === 'number' ? item.homePriceCents / 100 : 0;
+      const awayPrice = typeof item.awayPriceCents === 'number' ? item.awayPriceCents / 100 : 0;
+      
+      markets.push({
+        sport: item.sport.toUpperCase(),
+        gameTime: item.gameTime || '',
+        homeTeam: item.homeTeam,
+        awayTeam: item.awayTeam,
+        homePrice,
+        awayPrice,
+        rawText: `${item.awayTeam} @ ${item.homeTeam}`,
+      });
+    }
+  } catch (e) {
+    errors.push(`JSON parse error: ${e instanceof Error ? e.message : 'Invalid JSON'}`);
+  }
+  
+  return {
+    markets,
+    errors,
+    summary: {
+      total: markets.length + errors.length,
+      parsed: markets.length,
+      failed: errors.length,
+    },
+  };
+}
+
+/**
+ * Parse the batch import text into structured market data (JSON or text format)
   */
  export function parseBatchImport(text: string): ParseResult {
+  // Detect JSON format
+  if (isJsonInput(text)) {
+    return parseJsonInput(text);
+  }
+  
+  // Fall back to text format parsing
    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
    const markets: ParsedMarket[] = [];
    const errors: string[] = [];
