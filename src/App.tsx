@@ -10,6 +10,7 @@ import Stats from "./pages/Stats";
 import CoreLogic from "./pages/CoreLogic";
 import ManualEntry from "./pages/ManualEntry";
 import Pipeline from "./pages/Pipeline";
+ import BatchImport from "./pages/BatchImport";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -24,6 +25,7 @@ function AppRoutes() {
       <Route path="/core-logic" element={<CoreLogic />} />
       <Route path="/manual-entry" element={<ManualEntry />} />
       <Route path="/pipeline" element={<Pipeline />} />
+       <Route path="/batch-import" element={<BatchImport />} />
       <Route path="*" element={<NotFound />} />
     </Routes>
   );
