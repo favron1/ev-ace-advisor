@@ -267,40 +267,43 @@ type BookieIndexEntry = {
            result.details.push({ market: marketLabel, status: 'created' });
          }
  
-         // Check for bookmaker match
-         const lookupKey = `${market.sport.toUpperCase()}|${teamSetKey}`;
-        const bookie = bookieIndex.get(lookupKey);
-        if (bookie) {
-          result.bookieMatches++;
+          // Check for bookmaker match
+          const lookupKey = `${market.sport.toUpperCase()}|${teamSetKey}`;
+         const bookie = bookieIndex.get(lookupKey);
+         
+         // Always upsert into event_watch_state so markets appear in Pipeline
+         const eventKey = `poly_${existingMarket?.condition_id || `batch_${sportCode}_${teamSetKey}_${today}`}`;
+         const condition = existingMarket?.condition_id || `batch_${sportCode}_${teamSetKey}_${today}`;
+         
+         const watchStateData: Record<string, unknown> = {
+           event_key: eventKey,
+           event_name: eventTitle,
+           watch_state: 'monitored',
+           commence_time: market.gameTime || null,
+           polymarket_condition_id: condition,
+           polymarket_question: `Will ${homeResolved || market.homeTeam} win?`,
+           polymarket_yes_price: market.homePrice,
+           polymarket_price: market.homePrice,
+           polymarket_volume: null,
+           polymarket_matched: !!bookie,
+           source: 'batch_import',
+           updated_at: new Date().toISOString(),
+         };
 
-          // Attach bookmaker fair prob to event_watch_state immediately so Pipeline always shows Book: %
-          // We map "book" to the HOME team fair probability (same as watch-mode-poll's matchedTeam)
-          const homeFair = bookie.fairProbByTeamId[homeId];
-          if (typeof homeFair === 'number' && !Number.isNaN(homeFair)) {
-            const eventKey = `poly_${existingMarket?.condition_id || `batch_${sportCode}_${teamSetKey}_${today}`}`;
-            const condition = existingMarket?.condition_id || `batch_${sportCode}_${teamSetKey}_${today}`;
-            const commence = bookie.commence_time || market.gameTime || null;
+         if (bookie) {
+           result.bookieMatches++;
+           const homeFair = bookie.fairProbByTeamId[homeId];
+           if (typeof homeFair === 'number' && !Number.isNaN(homeFair)) {
+             watchStateData.current_probability = homeFair;
+             watchStateData.bookmaker_market_key = homeResolved || market.homeTeam;
+             watchStateData.bookmaker_source = sportCode;
+             watchStateData.commence_time = bookie.commence_time || market.gameTime || null;
+           }
+         }
 
-            await supabase
-              .from('event_watch_state')
-              .upsert({
-                event_key: eventKey,
-                event_name: eventTitle,
-                watch_state: 'monitored',
-                commence_time: commence,
-                polymarket_condition_id: condition,
-                polymarket_question: eventTitle,
-                polymarket_yes_price: market.homePrice,
-                polymarket_volume: null,
-                bookmaker_market_key: homeResolved || market.homeTeam,
-                bookmaker_source: sportCode,
-                // Don't overwrite initial_probability if it already exists
-                current_probability: homeFair,
-                polymarket_matched: true,
-                updated_at: new Date().toISOString(),
-              }, { onConflict: 'event_key' });
-          }
-        }
+         await supabase
+           .from('event_watch_state')
+           .upsert(watchStateData, { onConflict: 'event_key' });
  
        } catch (err) {
          console.error(`[batch-import] Failed to process ${marketLabel}:`, err);
