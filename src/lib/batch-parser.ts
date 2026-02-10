@@ -26,7 +26,7 @@
    };
  }
  
-// JSON input format
+// JSON input format (flat)
 interface JsonMarketInput {
   sport: string;
   gameTime: string;
@@ -35,6 +35,19 @@ interface JsonMarketInput {
   homePriceCents: number;
   awayPriceCents: number;
   notes?: string[];
+}
+
+// Nested JSON format (league wrapper with markets array)
+interface NestedJsonInput {
+  league: string;
+  date?: string;
+  markets: Array<{
+    start_time?: string;
+    away_team: string;
+    home_team: string;
+    prices: { away: number; home: number };
+    volume_usd?: number;
+  }>;
 }
 
  // Patterns for parsing
@@ -65,10 +78,9 @@ interface JsonMarketInput {
  * Try to parse as JSON (array or single object)
  * Returns null if not valid JSON
  */
-function tryParseJson(text: string): JsonMarketInput[] | null {
+function tryParseJson(text: string): { type: 'flat'; data: JsonMarketInput[] } | { type: 'nested'; data: NestedJsonInput } | null {
   const trimmed = text.trim();
   
-  // Quick check - must start with [ or {
   if (!trimmed.startsWith('[') && !trimmed.startsWith('{')) {
     return null;
   }
@@ -76,14 +88,19 @@ function tryParseJson(text: string): JsonMarketInput[] | null {
   try {
     const parsed = JSON.parse(trimmed);
     
-    // Handle single object - wrap in array
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return [parsed as JsonMarketInput];
+    // Check for nested format (has "league" + "markets" array)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.markets && Array.isArray(parsed.markets)) {
+      return { type: 'nested', data: parsed as NestedJsonInput };
     }
     
-    // Handle array
+    // Handle single flat object
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return { type: 'flat', data: [parsed as JsonMarketInput] };
+    }
+    
+    // Handle array of flat objects
     if (Array.isArray(parsed)) {
-      return parsed as JsonMarketInput[];
+      return { type: 'flat', data: parsed as JsonMarketInput[] };
     }
     
     return null;
@@ -102,13 +119,11 @@ function parseJsonData(data: JsonMarketInput[]): ParseResult {
   for (let i = 0; i < data.length; i++) {
     const item = data[i];
     
-    // Validate required fields
     if (!item.sport || !item.homeTeam || !item.awayTeam) {
       errors.push(`Item ${i + 1}: Missing required fields (sport, homeTeam, awayTeam)`);
       continue;
     }
     
-    // Convert cents to decimal
     const homePrice = typeof item.homePriceCents === 'number' ? item.homePriceCents / 100 : 0;
     const awayPrice = typeof item.awayPriceCents === 'number' ? item.awayPriceCents / 100 : 0;
     
@@ -123,25 +138,51 @@ function parseJsonData(data: JsonMarketInput[]): ParseResult {
     });
   }
   
-  return {
-    markets,
-    errors,
-    summary: {
-      total: markets.length + errors.length,
-      parsed: markets.length,
-      failed: errors.length,
-    },
-  };
+  return { markets, errors, summary: { total: markets.length + errors.length, parsed: markets.length, failed: errors.length } };
+}
+
+/**
+ * Parse nested JSON format (league wrapper with markets array)
+ */
+function parseNestedJson(data: NestedJsonInput): ParseResult {
+  const markets: ParsedMarket[] = [];
+  const errors: string[] = [];
+  const sport = data.league?.toUpperCase() || '';
+  
+  if (!sport) {
+    return { markets: [], errors: ['Missing "league" field'], summary: { total: 0, parsed: 0, failed: 1 } };
+  }
+  
+  for (let i = 0; i < data.markets.length; i++) {
+    const m = data.markets[i];
+    
+    if (!m.home_team || !m.away_team) {
+      errors.push(`Market ${i + 1}: Missing home_team or away_team`);
+      continue;
+    }
+    
+    markets.push({
+      sport,
+      gameTime: m.start_time || '',
+      homeTeam: m.home_team,
+      awayTeam: m.away_team,
+      homePrice: m.prices?.home ?? 0,
+      awayPrice: m.prices?.away ?? 0,
+      rawText: `${m.away_team} @ ${m.home_team}`,
+    });
+  }
+  
+  return { markets, errors, summary: { total: markets.length + errors.length, parsed: markets.length, failed: errors.length } };
 }
 
 /**
  * Parse the batch import text into structured market data (JSON or text format)
   */
  export function parseBatchImport(text: string): ParseResult {
-  // Try JSON format first
   const jsonData = tryParseJson(text);
   if (jsonData !== null) {
-    return parseJsonData(jsonData);
+    if (jsonData.type === 'nested') return parseNestedJson(jsonData.data);
+    return parseJsonData(jsonData.data);
   }
   
   // Fall back to text format parsing
