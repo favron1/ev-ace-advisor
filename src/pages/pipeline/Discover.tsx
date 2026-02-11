@@ -83,6 +83,23 @@ export default function Discover() {
 
   const formatPrice = (v: number | null) => v != null ? `${(v * 100).toFixed(0)}¢` : '—';
 
+  const formatLeague = (source: string | null) => {
+    if (!source) return '';
+    const map: Record<string, string> = {
+      'basketball_nba': 'NBA',
+      'icehockey_nhl': 'NHL',
+      'americanfootball_nfl': 'NFL',
+      'baseball_mlb': 'MLB',
+      'soccer_epl': 'EPL',
+      'soccer_spain_la_liga': 'La Liga',
+      'soccer_germany_bundesliga': 'Bundesliga',
+      'soccer_italy_serie_a': 'Serie A',
+      'soccer_uefa_champs_league': 'UCL',
+      'basketball_ncaab': 'NCAAB',
+    };
+    return map[source] || source.replace(/_/g, ' ').toUpperCase();
+  };
+
   return (
     <div className="min-h-screen bg-background">
       <Header />
@@ -210,9 +227,14 @@ export default function Discover() {
                           />
                         </TableCell>
                         <TableCell className="max-w-[400px] text-sm" title={event.event_name}>
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex items-center gap-1.5 flex-wrap">
                             {event.source === 'batch_import' && (
                               <Badge variant="outline" className="text-[9px] px-1 py-0 bg-warning/10 text-warning border-warning/30">BATCH</Badge>
+                            )}
+                            {event.bookmaker_source && (
+                              <Badge variant="outline" className="text-[9px] px-1 py-0 bg-muted text-muted-foreground border-border">
+                                {formatLeague(event.bookmaker_source)}
+                              </Badge>
                             )}
                             <span className="truncate">{event.event_name}</span>
                             {event.outcome && (
