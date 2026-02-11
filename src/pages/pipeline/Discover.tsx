@@ -338,6 +338,7 @@ export default function Discover() {
                       <TableHead className="text-right">Poly YES</TableHead>
                       <TableHead className="text-right">Book Fair %</TableHead>
                       <TableHead className="text-right">Edge %</TableHead>
+                      <TableHead className="text-right">EV/$100</TableHead>
                       <TableHead className="text-right">Volume</TableHead>
                       <TableHead className="w-8"></TableHead>
                     </TableRow>
@@ -394,6 +395,28 @@ export default function Discover() {
                             const edge = getEdge(event);
                             if (edge == null) return '—';
                             return `${edge >= 0 ? '+' : ''}${edge.toFixed(1)}%`;
+                          })()}
+                        </TableCell>
+                        <TableCell className={cn("text-right font-mono text-sm", (() => {
+                          const edge = getEdge(event);
+                          if (edge == null) return 'text-muted-foreground';
+                          const stake = 100;
+                          const polyPrice = event.polymarket_price || 0;
+                          const fairProb = event.current_probability || 0;
+                          const odds = polyPrice > 0 ? 1 / polyPrice : 0;
+                          const ev = fairProb > 0 && odds > 0 ? (fairProb * (odds - 1) - (1 - fairProb)) * stake : 0;
+                          if (ev > 0) return 'text-green-400';
+                          if (ev < 0) return 'text-red-400';
+                          return 'text-muted-foreground';
+                        })())}>
+                          {(() => {
+                            if (event.current_probability == null || event.polymarket_price == null) return '—';
+                            const stake = 100;
+                            const polyPrice = event.polymarket_price;
+                            const fairProb = event.current_probability;
+                            const odds = polyPrice > 0 ? 1 / polyPrice : 0;
+                            const ev = fairProb > 0 && odds > 0 ? (fairProb * (odds - 1) - (1 - fairProb)) * stake : 0;
+                            return `${ev >= 0 ? '+' : ''}$${ev.toFixed(2)}`;
                           })()}
                         </TableCell>
                         <TableCell className="text-right font-mono text-xs text-muted-foreground">
