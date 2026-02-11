@@ -276,6 +276,22 @@ export const SPORTS_CONFIG: Record<string, SportConfig> = {
       /march madness|college basketball|final four/i,
     ],
   },
+
+  // ATP Tennis
+  tennis: {
+    name: 'ATP',
+    polymarketUrl: 'https://polymarket.com/sports/tennis/games',
+    oddsApiSport: 'tennis_atp_french_open', // placeholder - tennis has per-tournament endpoints
+    oddsApiMarkets: 'h2h',
+    oddsApiOutright: '',
+    teamMap: {},
+    detectionPatterns: [
+      /\batp\b/i,
+      /\bwta\b/i,
+      /\btennis\b/i,
+      /rotterdam open|australian open|french open|wimbledon|us open|indian wells|miami open|monte carlo|madrid open|italian open|cincinnati open|shanghai masters|paris masters|dallas open|argentina open/i,
+    ],
+  },
 };
 
 // ============================================================================
@@ -349,6 +365,9 @@ export function getSportCodeFromLeague(league: string | null): SportCode | null 
   
   // Special case for CBB/NCAA
   if (l === 'CBB') return 'cbb';
+  
+  // Special case for ATP/WTA → tennis
+  if (l === 'ATP' || l === 'WTA') return 'tennis';
   
   return null;
 }
