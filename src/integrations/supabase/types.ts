@@ -165,6 +165,7 @@ export type Database = {
           movement_velocity: number | null
           outcome: string | null
           peak_probability: number | null
+          pipeline_stage: string
           polymarket_condition_id: string | null
           polymarket_market_id: string | null
           polymarket_matched: boolean | null
@@ -196,6 +197,7 @@ export type Database = {
           movement_velocity?: number | null
           outcome?: string | null
           peak_probability?: number | null
+          pipeline_stage?: string
           polymarket_condition_id?: string | null
           polymarket_market_id?: string | null
           polymarket_matched?: boolean | null
@@ -227,6 +229,7 @@ export type Database = {
           movement_velocity?: number | null
           outcome?: string | null
           peak_probability?: number | null
+          pipeline_stage?: string
           polymarket_condition_id?: string | null
           polymarket_market_id?: string | null
           polymarket_matched?: boolean | null

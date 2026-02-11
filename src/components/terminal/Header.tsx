@@ -74,10 +74,7 @@ export function Header({
           <Button variant="ghost" size="icon" onClick={() => navigate('/manual-entry')} title="Manual Entry">
             <PlusCircle className="h-4 w-4" />
           </Button>
-           <Button variant="ghost" size="icon" onClick={() => navigate('/batch-import')} title="Batch Import">
-             <Upload className="h-4 w-4" />
-           </Button>
-          <Button variant="ghost" size="icon" onClick={() => navigate('/pipeline')} title="Pipeline Monitor">
+          <Button variant="ghost" size="icon" onClick={() => navigate('/pipeline/discover')} title="Pipeline">
             <GitBranch className="h-4 w-4" />
           </Button>
           <Button variant="ghost" size="icon" onClick={() => navigate('/core-logic')} title="Core Logic">
