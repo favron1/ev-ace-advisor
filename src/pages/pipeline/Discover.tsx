@@ -19,7 +19,8 @@ import { parseBatchImport, type ParseResult } from '@/lib/batch-parser';
 import { cn } from '@/lib/utils';
 
 type MatchFilter = 'all' | 'matched' | 'unmatched' | 'has_price' | 'no_price';
-type SortField = 'updated' | 'poly_price' | 'book_price' | 'volume' | 'name';
+type EdgeFilter = 'all' | 'positive' | 'above3' | 'above5';
+type SortField = 'updated' | 'poly_price' | 'book_price' | 'volume' | 'name' | 'edge';
 
 export default function Discover() {
   const { events, loading, counts, fetchEvents, getDiscoveryEvents, promoteEvents, dismissEvents } = usePipelineData();
@@ -28,6 +29,7 @@ export default function Discover() {
   const [importing, setImporting] = useState(false);
   const [parseResult, setParseResult] = useState<ParseResult | null>(null);
   const [matchFilter, setMatchFilter] = useState<MatchFilter>('all');
+  const [edgeFilter, setEdgeFilter] = useState<EdgeFilter>('all');
   const [sortField, setSortField] = useState<SortField>('updated');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const { toast } = useToast();
@@ -38,6 +40,11 @@ export default function Discover() {
   const matched = discoveryEvents.filter(e => e.polymarket_matched && e.polymarket_price != null);
   const unmatched = discoveryEvents.filter(e => !e.polymarket_matched || e.polymarket_price == null);
 
+  const getEdge = (e: PipelineEvent) => {
+    if (e.current_probability == null || e.polymarket_price == null) return null;
+    return (e.current_probability - e.polymarket_price) * 100;
+  };
+
   const filteredEvents = useMemo(() => {
     let filtered = discoveryEvents;
     switch (matchFilter) {
@@ -45,6 +52,11 @@ export default function Discover() {
       case 'unmatched': filtered = filtered.filter(e => !e.polymarket_matched); break;
       case 'has_price': filtered = filtered.filter(e => e.polymarket_price != null); break;
       case 'no_price': filtered = filtered.filter(e => e.polymarket_price == null); break;
+    }
+    switch (edgeFilter) {
+      case 'positive': filtered = filtered.filter(e => { const edge = getEdge(e); return edge != null && edge > 0; }); break;
+      case 'above3': filtered = filtered.filter(e => { const edge = getEdge(e); return edge != null && edge >= 3; }); break;
+      case 'above5': filtered = filtered.filter(e => { const edge = getEdge(e); return edge != null && edge >= 5; }); break;
     }
     return [...filtered].sort((a, b) => {
       let aVal: number | string = 0, bVal: number | string = 0;
@@ -54,12 +66,13 @@ export default function Discover() {
         case 'book_price': aVal = a.current_probability ?? -1; bVal = b.current_probability ?? -1; break;
         case 'volume': aVal = a.polymarket_volume ?? -1; bVal = b.polymarket_volume ?? -1; break;
         case 'name': aVal = a.event_name.toLowerCase(); bVal = b.event_name.toLowerCase(); break;
+        case 'edge': aVal = getEdge(a) ?? -999; bVal = getEdge(b) ?? -999; break;
       }
       if (aVal < bVal) return sortDir === 'asc' ? -1 : 1;
       if (aVal > bVal) return sortDir === 'asc' ? 1 : -1;
       return 0;
     });
-  }, [discoveryEvents, matchFilter, sortField, sortDir]);
+  }, [discoveryEvents, matchFilter, edgeFilter, sortField, sortDir]);
 
   const handleSync = async () => {
     setSyncing(true);
@@ -254,8 +267,20 @@ export default function Discover() {
               <SelectItem value="no_price">No Poly Price</SelectItem>
             </SelectContent>
           </Select>
+          <span className="text-xs text-muted-foreground">Edge:</span>
+          <Select value={edgeFilter} onValueChange={(v) => setEdgeFilter(v as EdgeFilter)}>
+            <SelectTrigger className="w-[120px] h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All</SelectItem>
+              <SelectItem value="positive">Edge &gt; 0%</SelectItem>
+              <SelectItem value="above3">Edge ≥ 3%</SelectItem>
+              <SelectItem value="above5">Edge ≥ 5%</SelectItem>
+            </SelectContent>
+          </Select>
           <span className="text-xs text-muted-foreground">Sort:</span>
-          {(['updated', 'poly_price', 'book_price', 'volume', 'name'] as SortField[]).map(field => (
+          {(['updated', 'poly_price', 'book_price', 'volume', 'edge', 'name'] as SortField[]).map(field => (
             <Button
               key={field}
               variant={sortField === field ? 'default' : 'outline'}
@@ -263,7 +288,7 @@ export default function Discover() {
               className="h-7 text-xs"
               onClick={() => toggleSort(field)}
             >
-              {field === 'updated' ? 'Recent' : field === 'poly_price' ? 'Poly' : field === 'book_price' ? 'Book' : field === 'volume' ? 'Volume' : 'Name'}
+              {field === 'updated' ? 'Recent' : field === 'poly_price' ? 'Poly' : field === 'book_price' ? 'Book' : field === 'volume' ? 'Volume' : field === 'edge' ? 'Edge' : 'Name'}
               <SortIcon field={field} />
             </Button>
           ))}
@@ -288,6 +313,7 @@ export default function Discover() {
                       <TableHead>Event</TableHead>
                       <TableHead className="text-right">Poly YES</TableHead>
                       <TableHead className="text-right">Book Fair</TableHead>
+                      <TableHead className="text-right">Edge %</TableHead>
                       <TableHead className="text-right">Volume</TableHead>
                       <TableHead className="w-8"></TableHead>
                     </TableRow>
@@ -322,6 +348,19 @@ export default function Discover() {
                         </TableCell>
                         <TableCell className="text-right font-mono text-sm">{formatPrice(event.polymarket_price)}</TableCell>
                         <TableCell className="text-right font-mono text-sm">{formatPrice(event.current_probability)}</TableCell>
+                        <TableCell className={cn("text-right font-mono text-sm font-bold", (() => {
+                          const edge = getEdge(event);
+                          if (edge == null) return 'text-muted-foreground';
+                          if (edge >= 3) return 'text-green-400';
+                          if (edge >= 1) return 'text-yellow-400';
+                          return 'text-muted-foreground';
+                        })())}>
+                          {(() => {
+                            const edge = getEdge(event);
+                            if (edge == null) return '—';
+                            return `${edge >= 0 ? '+' : ''}${edge.toFixed(1)}%`;
+                          })()}
+                        </TableCell>
                         <TableCell className="text-right font-mono text-xs text-muted-foreground">
                           {event.polymarket_volume ? `$${(event.polymarket_volume / 1000).toFixed(0)}K` : '—'}
                         </TableCell>
