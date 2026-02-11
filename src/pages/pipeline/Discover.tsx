@@ -326,7 +326,7 @@ export default function Discover() {
                       <TableHead>Event</TableHead>
                       <TableHead>Bet Side</TableHead>
                       <TableHead className="text-right">Poly YES</TableHead>
-                      <TableHead className="text-right">Book Fair</TableHead>
+                      <TableHead className="text-right">Book Fair %</TableHead>
                       <TableHead className="text-right">Edge %</TableHead>
                       <TableHead className="text-right">Volume</TableHead>
                       <TableHead className="w-8"></TableHead>
@@ -372,7 +372,7 @@ export default function Discover() {
                           })()}
                         </TableCell>
                         <TableCell className="text-right font-mono text-sm">{formatPrice(event.polymarket_price)}</TableCell>
-                        <TableCell className="text-right font-mono text-sm">{formatPrice(event.current_probability)}</TableCell>
+                        <TableCell className="text-right font-mono text-sm">{event.current_probability != null ? `${(event.current_probability * 100).toFixed(1)}%` : '—'}</TableCell>
                         <TableCell className={cn("text-right font-mono text-sm font-bold", (() => {
                           const edge = getEdge(event);
                           if (edge == null) return 'text-muted-foreground';
