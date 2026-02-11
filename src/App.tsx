@@ -21,7 +21,7 @@ const queryClient = new QueryClient();
 function AppRoutes() {
   return (
     <Routes>
-      <Route path="/" element={<Terminal />} />
+      <Route path="/" element={<Navigate to="/pipeline/discover" replace />} />
       <Route path="/auth" element={<Auth />} />
       <Route path="/settings" element={<Settings />} />
       <Route path="/stats" element={<Stats />} />
