@@ -209,12 +209,17 @@ export default function Discover() {
                             polyMatched={event.polymarket_matched}
                           />
                         </TableCell>
-                        <TableCell className="max-w-[300px] truncate text-sm" title={event.event_name}>
+                        <TableCell className="max-w-[400px] text-sm" title={event.event_name}>
                           <div className="flex items-center gap-1.5">
                             {event.source === 'batch_import' && (
                               <Badge variant="outline" className="text-[9px] px-1 py-0 bg-warning/10 text-warning border-warning/30">BATCH</Badge>
                             )}
-                            {event.event_name}
+                            <span className="truncate">{event.event_name}</span>
+                            {event.outcome && (
+                              <Badge variant="outline" className="text-[9px] px-1 py-0 shrink-0 bg-primary/10 text-primary border-primary/30">
+                                BET {event.outcome.toUpperCase()}
+                              </Badge>
+                            )}
                           </div>
                         </TableCell>
                         <TableCell className="text-right font-mono text-sm">{formatPrice(event.polymarket_yes_price)}</TableCell>
