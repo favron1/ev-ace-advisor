@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '@/integrations/supabase/client';
 import { Header } from '@/components/terminal/Header';
@@ -11,17 +11,25 @@ import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { RefreshCw, Upload, Eye, Loader2, ArrowLeft, Search, Zap } from 'lucide-react';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { RefreshCw, Upload, Eye, Loader2, ArrowLeft, Search, Zap, X, ArrowDown, ArrowUp } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { usePipelineData, type PipelineEvent } from '@/hooks/usePipelineData';
 import { parseBatchImport, type ParseResult } from '@/lib/batch-parser';
+import { cn } from '@/lib/utils';
+
+type MatchFilter = 'all' | 'matched' | 'unmatched' | 'has_price' | 'no_price';
+type SortField = 'updated' | 'poly_price' | 'book_price' | 'volume' | 'name';
 
 export default function Discover() {
-  const { events, loading, counts, fetchEvents, getDiscoveryEvents, promoteEvents } = usePipelineData();
+  const { events, loading, counts, fetchEvents, getDiscoveryEvents, promoteEvents, dismissEvents } = usePipelineData();
   const [syncing, setSyncing] = useState(false);
   const [rawText, setRawText] = useState('');
   const [importing, setImporting] = useState(false);
   const [parseResult, setParseResult] = useState<ParseResult | null>(null);
+  const [matchFilter, setMatchFilter] = useState<MatchFilter>('all');
+  const [sortField, setSortField] = useState<SortField>('updated');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const { toast } = useToast();
   const navigate = useNavigate();
 
@@ -29,6 +37,29 @@ export default function Discover() {
 
   const matched = discoveryEvents.filter(e => e.polymarket_matched && e.polymarket_price != null);
   const unmatched = discoveryEvents.filter(e => !e.polymarket_matched || e.polymarket_price == null);
+
+  const filteredEvents = useMemo(() => {
+    let filtered = discoveryEvents;
+    switch (matchFilter) {
+      case 'matched': filtered = filtered.filter(e => e.polymarket_matched); break;
+      case 'unmatched': filtered = filtered.filter(e => !e.polymarket_matched); break;
+      case 'has_price': filtered = filtered.filter(e => e.polymarket_price != null); break;
+      case 'no_price': filtered = filtered.filter(e => e.polymarket_price == null); break;
+    }
+    return [...filtered].sort((a, b) => {
+      let aVal: number | string = 0, bVal: number | string = 0;
+      switch (sortField) {
+        case 'updated': aVal = new Date(a.updated_at).getTime(); bVal = new Date(b.updated_at).getTime(); break;
+        case 'poly_price': aVal = a.polymarket_price ?? -1; bVal = b.polymarket_price ?? -1; break;
+        case 'book_price': aVal = a.current_probability ?? -1; bVal = b.current_probability ?? -1; break;
+        case 'volume': aVal = a.polymarket_volume ?? -1; bVal = b.polymarket_volume ?? -1; break;
+        case 'name': aVal = a.event_name.toLowerCase(); bVal = b.event_name.toLowerCase(); break;
+      }
+      if (aVal < bVal) return sortDir === 'asc' ? -1 : 1;
+      if (aVal > bVal) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }, [discoveryEvents, matchFilter, sortField, sortDir]);
 
   const handleSync = async () => {
     setSyncing(true);
@@ -81,6 +112,10 @@ export default function Discover() {
     }
   };
 
+  const handleDismiss = async (id: string) => {
+    await dismissEvents([id]);
+  };
+
   const formatPrice = (v: number | null) => v != null ? `${(v * 100).toFixed(0)}¢` : '—';
 
   const formatLeague = (source: string | null) => {
@@ -98,6 +133,16 @@ export default function Discover() {
       'basketball_ncaab': 'NCAAB',
     };
     return map[source] || source.replace(/_/g, ' ').toUpperCase();
+  };
+
+  const toggleSort = (field: SortField) => {
+    if (sortField === field) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortField(field); setSortDir('desc'); }
+  };
+
+  const SortIcon = ({ field }: { field: SortField }) => {
+    if (sortField !== field) return null;
+    return sortDir === 'desc' ? <ArrowDown className="h-3 w-3 inline ml-0.5" /> : <ArrowUp className="h-3 w-3 inline ml-0.5" />;
   };
 
   return (
@@ -194,17 +239,47 @@ export default function Discover() {
         {/* Unmatched Teams */}
         <UnmatchedTeamsPanel />
 
+        {/* Filters */}
+        <div className="flex items-center gap-3 flex-wrap">
+          <span className="text-xs text-muted-foreground">Filter:</span>
+          <Select value={matchFilter} onValueChange={(v) => setMatchFilter(v as MatchFilter)}>
+            <SelectTrigger className="w-[140px] h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All</SelectItem>
+              <SelectItem value="matched">Matched</SelectItem>
+              <SelectItem value="unmatched">Unmatched</SelectItem>
+              <SelectItem value="has_price">Has Poly Price</SelectItem>
+              <SelectItem value="no_price">No Poly Price</SelectItem>
+            </SelectContent>
+          </Select>
+          <span className="text-xs text-muted-foreground">Sort:</span>
+          {(['updated', 'poly_price', 'book_price', 'volume', 'name'] as SortField[]).map(field => (
+            <Button
+              key={field}
+              variant={sortField === field ? 'default' : 'outline'}
+              size="sm"
+              className="h-7 text-xs"
+              onClick={() => toggleSort(field)}
+            >
+              {field === 'updated' ? 'Recent' : field === 'poly_price' ? 'Poly' : field === 'book_price' ? 'Book' : field === 'volume' ? 'Volume' : 'Name'}
+              <SortIcon field={field} />
+            </Button>
+          ))}
+        </div>
+
         {/* Markets Table */}
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Discovered Markets ({discoveryEvents.length})</CardTitle>
+            <CardTitle className="text-sm">Discovered Markets ({filteredEvents.length})</CardTitle>
           </CardHeader>
           <CardContent>
             <ScrollArea className="h-[500px]">
               {loading ? (
                 <div className="text-center py-8 text-muted-foreground">Loading...</div>
-              ) : discoveryEvents.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground">No markets discovered yet. Click "Sync Polymarket" to start.</div>
+              ) : filteredEvents.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground">No markets match your filter. Try adjusting above.</div>
               ) : (
                 <Table>
                   <TableHeader>
@@ -214,14 +289,15 @@ export default function Discover() {
                       <TableHead className="text-right">Poly YES</TableHead>
                       <TableHead className="text-right">Book Fair</TableHead>
                       <TableHead className="text-right">Volume</TableHead>
+                      <TableHead className="w-8"></TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {discoveryEvents.map(event => (
-                      <TableRow key={event.id} className={!event.polymarket_matched || !event.current_probability ? 'bg-amber-500/5' : ''}>
+                    {filteredEvents.map(event => (
+                      <TableRow key={event.id} className={cn(!event.polymarket_matched || !event.polymarket_price ? 'bg-amber-500/5' : '')}>
                         <TableCell>
                           <MatchStatusBadge
-                            hasPolyPrice={event.polymarket_yes_price != null}
+                            hasPolyPrice={event.polymarket_price != null}
                             hasBookProb={event.current_probability != null}
                             polyMatched={event.polymarket_matched}
                           />
@@ -248,6 +324,17 @@ export default function Discover() {
                         <TableCell className="text-right font-mono text-sm">{formatPrice(event.current_probability)}</TableCell>
                         <TableCell className="text-right font-mono text-xs text-muted-foreground">
                           {event.polymarket_volume ? `$${(event.polymarket_volume / 1000).toFixed(0)}K` : '—'}
+                        </TableCell>
+                        <TableCell className="p-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                            onClick={() => handleDismiss(event.id)}
+                            title="Remove from pipeline"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </Button>
                         </TableCell>
                       </TableRow>
                     ))}
