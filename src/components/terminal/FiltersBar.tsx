@@ -73,13 +73,11 @@ export function FiltersBar({
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              {showMovementConfirmedOnly 
-                ? 'Showing movement-confirmed (ELITE/STRONG) only'
-                : showBettableOnly 
-                  ? 'Showing BET/STRONG_BET only' 
-                  : showTrueEdgesOnly 
-                    ? 'Showing matched arbitrage only' 
-                    : 'Showing all signals'}
+              {[
+                showMovementConfirmedOnly && 'Movement-confirmed',
+                showTrueEdgesOnly && 'True edges',
+                showBettableOnly && 'Bettable',
+              ].filter(Boolean).join(' + ') || 'Showing all signals'}
             </p>
           </div>
 
