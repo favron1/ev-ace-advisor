@@ -26,16 +26,9 @@
    };
  }
  
-// JSON input format (flat)
-interface JsonMarketInput {
-  sport: string;
-  gameTime: string;
-  homeTeam: string;
-  awayTeam: string;
-  homePriceCents: number;
-  awayPriceCents: number;
-  notes?: string[];
-}
+// JSON input: supports multiple field naming conventions
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type JsonMarketInput = Record<string, any>;
 
 // Nested JSON format (league wrapper with markets array)
 interface NestedJsonInput {
@@ -112,35 +105,51 @@ function tryParseJson(text: string): { type: 'flat'; data: JsonMarketInput[] } |
 /**
  * Parse JSON format input from pre-parsed data
  */
-function parseJsonData(data: JsonMarketInput[]): ParseResult {
+function parseJsonData(data: Record<string, unknown>[]): ParseResult {
   const markets: ParsedMarket[] = [];
   const errors: string[] = [];
   
   for (let i = 0; i < data.length; i++) {
     const item = data[i];
     
-    if (!item.sport || !item.homeTeam || !item.awayTeam) {
-      errors.push(`Item ${i + 1}: Missing required fields (sport, homeTeam, awayTeam)`);
+    // Support multiple field naming conventions
+    const sport = String(item.sport || item.league || '').toUpperCase();
+    const homeTeam = String(item.homeTeam || item.home_team || '');
+    const awayTeam = String(item.awayTeam || item.away_team || '');
+    const gameTime = String(item.gameTime || item.time || '');
+    
+    if (!sport || !homeTeam || !awayTeam) {
+      errors.push(`Item ${i + 1}: Missing required fields (sport/league, homeTeam/home_team, awayTeam/away_team)`);
       continue;
     }
     
-    const homePrice = typeof item.homePriceCents === 'number' ? item.homePriceCents / 100 : 0;
-    const awayPrice = typeof item.awayPriceCents === 'number' ? item.awayPriceCents / 100 : 0;
+    // Support: homePriceCents, home_price_cents, homePrice, home_price
+    let homePrice = 0;
+    let awayPrice = 0;
+    
+    if (typeof item.homePriceCents === 'number') homePrice = item.homePriceCents / 100;
+    else if (typeof item.home_price_cents === 'number') homePrice = (item.home_price_cents as number) / 100;
+    else if (typeof item.homePrice === 'number') homePrice = item.homePrice > 1 ? item.homePrice / 100 : item.homePrice;
+    else if (typeof item.home_price === 'number') homePrice = (item.home_price as number) > 1 ? (item.home_price as number) / 100 : (item.home_price as number);
+    
+    if (typeof item.awayPriceCents === 'number') awayPrice = item.awayPriceCents / 100;
+    else if (typeof item.away_price_cents === 'number') awayPrice = (item.away_price_cents as number) / 100;
+    else if (typeof item.awayPrice === 'number') awayPrice = item.awayPrice > 1 ? item.awayPrice / 100 : item.awayPrice;
+    else if (typeof item.away_price === 'number') awayPrice = (item.away_price as number) > 1 ? (item.away_price as number) / 100 : (item.away_price as number);
     
     markets.push({
-      sport: item.sport.toUpperCase(),
-      gameTime: item.gameTime || '',
-      homeTeam: item.homeTeam,
-      awayTeam: item.awayTeam,
+      sport,
+      gameTime,
+      homeTeam,
+      awayTeam,
       homePrice,
       awayPrice,
-      rawText: `${item.awayTeam} @ ${item.homeTeam}`,
+      rawText: `${awayTeam} @ ${homeTeam}`,
     });
   }
   
   return { markets, errors, summary: { total: markets.length + errors.length, parsed: markets.length, failed: errors.length } };
 }
-
 /**
  * Parse nested JSON format (league wrapper with markets array)
  */
