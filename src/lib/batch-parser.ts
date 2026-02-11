@@ -113,27 +113,31 @@ function parseJsonData(data: Record<string, unknown>[]): ParseResult {
     const item = data[i];
     
     // Support multiple field naming conventions
-    const sport = String(item.sport || item.league || '').toUpperCase();
-    const homeTeam = String(item.homeTeam || item.home_team || '');
-    const awayTeam = String(item.awayTeam || item.away_team || '');
-    const gameTime = String(item.gameTime || item.time || '');
+    const sport = String(item.sport || item.league || item.tournament || '').toUpperCase();
+    const homeTeam = String(item.homeTeam || item.home_team || item.player_2 || item.team_2 || '');
+    const awayTeam = String(item.awayTeam || item.away_team || item.player_1 || item.team_1 || '');
+    const gameTime = String(item.gameTime || item.time || item.start_time || '');
     
     if (!sport || !homeTeam || !awayTeam) {
-      errors.push(`Item ${i + 1}: Missing required fields (sport/league, homeTeam/home_team, awayTeam/away_team)`);
+      errors.push(`Item ${i + 1}: Missing required fields (sport/league, homeTeam/home_team/player_1, awayTeam/away_team/player_2)`);
       continue;
     }
     
-    // Support: homePriceCents, home_price_cents, homePrice, home_price
+    // Support: homePriceCents, home_price_cents, homePrice, home_price, player_2_price_cents, etc.
     let homePrice = 0;
     let awayPrice = 0;
     
     if (typeof item.homePriceCents === 'number') homePrice = item.homePriceCents / 100;
     else if (typeof item.home_price_cents === 'number') homePrice = (item.home_price_cents as number) / 100;
+    else if (typeof item.player_2_price_cents === 'number') homePrice = (item.player_2_price_cents as number) / 100;
+    else if (typeof item.team_2_price_cents === 'number') homePrice = (item.team_2_price_cents as number) / 100;
     else if (typeof item.homePrice === 'number') homePrice = item.homePrice > 1 ? item.homePrice / 100 : item.homePrice;
     else if (typeof item.home_price === 'number') homePrice = (item.home_price as number) > 1 ? (item.home_price as number) / 100 : (item.home_price as number);
     
     if (typeof item.awayPriceCents === 'number') awayPrice = item.awayPriceCents / 100;
     else if (typeof item.away_price_cents === 'number') awayPrice = (item.away_price_cents as number) / 100;
+    else if (typeof item.player_1_price_cents === 'number') awayPrice = (item.player_1_price_cents as number) / 100;
+    else if (typeof item.team_1_price_cents === 'number') awayPrice = (item.team_1_price_cents as number) / 100;
     else if (typeof item.awayPrice === 'number') awayPrice = item.awayPrice > 1 ? item.awayPrice / 100 : item.awayPrice;
     else if (typeof item.away_price === 'number') awayPrice = (item.away_price as number) > 1 ? (item.away_price as number) / 100 : (item.away_price as number);
     
