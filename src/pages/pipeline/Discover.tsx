@@ -131,6 +131,19 @@ export default function Discover() {
 
   const formatPrice = (v: number | null) => v != null ? `${(v * 100).toFixed(0)}¢` : '—';
 
+  /** Derive bet side from book fair vs poly price.
+   *  Polymarket price = YES side (first team). Book fair prob = fair value for YES side.
+   *  If Book > Poly → edge on YES (first team). If Book < Poly → edge on NO (second team). */
+  const getBetSide = (event: PipelineEvent): { team: string; side: 'YES' | 'NO' } | null => {
+    if (event.current_probability == null || event.polymarket_price == null) return null;
+    const edge = event.current_probability - event.polymarket_price;
+    if (Math.abs(edge) < 0.005) return null; // no meaningful edge
+    const teams = event.event_name.split(/\s+vs\.?\s+/i);
+    if (teams.length < 2) return null;
+    if (edge > 0) return { team: teams[0].trim(), side: 'YES' };
+    return { team: teams[1].trim(), side: 'NO' };
+  };
+
   const formatLeague = (source: string | null) => {
     if (!source) return '';
     const map: Record<string, string> = {
@@ -311,6 +324,7 @@ export default function Discover() {
                     <TableRow>
                       <TableHead>Status</TableHead>
                       <TableHead>Event</TableHead>
+                      <TableHead>Bet Side</TableHead>
                       <TableHead className="text-right">Poly YES</TableHead>
                       <TableHead className="text-right">Book Fair</TableHead>
                       <TableHead className="text-right">Edge %</TableHead>
@@ -339,12 +353,23 @@ export default function Discover() {
                               </Badge>
                             )}
                             <span className="truncate">{event.event_name}</span>
-                            {event.outcome && (
-                              <Badge variant="outline" className="text-[9px] px-1 py-0 shrink-0 bg-primary/10 text-primary border-primary/30">
-                                BET {event.outcome.toUpperCase()}
-                              </Badge>
-                            )}
                           </div>
+                        </TableCell>
+                        <TableCell className="text-sm">
+                          {(() => {
+                            const bet = getBetSide(event);
+                            if (!bet) return <span className="text-muted-foreground">—</span>;
+                            return (
+                              <Badge variant="outline" className={cn(
+                                "text-[10px] px-1.5 py-0.5 font-mono",
+                                bet.side === 'YES' 
+                                  ? 'bg-green-500/10 text-green-400 border-green-500/30' 
+                                  : 'bg-red-500/10 text-red-400 border-red-500/30'
+                              )}>
+                                {bet.side} {bet.team}
+                              </Badge>
+                            );
+                          })()}
                         </TableCell>
                         <TableCell className="text-right font-mono text-sm">{formatPrice(event.polymarket_price)}</TableCell>
                         <TableCell className="text-right font-mono text-sm">{formatPrice(event.current_probability)}</TableCell>
