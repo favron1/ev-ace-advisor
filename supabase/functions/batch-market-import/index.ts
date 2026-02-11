@@ -78,8 +78,30 @@ type BookieIndexEntry = {
        details: [],
      };
  
-     // Get today's date for event_date
-     const today = new Date().toISOString().split('T')[0];
+      // Get today's date for event_date
+      const today = new Date().toISOString().split('T')[0];
+
+      // Helper: convert partial time strings like "8:00 PM" to full ISO timestamp (today's date)
+      function parseGameTime(timeStr: string): string | null {
+        if (!timeStr) return null;
+        // Already an ISO timestamp?
+        if (timeStr.includes('T') || timeStr.includes('-')) {
+          const d = new Date(timeStr);
+          return isNaN(d.getTime()) ? null : d.toISOString();
+        }
+        // Try parsing as "HH:MM AM/PM" with today's date
+        const match = timeStr.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+        if (match) {
+          let hours = parseInt(match[1]);
+          const minutes = parseInt(match[2]);
+          const ampm = match[3].toUpperCase();
+          if (ampm === 'PM' && hours !== 12) hours += 12;
+          if (ampm === 'AM' && hours === 12) hours = 0;
+          const d = new Date(`${today}T${String(hours).padStart(2,'0')}:${String(minutes).padStart(2,'0')}:00Z`);
+          return isNaN(d.getTime()) ? null : d.toISOString();
+        }
+        return null;
+      }
  
      // Build bookmaker index for matching
       const bookieIndex = await buildBookieIndex(supabase, allUserMappings);
@@ -281,8 +303,8 @@ type BookieIndexEntry = {
            event_key: eventKey,
            event_name: eventTitle,
            watch_state: 'monitored',
-           commence_time: market.gameTime || null,
-           polymarket_condition_id: condition,
+            commence_time: parseGameTime(market.gameTime),
+            polymarket_condition_id: condition,
            polymarket_question: `Will ${homeResolved || market.homeTeam} win?`,
            polymarket_yes_price: market.homePrice,
            polymarket_price: market.homePrice,
@@ -299,13 +321,17 @@ type BookieIndexEntry = {
              watchStateData.current_probability = homeFair;
              watchStateData.bookmaker_market_key = homeResolved || market.homeTeam;
              watchStateData.bookmaker_source = sportCode;
-             watchStateData.commence_time = bookie.commence_time || market.gameTime || null;
+             watchStateData.commence_time = bookie.commence_time || parseGameTime(market.gameTime);
            }
          }
 
-         await supabase
-           .from('event_watch_state')
-           .upsert(watchStateData, { onConflict: 'event_key' });
+          const { error: watchError } = await supabase
+            .from('event_watch_state')
+            .upsert(watchStateData, { onConflict: 'event_key' });
+
+          if (watchError) {
+            console.error(`[batch-import] event_watch_state upsert failed for ${marketLabel}:`, watchError.message);
+          }
  
        } catch (err) {
          console.error(`[batch-import] Failed to process ${marketLabel}:`, err);
