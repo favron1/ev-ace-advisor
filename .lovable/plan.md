@@ -1,202 +1,145 @@
 
 
-# Close the Team Mapping Loop
+# 5-Stage Pipeline Rebuild
 
-## Problem
+## What We're Doing
 
-The `team_mappings` table and UI exist, but the matching engine doesn't use them. When you manually map "Wizards" → "Washington Wizards", that mapping is stored but ignored during the next batch import.
+Restructuring the existing monolithic pipeline into 5 separate pages. Each stage filters bets -- good ones flow forward, bad ones get dropped. This isolates each step so when something breaks, you know exactly where.
 
-## Current Architecture (Broken Loop)
-
-```text
-┌─────────────────────────────────────────────────────────────────────────┐
-│  MATCH FAILURE                                                          │
-│  "Wiz" not found                                                        │
-└───────────────┬─────────────────────────────────────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  Logged to match_failures table                                         │
-│  Shows in Unmatched Teams Panel                                         │
-└───────────────┬─────────────────────────────────────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  YOU: Map "Wiz" → "Washington Wizards"                                  │
-│  Saved to team_mappings table ✓                                         │
-└───────────────┬─────────────────────────────────────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  NEXT IMPORT: System tries to match "Wiz"...                            │
-│  Still fails! ❌ team_mappings is never queried                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-## Solution: Complete the Self-Healing Loop
-
-Modify `resolveTeamName()` in `canonicalize.ts` to query `team_mappings` table FIRST, before falling back to the hardcoded `teamMap`.
-
-### New Resolution Order
-
-1. **Check `team_mappings` table** (user-curated, highest priority)
-2. **Check hardcoded `teamMap`** (abbreviations like "nyr", "lak")
-3. **Nickname match** (last word matches)
-4. **City match** (first word matches)
-5. **Substring containment** (e.g., "Canadiens")
-
-### Implementation Plan
-
-#### Phase 1: Create Helper Function to Fetch Mappings
-
-Create a new shared utility that queries `team_mappings` and builds a lookup cache.
-
-File: `supabase/functions/_shared/team-mapping-cache.ts`
-
-```typescript
-// Fetch user-defined team mappings from database
-// Cache for 5 minutes to avoid repeated queries
-
-interface CachedMappings {
-  data: Map<string, string>;  // source_name → canonical_name
-  fetchedAt: number;
-}
-
-let cache: CachedMappings | null = null;
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-
-export async function getTeamMappings(
-  supabase: any, 
-  sportCode: string
-): Promise<Map<string, string>> {
-  // Check cache
-  if (cache && Date.now() - cache.fetchedAt < CACHE_TTL_MS) {
-    return cache.data;
-  }
-
-  // Fetch from database
-  const { data } = await supabase
-    .from('team_mappings')
-    .select('source_name, canonical_name')
-    .eq('sport_code', sportCode);
-
-  const map = new Map<string, string>();
-  for (const row of data || []) {
-    map.set(row.source_name.toLowerCase(), row.canonical_name);
-  }
-
-  cache = { data: map, fetchedAt: Date.now() };
-  return map;
-}
-```
-
-#### Phase 2: Modify canonicalize.ts
-
-Update `resolveTeamName()` to accept an optional `userMappings` parameter that takes precedence.
-
-```typescript
-export function resolveTeamName(
-  rawName: string,
-  sportCode: SportCode | string,
-  teamMap?: Record<string, string>,
-  userMappings?: Map<string, string>  // NEW: from team_mappings table
-): string | null {
-  const rawNorm = normalizeRaw(rawName);
-
-  // Step 0 (NEW): Check user-defined mappings first
-  if (userMappings?.has(rawNorm)) {
-    return userMappings.get(rawNorm)!;
-  }
-
-  // ... rest of existing logic
-}
-```
-
-#### Phase 3: Update watch-mode-poll
-
-Before matching, fetch user mappings and pass to resolution function.
-
-```typescript
-import { getTeamMappings } from '../_shared/team-mapping-cache.ts';
-
-// In the main handler:
-const userMappings = await getTeamMappings(supabase, sportCode);
-
-// Pass to matching function
-const resolved = resolveTeamName(rawTeam, sportCode, teamMap, userMappings);
-```
-
-#### Phase 4: Update batch-market-import
-
-Same pattern - fetch user mappings before processing.
-
-### Database Change (Optional Enhancement)
-
-Add a unique constraint to prevent duplicate mappings:
-
-```sql
-CREATE UNIQUE INDEX IF NOT EXISTS idx_team_mappings_unique 
-ON team_mappings(LOWER(source_name), sport_code);
-```
-
-## Why This Is Better Than ML
-
-| Approach | Pros | Cons |
-|----------|------|------|
-| **Lookup Table (This Plan)** | Instant, deterministic, you control mappings, no API costs | Requires initial data entry |
-| **ML/Embedding Matching** | Auto-discovers some mappings | Slow, expensive, prone to errors, needs training data, overkill |
-
-You already have the data (you know what teams are called). ML adds latency and uncertainty for no benefit.
-
-## Self-Healing Flow (After Fix)
+## The 5 Stages
 
 ```text
-┌─────────────────────────────────────────────────────────────────────────┐
-│  MATCH FAILURE: "Wiz" not found                                         │
-└───────────────┬─────────────────────────────────────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  Logged to match_failures → Shows in UI                                 │
-└───────────────┬─────────────────────────────────────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  YOU: Map "Wiz" → "Washington Wizards"                                  │
-│  Saved to team_mappings ✓                                               │
-└───────────────┬─────────────────────────────────────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  NEXT IMPORT: Queries team_mappings first                               │
-│  Finds "wiz" → "Washington Wizards" ✓                                   │
-│  Match succeeds! Bookmaker data attached!                               │
-└─────────────────────────────────────────────────────────────────────────┘
+Stage 1           Stage 2          Stage 3          Stage 4          Stage 5
+DISCOVERY    -->  ANALYSIS    -->  WATCHING    -->  EXECUTION   -->  HISTORY
+/discover         /analyze         /watch           /execute         /history
+
+Source markets    Calculate edges   Poll every 5m    Final go/no-go   Settled bets
+Match to books    Highlight best    Track movement   Cost breakdown   Win/Loss/P&L
+Paste imports     Promote winners   Flag stale data  Mark as placed   Performance
 ```
 
-## Files to Modify
+## Stage-by-Stage Breakdown
 
-| File | Change |
-|------|--------|
-| `supabase/functions/_shared/team-mapping-cache.ts` | **Create** - Cache layer for team_mappings queries |
-| `supabase/functions/_shared/canonicalize.ts` | **Modify** - Add userMappings parameter to resolveTeamName |
-| `supabase/functions/watch-mode-poll/index.ts` | **Modify** - Fetch and pass user mappings |
-| `supabase/functions/batch-market-import/index.ts` | **Modify** - Fetch and pass user mappings |
-| `supabase/migrations/xxx.sql` | **Create** - Add unique constraint to team_mappings |
+### Stage 1: Discovery (`/pipeline/discover`)
+- "Sync Polymarket" button pulls upcoming H2H markets
+- Batch paste input (absorbs current `/batch-import` page)
+- Table showing all discovered markets with match status (Matched / Unmatched / Partial)
+- Unmatched teams highlighted in red/amber with inline mapping resolution
+- "Retry Matching" button to re-run fallback chain
+- Summary bar: "42 discovered, 35 matched, 7 unmatched"
+- Only matched markets become visible in Stage 2
 
-## Bonus: Pre-Populate Common Aliases
+### Stage 2: Analysis (`/pipeline/analyze`)
+- Shows only markets with both Poly price AND Book fair probability
+- Calculates Edge % (color-coded: green > 3%, yellow 1-3%, grey < 1%)
+- Shows confidence, volume, liquidity per event
+- Checkbox selection on high-edge rows
+- "Send to Watching" button promotes selected events to Stage 3
+- Sort/filter by edge, sport, confidence, game time
 
-Once this is working, I can help you bulk-import common team aliases into `team_mappings` so you don't have to manually add each one:
+### Stage 3: Watching (`/pipeline/watch`)
+- Only promoted events from Stage 2
+- Auto-polls every 5 minutes via existing `watch-mode-poll` function
+- Shows price deltas since last poll, edge movement (growing/stable/shrinking)
+- Freshness badges: FRESH (green, < 10min) / STALE (amber, > 10min) / DEAD (red, > 30min)
+- Manual price override on stale rows
+- "Poll Now" button for immediate refresh
+- "Ready to Execute" button sends selected events to Stage 4
 
-- "Wiz" → "Washington Wizards"
-- "Clips" → "LA Clippers"
-- "Dubs" → "Golden State Warriors"
-- etc.
+### Stage 4: Execution (`/pipeline/execute`)
+- Full cost breakdown per event (raw edge, platform fee, spread, slippage, net edge)
+- Execution decision: STRONG BET / BET / MARGINAL / NO BET (reuses existing ExecutionDecision component)
+- Liquidity tier, max stake, stake input field
+- "Mark as Placed" button records bet to `signal_logs` and moves to History
+- "Dismiss" removes from pipeline
+- Game-started lock prevents late execution
 
-## Summary
+### Stage 5: History (`/pipeline/history`)
+- All placed bets with outcomes: PENDING / IN PLAY / WIN / LOSS / VOID
+- P/L tracking per bet and cumulative
+- Summary stats: total bets, win rate, total P/L, ROI %
+- Auto-settlement via existing `settle-bets` function
+- Inline edit and export capabilities (reuses existing Stats components)
+- Absorbs current `/stats` bet history functionality
 
-- **Not ML** - Simple database lookup (faster, more reliable)
-- **Closes the loop** - Your manual mappings will actually work
-- **Self-healing** - Every mapping you add improves future matching
-- **5 files** - Minimal changes to existing architecture
+## Shared Navigation
+
+A stepper bar at the top of every pipeline page:
+
+```text
+[1. Discovery (42)] -> [2. Analysis (35)] -> [3. Watching (8)] -> [4. Execute (3)] -> [5. History (127)]
+```
+
+Each step shows event count. Current stage highlighted. Click to navigate.
+
+## Technical Details
+
+### Database Change
+Add `pipeline_stage` column to `event_watch_state`:
+- Values: `discovered`, `matched`, `analyzing`, `watching`, `executing`, `settled`
+- Separate from existing `watch_state` column so polling logic stays untouched
+- Default: `discovered`
+
+### New Files
+
+| File | Purpose |
+|------|---------|
+| `src/pages/pipeline/Discover.tsx` | Stage 1 |
+| `src/pages/pipeline/Analyze.tsx` | Stage 2 |
+| `src/pages/pipeline/Watch.tsx` | Stage 3 |
+| `src/pages/pipeline/Execute.tsx` | Stage 4 |
+| `src/pages/pipeline/History.tsx` | Stage 5 |
+| `src/components/pipeline/PipelineStepper.tsx` | Shared navigation with counts |
+| `src/components/pipeline/MatchStatusBadge.tsx` | Match status indicator |
+| `src/components/pipeline/StaleIndicator.tsx` | Freshness indicator |
+| `src/components/pipeline/ManualPriceOverride.tsx` | Inline price editing |
+| `src/components/pipeline/ExecutionCard.tsx` | Cost breakdown card |
+| `src/hooks/usePipelineData.ts` | Stage-specific data fetching |
+
+### Route Changes in App.tsx
+
+| New Route | Page |
+|-----------|------|
+| `/pipeline` | Redirects to `/pipeline/discover` |
+| `/pipeline/discover` | Stage 1 |
+| `/pipeline/analyze` | Stage 2 |
+| `/pipeline/watch` | Stage 3 |
+| `/pipeline/execute` | Stage 4 |
+| `/pipeline/history` | Stage 5 |
+
+Old `/pipeline` and `/batch-import` routes replaced. `/stats` route kept but links to History.
+
+### Existing Code Reused
+
+| What | Where |
+|------|-------|
+| `batch-parser.ts` + `batch-market-import` function | Stage 1 paste input |
+| `polymarket-sync-24h` function | Stage 1 sync button |
+| `watch-mode-poll` function | Stage 3 auto-polling |
+| `ExecutionDecision` component + `execution-engine.ts` | Stage 4 cost breakdown |
+| `mark-executed` function | Stage 4 bet placement |
+| `settle-bets` function | Stage 5 auto-settlement |
+| `EditBetDialog` + `PredictiveReportDownload` | Stage 5 editing/export |
+| `UnmatchedTeamsPanel` component | Stage 1 team mapping |
+| `useSignalStats` hook | Stage 5 stats |
+
+### Event Lifecycle
+
+```text
+Discovered (Stage 1) -> Matched (Stage 1) -> Analyzing (Stage 2) -> Watching (Stage 3) -> Executing (Stage 4) -> Settled (Stage 5)
+```
+
+Events can be dismissed at any stage. Bad bets never make it past their current stage.
+
+## Build Order
+
+1. Database migration (add `pipeline_stage` column)
+2. PipelineStepper shared component
+3. Stage 1: Discovery (includes batch import absorption)
+4. Stage 2: Analysis
+5. Stage 3: Watching
+6. Stage 4: Execution
+7. Stage 5: History
+8. Route updates in App.tsx
+9. Header navigation updates
 
