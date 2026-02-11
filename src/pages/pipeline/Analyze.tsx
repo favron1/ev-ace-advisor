@@ -24,10 +24,10 @@ export default function Analyze() {
 
   // Only show events with both prices
   const eligibleEvents = useMemo(() => {
-    return analysisEvents.filter(e => e.current_probability != null && e.polymarket_yes_price != null);
+    return analysisEvents.filter(e => e.current_probability != null && e.polymarket_price != null);
   }, [analysisEvents]);
 
-  const getEdge = (e: PipelineEvent) => ((e.current_probability || 0) - (e.polymarket_yes_price || 0)) * 100;
+  const getEdge = (e: PipelineEvent) => ((e.current_probability || 0) - (e.polymarket_price || 0)) * 100;
 
   const sortedEvents = useMemo(() => {
     return [...eligibleEvents].sort((a, b) => {
@@ -152,7 +152,7 @@ export default function Analyze() {
                             <Checkbox checked={selected.has(event.id)} onCheckedChange={() => toggleSelect(event.id)} />
                           </TableCell>
                           <TableCell className="max-w-[250px] truncate text-sm">{event.event_name}</TableCell>
-                          <TableCell className="text-right font-mono text-sm">{formatPrice(event.polymarket_yes_price)}</TableCell>
+                          <TableCell className="text-right font-mono text-sm">{formatPrice(event.polymarket_price)}</TableCell>
                           <TableCell className="text-right font-mono text-sm">{formatPrice(event.current_probability)}</TableCell>
                           <TableCell className={cn("text-right font-mono text-sm font-bold", edgeColor(edge))}>
                             {edge >= 0 ? '+' : ''}{edge.toFixed(1)}%

@@ -27,8 +27,8 @@ export default function Discover() {
 
   const discoveryEvents = getDiscoveryEvents();
 
-  const matched = discoveryEvents.filter(e => e.polymarket_matched && e.current_probability != null);
-  const unmatched = discoveryEvents.filter(e => !e.polymarket_matched || e.current_probability == null);
+  const matched = discoveryEvents.filter(e => e.polymarket_matched && e.polymarket_price != null);
+  const unmatched = discoveryEvents.filter(e => !e.polymarket_matched || e.polymarket_price == null);
 
   const handleSync = async () => {
     setSyncing(true);
@@ -244,7 +244,7 @@ export default function Discover() {
                             )}
                           </div>
                         </TableCell>
-                        <TableCell className="text-right font-mono text-sm">{formatPrice(event.polymarket_yes_price)}</TableCell>
+                        <TableCell className="text-right font-mono text-sm">{formatPrice(event.polymarket_price)}</TableCell>
                         <TableCell className="text-right font-mono text-sm">{formatPrice(event.current_probability)}</TableCell>
                         <TableCell className="text-right font-mono text-xs text-muted-foreground">
                           {event.polymarket_volume ? `$${(event.polymarket_volume / 1000).toFixed(0)}K` : '—'}

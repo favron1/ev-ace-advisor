@@ -14,6 +14,7 @@ export interface PipelineEvent {
   current_probability: number | null;
   initial_probability: number | null;
   polymarket_yes_price: number | null;
+  polymarket_price: number | null;
   polymarket_volume: number | null;
   polymarket_condition_id: string | null;
   polymarket_matched: boolean | null;
@@ -86,7 +87,7 @@ export function usePipelineData() {
   const getAnalysisEvents = useCallback(() => {
     return events.filter(e => 
       e.pipeline_stage === 'analyzing' || 
-      (e.pipeline_stage === 'matched' && e.current_probability != null && e.polymarket_yes_price != null)
+      (e.pipeline_stage === 'matched' && e.current_probability != null && e.polymarket_price != null)
     );
   }, [events]);
 
