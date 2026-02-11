@@ -5,7 +5,7 @@
 // Safe to modify for UI improvements, styling, and UX changes.
 // ============================================================================
 
-import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle, Eye, Zap, DollarSign, Timer, ExternalLink, Copy, ChevronDown, Search, Link, FlaskConical, Lock } from 'lucide-react';
+import { Clock, X, Check, Target, TrendingUp, Activity, AlertCircle, Eye, Zap, DollarSign, Timer, ExternalLink, Copy, ChevronDown, Search, Link, FlaskConical, Lock, Calculator } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -505,6 +505,25 @@ export function SignalCard({
                 
                 {/* Quality indicators row */}
                 <div className="flex justify-between text-xs mb-3 px-1">
+                  {/* EV per $100 stake */}
+                  {(() => {
+                    const stake = 100;
+                    const prob = displayFairProb;
+                    const odds = displayPolyPrice > 0 ? 1 / displayPolyPrice : 0;
+                    const ev = prob > 0 && odds > 0 ? (prob * (odds - 1) - (1 - prob)) * stake : 0;
+                    const netEv = signal.execution?.net_edge_percent 
+                      ? (signal.execution.net_edge_percent / 100) * stake 
+                      : ev;
+                    return (
+                      <span className={cn(
+                        "flex items-center gap-1 font-medium",
+                        netEv > 0 ? 'text-green-400' : 'text-red-400'
+                      )}>
+                        <Calculator className="h-3 w-3" />
+                        EV: {netEv > 0 ? '+' : ''}${netEv.toFixed(2)}
+                      </span>
+                    );
+                  })()}
                   <span className={cn(
                     "flex items-center gap-1",
                     hasLowVolume ? 'text-orange-400' : 'text-green-400'
