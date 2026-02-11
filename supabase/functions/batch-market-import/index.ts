@@ -135,7 +135,9 @@ type BookieIndexEntry = {
          }
  
          // Build event title (away @ home format for consistency)
-         const eventTitle = `${awayResolved || market.awayTeam} vs ${homeResolved || market.homeTeam}`;
+          // Home team MUST be listed first = YES side, matching polymarket_price (homePrice)
+          // and current_probability (home fair prob) assignments downstream
+          const eventTitle = `${homeResolved || market.homeTeam} vs ${awayResolved || market.awayTeam}`;
  
       // Check if market already exists - prioritize REAL Polymarket entries (source != batch_import)
       // Look for any matching market by normalized team names
