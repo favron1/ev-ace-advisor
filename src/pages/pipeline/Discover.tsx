@@ -309,8 +309,12 @@ export default function Discover() {
 
         {/* Markets Table */}
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="pb-2 flex flex-row items-center justify-between">
             <CardTitle className="text-sm">Discovered Markets ({filteredEvents.length})</CardTitle>
+            <Button variant="ghost" size="sm" className="h-7 gap-1.5 text-xs" onClick={() => fetchEvents()} disabled={loading}>
+              <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+              Refresh
+            </Button>
           </CardHeader>
           <CardContent>
             <ScrollArea className="h-[500px]">
