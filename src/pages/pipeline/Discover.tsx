@@ -25,6 +25,7 @@ type SortField = 'updated' | 'poly_price' | 'book_price' | 'volume' | 'name' | '
 export default function Discover() {
   const { events, loading, counts, fetchEvents, getDiscoveryEvents, promoteEvents, dismissEvents } = usePipelineData();
   const [syncing, setSyncing] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [rawText, setRawText] = useState('');
   const [importing, setImporting] = useState(false);
   const [parseResult, setParseResult] = useState<ParseResult | null>(null);
@@ -311,9 +312,14 @@ export default function Discover() {
         <Card>
           <CardHeader className="pb-2 flex flex-row items-center justify-between">
             <CardTitle className="text-sm">Discovered Markets ({filteredEvents.length})</CardTitle>
-            <Button variant="ghost" size="sm" className="h-7 gap-1.5 text-xs" onClick={() => fetchEvents()} disabled={loading}>
-              <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
-              Refresh
+            <Button variant="ghost" size="sm" className="h-7 gap-1.5 text-xs" onClick={async () => {
+              setRefreshing(true);
+              await fetchEvents();
+              setRefreshing(false);
+              toast({ title: 'Refreshed', description: 'Market data updated' });
+            }} disabled={refreshing}>
+              <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
+              {refreshing ? 'Refreshing...' : 'Refresh'}
             </Button>
           </CardHeader>
           <CardContent>
