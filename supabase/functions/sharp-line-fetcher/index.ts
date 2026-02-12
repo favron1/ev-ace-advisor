@@ -143,7 +143,7 @@ export default async function handler(req: Request) {
     console.error('Sharp line fetcher error:', error);
     return new Response(JSON.stringify({
       error: 'Failed to fetch sharp lines',
-      details: error.message
+      details: (error as Error).message
     }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -214,7 +214,7 @@ async function fetchBookmakerLines(
         }
       }
     } catch (error) {
-      console.warn(`⚠️ Failed to fetch ${bookmaker} ${marketType}:`, error.message);
+      console.warn(`⚠️ Failed to fetch ${bookmaker} ${marketType}:`, (error as Error).message);
     }
   }
 

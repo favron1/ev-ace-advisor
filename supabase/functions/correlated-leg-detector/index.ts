@@ -100,7 +100,7 @@ export default async function handler(req: Request) {
 
     // Group signals by event for correlation analysis
     const eventGroups = groupSignalsByEvent(activeSignals);
-    console.log(`🎯 Grouped into ${eventGroups.length} unique events`);
+    console.log(`🎯 Grouped into ${eventGroups.size} unique events`);
 
     // Detect multi-leg opportunities
     const multiLegOpportunities: MultiLegOpportunity[] = [];
@@ -133,13 +133,13 @@ export default async function handler(req: Request) {
     await storeMultiLegOpportunities(supabase, premiumOpportunities);
 
     console.log(`✅ Multi-Leg Analysis Complete:`);
-    console.log(`   - ${eventGroups.length} events analyzed`);
+    console.log(`   - ${eventGroups.size} events analyzed`);
     console.log(`   - ${multiLegOpportunities.length} opportunities found`);
     console.log(`   - ${premiumOpportunities.length} premium opportunities stored`);
 
     return new Response(JSON.stringify({
       success: true,
-      events_analyzed: eventGroups.length,
+      events_analyzed: eventGroups.size,
       opportunities_found: multiLegOpportunities.length,
       premium_opportunities: premiumOpportunities.length,
       opportunities: rankedOpportunities.slice(0, 10), // Top 10
@@ -153,7 +153,7 @@ export default async function handler(req: Request) {
     console.error('Multi-leg detector error:', error);
     return new Response(JSON.stringify({
       error: 'Multi-leg detection failed',
-      details: error.message
+      details: (error as Error).message
     }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
