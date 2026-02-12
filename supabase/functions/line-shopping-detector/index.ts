@@ -112,7 +112,7 @@ export default async function handler(req: Request) {
     console.error('Line shopping detector error:', error);
     return new Response(JSON.stringify({
       error: 'Line shopping detection failed',
-      details: error.message
+      details: (error as Error).message
     }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
