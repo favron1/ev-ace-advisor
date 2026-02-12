@@ -59,3 +59,15 @@ verify_jwt = false
  
  [functions.batch-market-import]
  verify_jwt = false
+
+[functions.whale-tracker]
+verify_jwt = false
+
+[functions.correlated-leg-detector]
+verify_jwt = false
+
+[functions.line-shopping-detector]
+verify_jwt = false
+
+[functions.sharp-line-fetcher]
+verify_jwt = false
