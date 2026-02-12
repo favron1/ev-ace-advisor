@@ -503,7 +503,66 @@ function checkNoCounterMoves(movements: { book: string; change: number; directio
   return true;
 }
 
-// Main movement detection function
+// Batch movement detection function - fetches all snapshots at once
+async function detectSharpMovementBatch(
+  supabase: any,
+  eventOutcomePairs: Array<{ eventKey: string; outcome: string }>
+): Promise<Map<string, MovementResult>> {
+  if (eventOutcomePairs.length === 0) return new Map();
+  
+  const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000);
+  
+  // Get ALL snapshots for ALL events in one query
+  const eventKeys = [...new Set(eventOutcomePairs.map(p => p.eventKey))];
+  const outcomes = [...new Set(eventOutcomePairs.map(p => p.outcome))];
+  
+  const { data: allSnapshots, error } = await supabase
+    .from('sharp_book_snapshots')
+    .select('*')
+    .in('event_key', eventKeys)
+    .in('outcome', outcomes)
+    .gte('captured_at', thirtyMinAgo.toISOString())
+    .order('captured_at', { ascending: true });
+  
+  const results = new Map<string, MovementResult>();
+  
+  if (error || !allSnapshots) {
+    // Return empty results for all pairs
+    for (const { eventKey, outcome } of eventOutcomePairs) {
+      results.set(`${eventKey}::${outcome}`, { triggered: false, velocity: 0, booksConfirming: 0, direction: null });
+    }
+    return results;
+  }
+  
+  // Group snapshots by event_key::outcome
+  const snapshotsByPair = new Map<string, any[]>();
+  for (const snap of allSnapshots) {
+    const key = `${snap.event_key}::${snap.outcome}`;
+    if (!snapshotsByPair.has(key)) {
+      snapshotsByPair.set(key, []);
+    }
+    snapshotsByPair.get(key)!.push(snap);
+  }
+  
+  // Process each event-outcome pair
+  for (const { eventKey, outcome } of eventOutcomePairs) {
+    const key = `${eventKey}::${outcome}`;
+    const snapshots = snapshotsByPair.get(key) || [];
+    
+    if (snapshots.length < 2) {
+      results.set(key, { triggered: false, velocity: 0, booksConfirming: 0, direction: null });
+      continue;
+    }
+    
+    // Use the same logic as the original function
+    const result = processMovementSnapshots(snapshots);
+    results.set(key, result);
+  }
+  
+  return results;
+}
+
+// Original single movement detection function (kept for compatibility)
 async function detectSharpMovement(
   supabase: any,
   eventKey: string,
@@ -521,6 +580,16 @@ async function detectSharpMovement(
     .order('captured_at', { ascending: true });
   
   if (error || !snapshots || snapshots.length < 2) {
+    return { triggered: false, velocity: 0, booksConfirming: 0, direction: null };
+  }
+  
+  // Use extracted processing function
+  return processMovementSnapshots(snapshots);
+}
+
+// Extract movement processing logic for reuse
+function processMovementSnapshots(snapshots: any[]): MovementResult {
+  if (snapshots.length < 2) {
     return { triggered: false, velocity: 0, booksConfirming: 0, direction: null };
   }
   
@@ -1453,24 +1522,32 @@ Deno.serve(async (req) => {
     if (untokenizedMarkets.length > 0) {
       console.log(`[POLY-MONITOR] SELF-HEALING: Attempting repair for ${Math.min(untokenizedMarkets.length, REPAIR_BATCH_SIZE)}/${untokenizedMarkets.length} untokenized Firecrawl markets`);
       
+      // PERFORMANCE FIX: Fetch CLOB markets ONCE, not per market
+      let clobMarkets: any[] = [];
+      try {
+        const clobSearchUrl = `https://clob.polymarket.com/markets?limit=200`;
+        const clobResponse = await fetch(clobSearchUrl);
+        if (clobResponse.ok) {
+          const clobData = await clobResponse.json();
+          clobMarkets = Array.isArray(clobData) ? clobData : (clobData.data || []);
+          console.log(`[POLY-MONITOR] SELF-HEALING: Fetched ${clobMarkets.length} CLOB markets for batch repair`);
+        }
+      } catch (fetchError) {
+        console.log(`[POLY-MONITOR] SELF-HEALING: Failed to fetch CLOB markets - ${(fetchError as Error).message}`);
+      }
+      
       // Repair in batches to avoid timeout
       for (const market of untokenizedMarkets.slice(0, REPAIR_BATCH_SIZE)) {
         try {
-          // Use direct CLOB API search to find matching H2H market by team names
-          const clobSearchUrl = `https://clob.polymarket.com/markets?limit=200`;
-          const clobResponse = await fetch(clobSearchUrl);
+          if (clobMarkets.length === 0) continue; // Skip if no CLOB data
+            
+          // Normalize team names for matching
+          const homeNorm = (market.team_home || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+          const awayNorm = (market.team_away || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+          const homeNick = (market.team_home || '').split(' ').pop()?.toLowerCase() || '';
+          const awayNick = (market.team_away || '').split(' ').pop()?.toLowerCase() || '';
           
-          if (clobResponse.ok) {
-            const clobData = await clobResponse.json();
-            const clobMarkets = Array.isArray(clobData) ? clobData : (clobData.data || []);
-            
-            // Normalize team names for matching
-            const homeNorm = (market.team_home || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-            const awayNorm = (market.team_away || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-            const homeNick = (market.team_home || '').split(' ').pop()?.toLowerCase() || '';
-            const awayNick = (market.team_away || '').split(' ').pop()?.toLowerCase() || '';
-            
-            for (const clobMarket of clobMarkets) {
+          for (const clobMarket of clobMarkets) {
               const question = (clobMarket.question || '').toLowerCase();
               
               // Check if both teams appear and it's an H2H market
@@ -1516,7 +1593,6 @@ Deno.serve(async (req) => {
                 break; // Found match, move to next market
               }
             }
-          }
         } catch (repairError) {
           console.log(`[POLY-MONITOR] REPAIR_ERROR: ${market.event_title} - ${(repairError as Error).message}`);
         }
@@ -1787,44 +1863,9 @@ Deno.serve(async (req) => {
         const effectiveTokenIdYes = repairedTokenIdYes;
         const effectiveTokenIdNo = repairedTokenIdNo;
         
-        // ============= PHASE 1: ORDERBOOK VALIDATION =============
-        // Validate that the token has an active orderbook before pricing
-        // This prevents using stale 2023 tokens that return "No orderbook exists"
-        if (effectiveTokenIdYes) {
-          try {
-            const orderbookResponse = await fetch(`${CLOB_API_BASE}/book?token_id=${effectiveTokenIdYes}`);
-            
-            if (!orderbookResponse.ok) {
-              const errorText = await orderbookResponse.text();
-              
-              // Check if this is a "no orderbook" error
-              if (errorText.includes('No orderbook exists') || orderbookResponse.status === 404) {
-                console.log(`[POLY-MONITOR] ORDERBOOK_VALIDATION_FAILED: "${event.event_name}" - no active orderbook for token`);
-                
-                // Mark as untradeable in cache
-                if (event.polymarket_condition_id) {
-                  await supabase
-                    .from('polymarket_h2h_cache')
-                    .update({
-                      tradeable: false,
-                      untradeable_reason: 'NO_ORDERBOOK_EXISTS',
-                    })
-                    .eq('condition_id', event.polymarket_condition_id);
-                }
-                
-                funnelStats.blocked_no_orderbook = (funnelStats.blocked_no_orderbook || 0) + 1;
-                continue; // Skip this market - token is stale/invalid
-              }
-            }
-            
-            // Orderbook exists - token is valid
-            console.log(`[POLY-MONITOR] ORDERBOOK_VALIDATED: "${event.event_name}" has active orderbook`);
-          } catch (orderbookErr) {
-            // Network error during validation - log but continue (don't block on transient errors)
-            console.log(`[POLY-MONITOR] ORDERBOOK_CHECK_ERROR: "${event.event_name}": ${(orderbookErr as Error).message}`);
-          }
-        }
-        // ============= END PHASE 1 =============
+        // ============= REMOVED: REDUNDANT ORDERBOOK VALIDATION =============
+        // CLOB prices API already tells us if orderbook exists - no need for separate validation
+        // This saves ~200 API calls per run and reduces latency significantly
         
         // FIX: Check tradeable ONLY if we didn't just repair the token
         // After repair, tradeable flag in cache is stale - we updated DB but not local object
