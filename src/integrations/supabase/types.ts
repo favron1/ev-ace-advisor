@@ -686,6 +686,54 @@ export type Database = {
         }
         Relationships: []
       }
+      sharp_book_lines: {
+        Row: {
+          bookmaker: string
+          captured_at: string | null
+          event_name: string
+          event_start_time: string | null
+          id: string
+          implied_probability: number
+          is_sharp: boolean | null
+          line_value: number | null
+          market_type: string
+          odds: number
+          outcome: string
+          sport: string
+          total_value: number | null
+        }
+        Insert: {
+          bookmaker: string
+          captured_at?: string | null
+          event_name: string
+          event_start_time?: string | null
+          id?: string
+          implied_probability: number
+          is_sharp?: boolean | null
+          line_value?: number | null
+          market_type: string
+          odds: number
+          outcome: string
+          sport: string
+          total_value?: number | null
+        }
+        Update: {
+          bookmaker?: string
+          captured_at?: string | null
+          event_name?: string
+          event_start_time?: string | null
+          id?: string
+          implied_probability?: number
+          is_sharp?: boolean | null
+          line_value?: number | null
+          market_type?: string
+          odds?: number
+          outcome?: string
+          sport?: string
+          total_value?: number | null
+        }
+        Relationships: []
+      }
       sharp_book_snapshots: {
         Row: {
           bookmaker: string
@@ -716,6 +764,45 @@ export type Database = {
           implied_probability?: number
           outcome?: string
           raw_odds?: number | null
+        }
+        Relationships: []
+      }
+      sharp_consensus: {
+        Row: {
+          calculated_at: string | null
+          confidence_score: number
+          consensus_probability: number
+          contributing_books: string[] | null
+          event_name: string
+          id: string
+          line_value: number | null
+          market_type: string
+          outcome: string
+          total_value: number | null
+        }
+        Insert: {
+          calculated_at?: string | null
+          confidence_score: number
+          consensus_probability: number
+          contributing_books?: string[] | null
+          event_name: string
+          id?: string
+          line_value?: number | null
+          market_type: string
+          outcome: string
+          total_value?: number | null
+        }
+        Update: {
+          calculated_at?: string | null
+          confidence_score?: number
+          consensus_probability?: number
+          contributing_books?: string[] | null
+          event_name?: string
+          id?: string
+          line_value?: number | null
+          market_type?: string
+          outcome?: string
+          total_value?: number | null
         }
         Relationships: []
       }
