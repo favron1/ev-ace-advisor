@@ -772,21 +772,10 @@ Deno.serve(async (req) => {
       return null;
     }
     
-    // OPTIMIZED: Pre-fetch ALL sports events from Gamma API ONCE for volume enrichment
-    // This avoids calling the API 39 times (once per Firecrawl game) - major perf fix
-    let gammaEventsForVolume: any[] = [];
-    if (firecrawlGames.length > 0) {
-      try {
-        const gammaUrl = `https://gamma-api.polymarket.com/events?active=true&closed=false&tag_slug=sports&limit=200`;
-        const gammaResponse = await fetch(gammaUrl);
-        if (gammaResponse.ok) {
-          gammaEventsForVolume = await gammaResponse.json();
-          console.log(`[POLY-SYNC-24H] Pre-fetched ${gammaEventsForVolume.length} Gamma events for volume enrichment`);
-        }
-      } catch (e) {
-        console.log(`[POLY-SYNC-24H] Gamma pre-fetch failed, continuing without volume enrichment`);
-      }
-    }
+    // OPTIMIZED: Reuse allEvents from Phase 1+2 for volume/token enrichment
+    // This gives access to 300-500+ events instead of a separate 200-event fetch
+    const gammaEventsForVolume = allEvents;
+    console.log(`[POLY-SYNC-24H] Using ${gammaEventsForVolume.length} allEvents (Phase 1+2) for volume/token enrichment`);
     
     // Helper: Lookup volume AND TOKEN IDs from pre-fetched Gamma events (no API call)
     // FIXED: Now extracts token_id_yes and token_id_no from Gamma market metadata
@@ -800,12 +789,15 @@ Deno.serve(async (req) => {
       tokenIdYes: string | null;
       tokenIdNo: string | null;
     } {
-      const searchTerms = [
-        team1Name.split(' ').pop()?.toLowerCase() || '',
-        team2Name.split(' ').pop()?.toLowerCase() || '',
-      ].filter(t => t.length > 2);
+      // Extract nicknames (last word) for matching
+      const nickname1 = team1Name.split(' ').pop()?.toLowerCase() || '';
+      const nickname2 = team2Name.split(' ').pop()?.toLowerCase() || '';
       
-      if (searchTerms.length < 2) {
+      // Also prepare full normalized names for case-insensitive matching
+      const fullName1 = team1Name.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+      const fullName2 = team2Name.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+      
+      if (nickname1.length < 3 && fullName1.length < 3) {
         return { volume: 0, liquidity: 0, conditionId: null, tokenIdYes: null, tokenIdNo: null };
       }
       
@@ -814,8 +806,12 @@ Deno.serve(async (req) => {
         const question = (event.markets?.[0]?.question || '').toLowerCase();
         const combined = `${title} ${question}`;
         
-        const matchesTeam1 = searchTerms[0] && combined.includes(searchTerms[0]);
-        const matchesTeam2 = searchTerms[1] && combined.includes(searchTerms[1]);
+        // Match by nickname (last word) OR full normalized name
+        // Full-name matching prevents collisions (e.g., "Blues" matching wrong team)
+        const matchesTeam1 = (nickname1.length > 2 && combined.includes(nickname1)) || 
+                             (fullName1.length > 4 && combined.includes(fullName1));
+        const matchesTeam2 = (nickname2.length > 2 && combined.includes(nickname2)) || 
+                             (fullName2.length > 4 && combined.includes(fullName2));
         
         if (matchesTeam1 && matchesTeam2) {
           const market = event.markets?.[0];
@@ -850,7 +846,8 @@ Deno.serve(async (req) => {
               tokenIdNo = market.outcomes[1]?.clobTokenId || market.outcomes[1]?.tokenId || null;
             }
             
-            if (volume > 0) {
+            // Return if we found volume OR token IDs (tokens matter even without volume)
+            if (volume > 0 || tokenIdYes) {
               return { volume, liquidity, conditionId, tokenIdYes, tokenIdNo };
             }
           }
@@ -1030,104 +1027,119 @@ Deno.serve(async (req) => {
     if (stillMissingTokens && stillMissingTokens.length > 0) {
       console.log(`[POLY-SYNC-24H] Running tiered token resolution for ${stillMissingTokens.length} markets...`);
       
+      // Pre-fetch CLOB markets ONCE with pagination (instead of per-market)
+      const CLOB_API_BASE = 'https://clob.polymarket.com';
+      let allClobMarkets: any[] = [];
+      
+      try {
+        // Page 1: fetch 500
+        const page1Response = await fetch(`${CLOB_API_BASE}/markets?limit=500`);
+        if (page1Response.ok) {
+          const page1Data = await page1Response.json();
+          const page1Markets = Array.isArray(page1Data) ? page1Data : (page1Data.data || []);
+          allClobMarkets.push(...page1Markets);
+          
+          // Page 2: if we got a full page, fetch more via next_cursor
+          const nextCursor = page1Data.next_cursor;
+          if (nextCursor && page1Markets.length >= 500) {
+            try {
+              const page2Response = await fetch(`${CLOB_API_BASE}/markets?limit=500&next_cursor=${nextCursor}`);
+              if (page2Response.ok) {
+                const page2Data = await page2Response.json();
+                const page2Markets = Array.isArray(page2Data) ? page2Data : (page2Data.data || []);
+                allClobMarkets.push(...page2Markets);
+                console.log(`[TOKEN-RESOLVE] Fetched page 2: ${page2Markets.length} additional CLOB markets`);
+              }
+            } catch (e) {
+              console.log(`[TOKEN-RESOLVE] Page 2 fetch failed, continuing with page 1`);
+            }
+          }
+          
+          console.log(`[TOKEN-RESOLVE] Pre-fetched ${allClobMarkets.length} total CLOB markets for token resolution`);
+        }
+      } catch (e) {
+        console.warn(`[TOKEN-RESOLVE] CLOB pre-fetch failed:`, e);
+      }
+      
+      const normalizeTeam = (name: string): string => 
+        name.toLowerCase().replace(/[^a-z0-9]/g, '');
+      
       for (const market of stillMissingTokens) {
         if (!market.team_home || !market.team_away) continue;
         
         const isSyntheticId = market.condition_id.startsWith('firecrawl_');
         
-        try {
-          // Try CLOB Search API for token resolution (Tier 4 in the cascade)
-          const CLOB_API_BASE = 'https://clob.polymarket.com';
-          const clobSearchResponse = await fetch(`${CLOB_API_BASE}/markets?limit=200`);
+        const homeNorm = normalizeTeam(market.team_home);
+        const awayNorm = normalizeTeam(market.team_away);
+        const homeNickname = market.team_home.split(' ').pop()?.toLowerCase() || '';
+        const awayNickname = market.team_away.split(' ').pop()?.toLowerCase() || '';
+        
+        for (const clobMarket of allClobMarkets) {
+          const question = (clobMarket.question || '').toLowerCase();
+          const questionNorm = normalizeTeam(clobMarket.question || '');
           
-          if (clobSearchResponse.ok) {
-            const clobData = await clobSearchResponse.json();
-            const markets = Array.isArray(clobData) ? clobData : (clobData.data || []);
-            
-            const normalizeTeam = (name: string): string => 
-              name.toLowerCase().replace(/[^a-z0-9]/g, '');
-            
-            const homeNorm = normalizeTeam(market.team_home);
-            const awayNorm = normalizeTeam(market.team_away);
-            const homeNickname = market.team_home.split(' ').pop()?.toLowerCase() || '';
-            const awayNickname = market.team_away.split(' ').pop()?.toLowerCase() || '';
-            
-            for (const clobMarket of markets) {
-              const question = (clobMarket.question || '').toLowerCase();
-              const questionNorm = normalizeTeam(clobMarket.question || '');
+          // Match by full name OR nickname
+          const hasHome = questionNorm.includes(homeNorm) || 
+                          (homeNickname.length > 2 && question.includes(homeNickname));
+          const hasAway = questionNorm.includes(awayNorm) || 
+                          (awayNickname.length > 2 && question.includes(awayNickname));
+          
+          if (hasHome && hasAway) {
+            const tokens = clobMarket.tokens || [];
+            if (tokens.length >= 2 && clobMarket.condition_id) {
+              const newConditionId = clobMarket.condition_id;
+              const tokenIdYes = tokens[0]?.token_id || tokens[0];
+              const tokenIdNo = tokens[1]?.token_id || tokens[1];
               
-              const hasHome = questionNorm.includes(homeNorm) || 
-                              (homeNickname.length > 2 && question.includes(homeNickname));
-              const hasAway = questionNorm.includes(awayNorm) || 
-                              (awayNickname.length > 2 && question.includes(awayNickname));
-              
-              if (hasHome && hasAway) {
-                const tokens = clobMarket.tokens || [];
-                if (tokens.length >= 2 && clobMarket.condition_id) {
-                  // Found matching market with tokens - update cache
-                  const newConditionId = clobMarket.condition_id;
-                  const tokenIdYes = tokens[0]?.token_id || tokens[0];
-                  const tokenIdNo = tokens[1]?.token_id || tokens[1];
-                  
-                  // If original was synthetic, replace the condition_id
-                  if (isSyntheticId) {
-                    // Delete the old synthetic entry and insert with real condition_id
-                    await supabase
-                      .from('polymarket_h2h_cache')
-                      .delete()
-                      .eq('condition_id', market.condition_id);
-                    
-                    await supabase
-                      .from('polymarket_h2h_cache')
-                      .upsert({
-                        condition_id: newConditionId,
-                        event_title: `${market.team_home} vs ${market.team_away}`,
-                        question: clobMarket.question || `Will ${market.team_home} beat ${market.team_away}?`,
-                        team_home: market.team_home,
-                        team_away: market.team_away,
-                        team_home_normalized: market.team_home.toLowerCase(),
-                        team_away_normalized: market.team_away.toLowerCase(),
-                        sport_category: market.sport_category,
-                        market_type: 'h2h',
-                        token_id_yes: tokenIdYes,
-                        token_id_no: tokenIdNo,
-                        token_source: 'clob_search',
-                        tradeable: true,
-                        untradeable_reason: null,
-                        status: 'active',
-                        source: 'clob_verified',
-                        last_price_update: now.toISOString(),
-                      }, { onConflict: 'condition_id' });
-                    
-                    console.log(`[TOKEN-RESOLVE] Replaced synthetic ${market.condition_id.slice(0, 20)}... with real ${newConditionId.slice(0, 12)}...`);
-                  } else {
-                    // Just update the existing entry with tokens
-                    await supabase
-                      .from('polymarket_h2h_cache')
-                      .update({
-                        token_id_yes: tokenIdYes,
-                        token_id_no: tokenIdNo,
-                        token_source: 'clob_search',
-                        tradeable: true,
-                        untradeable_reason: null,
-                      })
-                      .eq('condition_id', market.condition_id);
-                    
-                    console.log(`[TOKEN-RESOLVE] Updated ${market.condition_id.slice(0, 12)}... with CLOB tokens`);
-                  }
-                  
-                  tokenResolved++;
-                  break; // Found match, move to next market
-                }
+              if (isSyntheticId) {
+                await supabase
+                  .from('polymarket_h2h_cache')
+                  .delete()
+                  .eq('condition_id', market.condition_id);
+                
+                await supabase
+                  .from('polymarket_h2h_cache')
+                  .upsert({
+                    condition_id: newConditionId,
+                    event_title: `${market.team_home} vs ${market.team_away}`,
+                    question: clobMarket.question || `Will ${market.team_home} beat ${market.team_away}?`,
+                    team_home: market.team_home,
+                    team_away: market.team_away,
+                    team_home_normalized: market.team_home.toLowerCase(),
+                    team_away_normalized: market.team_away.toLowerCase(),
+                    sport_category: market.sport_category,
+                    market_type: 'h2h',
+                    token_id_yes: tokenIdYes,
+                    token_id_no: tokenIdNo,
+                    token_source: 'clob_search',
+                    tradeable: true,
+                    untradeable_reason: null,
+                    status: 'active',
+                    source: 'clob_verified',
+                    last_price_update: now.toISOString(),
+                  }, { onConflict: 'condition_id' });
+                
+                console.log(`[TOKEN-RESOLVE] Replaced synthetic ${market.condition_id.slice(0, 20)}... with real ${newConditionId.slice(0, 12)}...`);
+              } else {
+                await supabase
+                  .from('polymarket_h2h_cache')
+                  .update({
+                    token_id_yes: tokenIdYes,
+                    token_id_no: tokenIdNo,
+                    token_source: 'clob_search',
+                    tradeable: true,
+                    untradeable_reason: null,
+                  })
+                  .eq('condition_id', market.condition_id);
+                
+                console.log(`[TOKEN-RESOLVE] Updated ${market.condition_id.slice(0, 12)}... with CLOB tokens`);
               }
+              
+              tokenResolved++;
+              break;
             }
           }
-        } catch (error) {
-          console.warn(`[TOKEN-RESOLVE] Error for ${market.condition_id.slice(0, 12)}...:`, error);
         }
-        
-        // Small delay between lookups
-        await new Promise(resolve => setTimeout(resolve, 50));
       }
       
       console.log(`[POLY-SYNC-24H] Token resolution complete: ${tokenResolved}/${stillMissingTokens.length} resolved`);
