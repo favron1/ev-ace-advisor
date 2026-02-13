@@ -1541,7 +1541,104 @@ Deno.serve(async (req) => {
         continue;
       }
       
-      const games = await fetchBookmakerOdds(endpoint.sport, endpoint.markets, oddsApiKey);
+      let games = await fetchBookmakerOdds(endpoint.sport, endpoint.markets, oddsApiKey);
+      
+      // ============= FALLBACK: Use bookmaker_signals table when API returns 0 games =============
+      // This handles exhausted API keys by reconstructing game data from cached signals
+      if (games.length === 0) {
+        console.log(`[POLY-MONITOR] API returned 0 games for ${sport} - falling back to bookmaker_signals table`);
+        try {
+          // Fetch recent signals for this sport's event names
+          const { data: signals, error: sigError } = await supabase
+            .from('bookmaker_signals')
+            .select('event_name, commence_time, outcome, bookmaker, odds, implied_probability')
+            .eq('market_type', 'h2h')
+            .gte('commence_time', new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString())
+            .order('captured_at', { ascending: false });
+          
+          if (!sigError && signals && signals.length > 0) {
+            // Group by event_name to reconstruct game objects
+            const gameMap = new Map<string, any>();
+            
+            for (const sig of signals) {
+              if (!sig.event_name || !sig.commence_time) continue;
+              
+              const key = sig.event_name;
+              if (!gameMap.has(key)) {
+                // Parse "Home Team vs Away Team" from event_name
+                const vsMatch = sig.event_name.match(/^(.+?)\s+vs\.?\s+(.+?)$/i);
+                const homeTeam = vsMatch?.[1]?.trim() || sig.event_name;
+                const awayTeam = vsMatch?.[2]?.trim() || '';
+                
+                gameMap.set(key, {
+                  event_name: sig.event_name,
+                  home_team: homeTeam,
+                  away_team: awayTeam,
+                  commence_time: sig.commence_time,
+                  bookmakers: [],
+                  _outcomesByBook: new Map<string, any[]>(),
+                });
+              }
+              
+              // Accumulate outcomes per bookmaker
+              const game = gameMap.get(key);
+              const bookKey = sig.bookmaker || 'consensus';
+              if (!game._outcomesByBook.has(bookKey)) {
+                game._outcomesByBook.set(bookKey, []);
+              }
+              
+              // Only add if we don't already have this outcome for this book
+              const existingOutcomes = game._outcomesByBook.get(bookKey);
+              const alreadyHas = existingOutcomes.some((o: any) => o.name === sig.outcome);
+              if (!alreadyHas) {
+                existingOutcomes.push({
+                  name: sig.outcome,
+                  price: sig.odds || (1 / sig.implied_probability),
+                });
+              }
+            }
+            
+            // Convert to Odds API format
+            const reconstructedGames: any[] = [];
+            for (const [, game] of gameMap) {
+              if (!game.away_team) continue; // Skip malformed entries
+              
+              // Build bookmakers array
+              const bookmakers: any[] = [];
+              for (const [bookKey, outcomes] of game._outcomesByBook) {
+                if (outcomes.length >= 2) { // Need at least 2 outcomes for H2H
+                  bookmakers.push({
+                    key: bookKey,
+                    markets: [{
+                      key: 'h2h',
+                      outcomes: outcomes,
+                    }],
+                  });
+                }
+              }
+              
+              if (bookmakers.length > 0) {
+                reconstructedGames.push({
+                  event_name: game.event_name,
+                  home_team: game.home_team,
+                  away_team: game.away_team,
+                  commence_time: game.commence_time,
+                  bookmakers: bookmakers,
+                });
+              }
+              
+              delete game._outcomesByBook; // Clean up temp field
+            }
+            
+            games = reconstructedGames;
+            console.log(`[POLY-MONITOR] Reconstructed ${games.length} games from bookmaker_signals for ${sport}`);
+          }
+        } catch (fallbackError) {
+          console.error(`[POLY-MONITOR] bookmaker_signals fallback error for ${sport}:`, fallbackError);
+        }
+      }
+      // ============= END FALLBACK =============
+      
       allBookmakerData.set(sport, games);
       console.log(`[POLY-MONITOR] Loaded ${games.length} ${sport} games`);
       
