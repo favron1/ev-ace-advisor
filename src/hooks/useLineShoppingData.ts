@@ -37,7 +37,7 @@ export function useLineShoppingData() {
       // Fetch corresponding Polymarket data
       const { data: polyData, error: polyError } = await supabase
         .from('polymarket_h2h_cache')
-        .select('event_title, yes_price, volume, event_start_time')
+        .select('event_title, yes_price, volume, event_date')
         .order('updated_at', { ascending: false })
         .limit(100);
 
