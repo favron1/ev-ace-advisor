@@ -94,7 +94,8 @@ export function matchPolyMarket(
   polyNoTeam: string,
   polyDate: Date | null,
   teamMap?: Record<string, string>,
-  isPlaceholderTime: boolean = false
+  isPlaceholderTime: boolean = false,
+  userMappings?: Map<string, string>
 ): MatchResult {
   const debug: MatchResult['debug'] = {
     polyTeams: [polyYesTeam, polyNoTeam],
@@ -112,9 +113,9 @@ export function matchPolyMarket(
   
   const map = teamMap || (sportCode ? SPORTS_CONFIG[sportCode].teamMap : {});
   
-  // Step 1: Resolve team names
-  const team1Resolved = resolveTeamName(polyYesTeam, sportCode || '', map);
-  const team2Resolved = resolveTeamName(polyNoTeam, sportCode || '', map);
+  // Step 1: Resolve team names (userMappings from DB take highest priority)
+  const team1Resolved = resolveTeamName(polyYesTeam, sportCode || '', map, userMappings);
+  const team2Resolved = resolveTeamName(polyNoTeam, sportCode || '', map, userMappings);
   
   debug.resolvedTeams = [team1Resolved, team2Resolved];
   
@@ -215,7 +216,8 @@ export function matchWithCanonicalPrimary(
   eventName: string,
   polyDate: Date | null,
   teamMap?: Record<string, string>,
-  isPlaceholderTime: boolean = false
+  isPlaceholderTime: boolean = false,
+  userMappings?: Map<string, string>
 ): MatchResult {
   // Parse event name into team names
   const parsed = splitTeams(eventName);
@@ -243,7 +245,8 @@ export function matchWithCanonicalPrimary(
     parsed.b,
     polyDate,
     teamMap,
-    isPlaceholderTime
+    isPlaceholderTime,
+    userMappings
   );
 }
 

@@ -51,7 +51,8 @@ export interface IndexStats {
 export function indexBookmakerEvents(
   rows: BookEvent[],
   sportCode: SportCode | string,
-  teamMap?: Record<string, string>
+  teamMap?: Record<string, string>,
+  userMappings?: Map<string, string>
 ): Map<string, BookEvent[]> {
   const idx = new Map<string, BookEvent[]>();
   const map = teamMap || SPORTS_CONFIG[sportCode as SportCode]?.teamMap || {};
@@ -67,9 +68,9 @@ export function indexBookmakerEvents(
       continue;
     }
     
-    // Resolve team names using teamMap
-    const homeResolved = resolveTeamName(row.home_team, sportCode, map);
-    const awayResolved = resolveTeamName(row.away_team, sportCode, map);
+    // Resolve team names using teamMap + userMappings from DB
+    const homeResolved = resolveTeamName(row.home_team, sportCode, map, userMappings);
+    const awayResolved = resolveTeamName(row.away_team, sportCode, map, userMappings);
     
     if (!homeResolved) {
       failed++;

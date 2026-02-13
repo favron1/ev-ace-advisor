@@ -25,7 +25,7 @@ import { indexBookmakerEvents, BookEvent } from '../_shared/book-index.ts';
 import { matchPolyMarket, MatchResult } from '../_shared/match-poly-to-book.ts';
 import { splitTeams } from '../_shared/canonicalize.ts';
 import { fuzzyMatchTeam, batchFuzzyMatch } from '../_shared/fuzzy-team-matcher.ts';
-
+import { getAllTeamMappings } from '../_shared/team-mapping-cache.ts';
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -1744,6 +1744,24 @@ Deno.serve(async (req) => {
       }
     }
     
+    // ============= LOAD DB TEAM MAPPINGS FOR SELF-HEALING =============
+    const allUserMappings = await getAllTeamMappings(supabase);
+    console.log(`[POLY-MONITOR] Loaded ${allUserMappings.size} user team mappings from DB`);
+    
+    // Build per-sport userMappings maps for resolveTeamName
+    const userMappingsBySport = new Map<string, Map<string, string>>();
+    for (const [compositeKey, canonical] of allUserMappings) {
+      const pipeIdx = compositeKey.indexOf('|');
+      if (pipeIdx > 0) {
+        const sportCode = compositeKey.substring(0, pipeIdx);
+        const teamKey = compositeKey.substring(pipeIdx + 1);
+        if (!userMappingsBySport.has(sportCode)) {
+          userMappingsBySport.set(sportCode, new Map());
+        }
+        userMappingsBySport.get(sportCode)!.set(teamKey, canonical);
+      }
+    }
+    
     // ============= BUILD CANONICAL BOOK INDEXES (ONCE PER SPORT) =============
     // This is the key optimization: O(1) lookups instead of O(n) per market
     const bookIndexes = new Map<string, Map<string, BookEvent[]>>();
@@ -1751,7 +1769,9 @@ Deno.serve(async (req) => {
       const sportCode = getAllSportCodeFromLeague(sport);
       if (sportCode) {
         const teamMap = ALL_SPORTS_CONFIG[sportCode].teamMap;
-        const bookIndex = indexBookmakerEvents(games as BookEvent[], sportCode, teamMap);
+        const oddsApiSport = ALL_SPORTS_CONFIG[sportCode].oddsApiSport;
+        const sportUserMappings = userMappingsBySport.get(oddsApiSport);
+        const bookIndex = indexBookmakerEvents(games as BookEvent[], sportCode, teamMap, sportUserMappings);
         bookIndexes.set(sport, bookIndex);
         console.log(`[POLY-MONITOR] Built book index for ${sport}: ${bookIndex.size} unique matchups`);
       }
@@ -2376,6 +2396,8 @@ Deno.serve(async (req) => {
         const sportCode = getAllSportCodeFromLeague(sport);
         const teamMap = sportCode ? ALL_SPORTS_CONFIG[sportCode].teamMap : {};
         const bookIndex = bookIndexes.get(sport);
+        const oddsApiSport = sportCode ? ALL_SPORTS_CONFIG[sportCode].oddsApiSport : '';
+        const sportUserMappings = userMappingsBySport.get(oddsApiSport);
         
         // Parse Polymarket title for team names
         const titleParts = splitTeams(event.event_name);
@@ -2395,7 +2417,8 @@ Deno.serve(async (req) => {
             polyNoTeam,
             polyEventDate,
             teamMap,
-            isPlaceholderTime
+            isPlaceholderTime,
+            sportUserMappings
           );
           
           // Track resolution stats
@@ -2586,7 +2609,8 @@ Deno.serve(async (req) => {
                 resolved.awayTeam,
                 polyEventDate,
                 teamMap,
-                isPlaceholderTime
+                isPlaceholderTime,
+                sportUserMappings
               );
               
               if (aiCanonicalResult.match) {
