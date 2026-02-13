@@ -181,8 +181,8 @@ export default function Terminal() {
 
   // Get high-value signals for quick display
   const highValueSignals = signals
-    .filter(s => s.edge_percentage && s.edge_percentage >= 3)
-    .sort((a, b) => (b.edge_percentage || 0) - (a.edge_percentage || 0))
+    .filter(s => s.edge_percent && s.edge_percent >= 3)
+    .sort((a, b) => (b.edge_percent || 0) - (a.edge_percent || 0))
     .slice(0, 8);
 
   return (
@@ -300,7 +300,7 @@ export default function Terminal() {
                               </h3>
                               <div className="flex items-center gap-2 text-xs">
                                 <Badge variant="outline" className="bg-blue-500/20 text-blue-400 border-blue-500/50">
-                                  {signal.league || 'Unknown League'}
+                                  {signal.urgency || 'Unknown'}
                                 </Badge>
                                 <span className="text-slate-400">
                                   <Clock className="h-3 w-3 inline mr-1" />
@@ -310,7 +310,7 @@ export default function Terminal() {
                             </div>
                             <div className="text-right">
                               <div className="text-lg font-bold text-green-400">
-                                +{signal.edge_percentage?.toFixed(1)}%
+                                +{signal.edge_percent?.toFixed(1)}%
                               </div>
                               <div className="text-xs text-slate-400">edge</div>
                             </div>
@@ -318,9 +318,9 @@ export default function Terminal() {
                           
                           <div className="grid grid-cols-3 gap-3 text-xs">
                             <div>
-                              <div className="text-slate-400">Kelly Stake</div>
+                              <div className="text-slate-400">Confidence</div>
                               <div className="font-semibold text-white">
-                                ${signal.kelly_stake?.toFixed(0) || '0'}
+                                {((signal.confidence_score || 0) * 100).toFixed(0)}%
                               </div>
                             </div>
                             <div>
@@ -332,7 +332,7 @@ export default function Terminal() {
                             <div>
                               <div className="text-slate-400">Book Fair</div>
                               <div className="font-semibold text-white">
-                                {((signal.book_probability || 0) * 100).toFixed(1)}%
+                                {((signal.bookmaker_probability || 0) * 100).toFixed(1)}%
                               </div>
                             </div>
                           </div>
