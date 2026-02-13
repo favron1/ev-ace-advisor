@@ -134,7 +134,7 @@ export default async function handler(req: Request) {
     console.error('Whale tracker error:', error);
     return new Response(JSON.stringify({
       error: 'Whale tracking failed',
-      details: error.message
+      details: (error as Error).message
     }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }

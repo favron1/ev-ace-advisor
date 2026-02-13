@@ -107,7 +107,7 @@ export function calculateKellySizing(
     half_kelly_stake: Math.floor(halfKellyStake),
     bankroll_percentage: Number(bankrollPercentage.toFixed(2)),
     risk_of_ruin: Number(riskOfRuin.toFixed(4)),
-    sizing_tier,
+    sizing_tier: sizingTier,
     warnings
   };
 }

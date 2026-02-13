@@ -341,6 +341,51 @@ export type Database = {
         }
         Relationships: []
       }
+      multi_leg_opportunities: {
+        Row: {
+          combined_edge: number | null
+          combined_probability: number | null
+          correlation_score: number | null
+          created_at: string | null
+          detected_at: string | null
+          event_name: string
+          expires_at: string | null
+          id: string
+          legs: Json
+          sport: string | null
+          status: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          combined_edge?: number | null
+          combined_probability?: number | null
+          correlation_score?: number | null
+          created_at?: string | null
+          detected_at?: string | null
+          event_name: string
+          expires_at?: string | null
+          id?: string
+          legs?: Json
+          sport?: string | null
+          status?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          combined_edge?: number | null
+          combined_probability?: number | null
+          correlation_score?: number | null
+          created_at?: string | null
+          detected_at?: string | null
+          event_name?: string
+          expires_at?: string | null
+          id?: string
+          legs?: Json
+          sport?: string | null
+          status?: string | null
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
       polymarket_h2h_cache: {
         Row: {
           best_ask: number | null
@@ -686,6 +731,54 @@ export type Database = {
         }
         Relationships: []
       }
+      sharp_book_lines: {
+        Row: {
+          bookmaker: string
+          captured_at: string | null
+          event_name: string
+          event_start_time: string | null
+          id: string
+          implied_probability: number
+          is_sharp: boolean | null
+          line_value: number | null
+          market_type: string
+          odds: number
+          outcome: string
+          sport: string
+          total_value: number | null
+        }
+        Insert: {
+          bookmaker: string
+          captured_at?: string | null
+          event_name: string
+          event_start_time?: string | null
+          id?: string
+          implied_probability: number
+          is_sharp?: boolean | null
+          line_value?: number | null
+          market_type: string
+          odds: number
+          outcome: string
+          sport: string
+          total_value?: number | null
+        }
+        Update: {
+          bookmaker?: string
+          captured_at?: string | null
+          event_name?: string
+          event_start_time?: string | null
+          id?: string
+          implied_probability?: number
+          is_sharp?: boolean | null
+          line_value?: number | null
+          market_type?: string
+          odds?: number
+          outcome?: string
+          sport?: string
+          total_value?: number | null
+        }
+        Relationships: []
+      }
       sharp_book_snapshots: {
         Row: {
           bookmaker: string
@@ -716,6 +809,45 @@ export type Database = {
           implied_probability?: number
           outcome?: string
           raw_odds?: number | null
+        }
+        Relationships: []
+      }
+      sharp_consensus: {
+        Row: {
+          calculated_at: string | null
+          confidence_score: number
+          consensus_probability: number
+          contributing_books: string[] | null
+          event_name: string
+          id: string
+          line_value: number | null
+          market_type: string
+          outcome: string
+          total_value: number | null
+        }
+        Insert: {
+          calculated_at?: string | null
+          confidence_score: number
+          consensus_probability: number
+          contributing_books?: string[] | null
+          event_name: string
+          id?: string
+          line_value?: number | null
+          market_type: string
+          outcome: string
+          total_value?: number | null
+        }
+        Update: {
+          calculated_at?: string | null
+          confidence_score?: number
+          consensus_probability?: number
+          contributing_books?: string[] | null
+          event_name?: string
+          id?: string
+          line_value?: number | null
+          market_type?: string
+          outcome?: string
+          total_value?: number | null
         }
         Relationships: []
       }
@@ -800,6 +932,13 @@ export type Database = {
             foreignKeyName: "signal_logs_opportunity_id_fkey"
             columns: ["opportunity_id"]
             isOneToOne: false
+            referencedRelation: "line_shopping_opportunities"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "signal_logs_opportunity_id_fkey"
+            columns: ["opportunity_id"]
+            isOneToOne: false
             referencedRelation: "signal_opportunities"
             referencedColumns: ["id"]
           },
@@ -807,6 +946,7 @@ export type Database = {
       }
       signal_opportunities: {
         Row: {
+          bankroll_percentage: number | null
           bookmaker_prob_fair: number | null
           bookmaker_probability: number
           confidence_score: number
@@ -817,6 +957,12 @@ export type Database = {
           expires_at: string | null
           id: string
           is_true_arbitrage: boolean | null
+          kelly_fraction: number | null
+          line_shopping_tier: string | null
+          liquidity_penalty: number | null
+          market_priority_score: number | null
+          market_type_bonus: number | null
+          max_kelly_stake_cents: number | null
           movement_confirmed: boolean | null
           movement_velocity: number | null
           polymarket_condition_id: string | null
@@ -828,16 +974,20 @@ export type Database = {
           polymarket_volume: number | null
           polymarket_yes_price: number | null
           recommended_outcome: string | null
+          sharp_consensus_prob: number | null
+          sharp_line_edge: number | null
           side: string
           signal_factors: Json | null
           signal_state: string | null
           signal_strength: number | null
           signal_tier: string | null
           status: string | null
+          suggested_stake_cents: number | null
           urgency: string | null
           user_id: string | null
         }
         Insert: {
+          bankroll_percentage?: number | null
           bookmaker_prob_fair?: number | null
           bookmaker_probability: number
           confidence_score: number
@@ -848,6 +998,12 @@ export type Database = {
           expires_at?: string | null
           id?: string
           is_true_arbitrage?: boolean | null
+          kelly_fraction?: number | null
+          line_shopping_tier?: string | null
+          liquidity_penalty?: number | null
+          market_priority_score?: number | null
+          market_type_bonus?: number | null
+          max_kelly_stake_cents?: number | null
           movement_confirmed?: boolean | null
           movement_velocity?: number | null
           polymarket_condition_id?: string | null
@@ -859,16 +1015,20 @@ export type Database = {
           polymarket_volume?: number | null
           polymarket_yes_price?: number | null
           recommended_outcome?: string | null
+          sharp_consensus_prob?: number | null
+          sharp_line_edge?: number | null
           side: string
           signal_factors?: Json | null
           signal_state?: string | null
           signal_strength?: number | null
           signal_tier?: string | null
           status?: string | null
+          suggested_stake_cents?: number | null
           urgency?: string | null
           user_id?: string | null
         }
         Update: {
+          bankroll_percentage?: number | null
           bookmaker_prob_fair?: number | null
           bookmaker_probability?: number
           confidence_score?: number
@@ -879,6 +1039,12 @@ export type Database = {
           expires_at?: string | null
           id?: string
           is_true_arbitrage?: boolean | null
+          kelly_fraction?: number | null
+          line_shopping_tier?: string | null
+          liquidity_penalty?: number | null
+          market_priority_score?: number | null
+          market_type_bonus?: number | null
+          max_kelly_stake_cents?: number | null
           movement_confirmed?: boolean | null
           movement_velocity?: number | null
           polymarket_condition_id?: string | null
@@ -890,12 +1056,15 @@ export type Database = {
           polymarket_volume?: number | null
           polymarket_yes_price?: number | null
           recommended_outcome?: string | null
+          sharp_consensus_prob?: number | null
+          sharp_line_edge?: number | null
           side?: string
           signal_factors?: Json | null
           signal_state?: string | null
           signal_strength?: number | null
           signal_tier?: string | null
           status?: string | null
+          suggested_stake_cents?: number | null
           urgency?: string | null
           user_id?: string | null
         }
@@ -963,12 +1132,148 @@ export type Database = {
         }
         Relationships: []
       }
+      whale_positions: {
+        Row: {
+          avg_price: number
+          closed_at: string | null
+          condition_id: string | null
+          created_at: string | null
+          current_price: number | null
+          event_name: string
+          id: string
+          market_id: string
+          opened_at: string | null
+          side: string
+          size: number
+          status: string | null
+          unrealized_pnl: number | null
+          updated_at: string | null
+          wallet_id: string
+        }
+        Insert: {
+          avg_price?: number
+          closed_at?: string | null
+          condition_id?: string | null
+          created_at?: string | null
+          current_price?: number | null
+          event_name: string
+          id?: string
+          market_id: string
+          opened_at?: string | null
+          side: string
+          size?: number
+          status?: string | null
+          unrealized_pnl?: number | null
+          updated_at?: string | null
+          wallet_id: string
+        }
+        Update: {
+          avg_price?: number
+          closed_at?: string | null
+          condition_id?: string | null
+          created_at?: string | null
+          current_price?: number | null
+          event_name?: string
+          id?: string
+          market_id?: string
+          opened_at?: string | null
+          side?: string
+          size?: number
+          status?: string | null
+          unrealized_pnl?: number | null
+          updated_at?: string | null
+          wallet_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "whale_positions_wallet_id_fkey"
+            columns: ["wallet_id"]
+            isOneToOne: false
+            referencedRelation: "whale_wallets"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      whale_wallets: {
+        Row: {
+          avg_position_size: number | null
+          confidence_tier: string | null
+          created_at: string | null
+          display_name: string | null
+          id: string
+          last_active_at: string | null
+          specializations: string[] | null
+          total_profit: number | null
+          total_trades: number | null
+          tracked_since: string | null
+          updated_at: string | null
+          wallet_address: string
+          win_rate: number | null
+        }
+        Insert: {
+          avg_position_size?: number | null
+          confidence_tier?: string | null
+          created_at?: string | null
+          display_name?: string | null
+          id?: string
+          last_active_at?: string | null
+          specializations?: string[] | null
+          total_profit?: number | null
+          total_trades?: number | null
+          tracked_since?: string | null
+          updated_at?: string | null
+          wallet_address: string
+          win_rate?: number | null
+        }
+        Update: {
+          avg_position_size?: number | null
+          confidence_tier?: string | null
+          created_at?: string | null
+          display_name?: string | null
+          id?: string
+          last_active_at?: string | null
+          specializations?: string[] | null
+          total_profit?: number | null
+          total_trades?: number | null
+          tracked_since?: string | null
+          updated_at?: string | null
+          wallet_address?: string
+          win_rate?: number | null
+        }
+        Relationships: []
+      }
     }
     Views: {
-      [_ in never]: never
+      line_shopping_opportunities: {
+        Row: {
+          bookmaker_probability: number | null
+          confidence_score: number | null
+          contributing_books: string[] | null
+          created_at: string | null
+          edge_percent: number | null
+          event_name: string | null
+          id: string | null
+          kelly_fraction: number | null
+          line_shopping_tier: string | null
+          market_priority_score: number | null
+          polymarket_price: number | null
+          price_discrepancy: number | null
+          sharp_confidence: number | null
+          sharp_consensus_prob: number | null
+          sharp_line_edge: number | null
+          sharp_market_type: string | null
+          sharp_prob: number | null
+          side: string | null
+          status: string | null
+          suggested_stake_cents: number | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
       cleanup_old_sharp_book_snapshots: { Args: never; Returns: undefined }
+      cleanup_old_sharp_lines: { Args: never; Returns: undefined }
+      update_market_priority_scores: { Args: never; Returns: undefined }
     }
     Enums: {
       bet_result: "pending" | "win" | "loss" | "void"

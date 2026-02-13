@@ -227,6 +227,7 @@ export class KellyCalculator {
       return this.calculateKellyPosition({
         win_probability: legs[0].win_probability,
         win_odds: legs[0].payout_odds,
+        lose_odds: 1.0,
         bankroll,
         edge: combined_edge
       });
@@ -253,6 +254,7 @@ export class KellyCalculator {
     return this.calculateKellyPosition({
       win_probability: Math.max(0.01, Math.min(0.99, combinedProbability)),
       win_odds: combinedPayoutOdds,
+      lose_odds: 1.0,
       bankroll,
       edge: adjustedEdge,
       correlation_factor: avgCorrelation,
