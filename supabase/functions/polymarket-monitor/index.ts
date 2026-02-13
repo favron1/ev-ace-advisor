@@ -17,6 +17,7 @@ import {
 import { indexBookmakerEvents, BookEvent } from '../_shared/book-index.ts';
 import { matchPolyMarket, MatchResult } from '../_shared/match-poly-to-book.ts';
 import { splitTeams } from '../_shared/canonicalize.ts';
+import { fuzzyMatchTeam, batchFuzzyMatch } from '../_shared/fuzzy-team-matcher.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -37,17 +38,24 @@ const SHARP_BOOKS = ['pinnacle', 'betfair', 'betfair_ex_eu'];
 
 // ============= CORE LOGIC VERSION =============
 // This version tag is attached to all signals for tracking and comparison
-// V1.3: "Match Failure Flip" - observability layer for silent signal drops
-const CORE_LOGIC_VERSION = 'v1.3';
+// V1.4: "Whale-Optimized Detection" - sharp line shopping, spread priority, Kelly sizing, improved matching
+const CORE_LOGIC_VERSION = 'v1.4';
 
-// ============= CORE LOGIC v1.3 THRESHOLDS =============
-// These constants define the gates for signal quality (from canonical spec)
-const V1_3_GATES = {
+// ============= CORE LOGIC v1.4 THRESHOLDS (WHALE-OPTIMIZED) =============
+// These constants implement whale strategies: higher edge requirements, sharp book priority, time-based weighting
+const V1_4_GATES = {
   S2_BOOK_PROB_MIN: 0.50,    // 50% minimum for execution-eligible (S2)
   S1_BOOK_PROB_MIN: 0.45,    // 45% minimum for any signal (S1)
   S2_CONFIDENCE_MIN: 55,      // Confidence floor for S2
   S2_TIME_TO_START_MIN: 10,   // Minutes to event start for S2
   SMS_TIERS: ['elite', 'strong'] as const,  // Only these tiers get SMS
+  MIN_USEFUL_EDGE: 0.03,     // RAISED: 3% minimum edge (whales don't bother with thin edges)
+  SPREAD_MULTIPLIER: 1.5,    // Spreads are 50% more valuable (whale insight)
+  TOTALS_MULTIPLIER: 1.2,    // Totals are 20% more valuable than moneylines
+  OPTIMAL_TIME_WINDOW_MIN: 2 * 60,  // 2 hours before game = optimal (120 minutes)
+  OPTIMAL_TIME_WINDOW_MAX: 6 * 60,  // 6 hours before game = optimal (360 minutes)
+  LATE_TIME_PENALTY: 0.8,    // Reduce edge by 20% for lines >12h before game
+  SHARP_BOOK_WEIGHT: 2.5,    // Weight Pinnacle/Betfair 2.5x more than average books
 } as const;
 
 // AI resolution cache - persists across poll cycles
@@ -418,19 +426,50 @@ function calculateFairProb(odds: number[], targetIndex: number): number {
   return probs[targetIndex] / totalProb;
 }
 
-// Calculate net edge after fees - now uses actual spread if available
+// Calculate net edge after fees with whale optimizations: time-based weighting and market type multipliers
 function calculateNetEdge(
   rawEdge: number, 
   volume: number, 
   stakeAmount: number = 100,
-  actualSpreadPct: number | null = null
+  actualSpreadPct: number | null = null,
+  marketType: string = 'h2h',
+  minutesToStart: number | null = null
 ): {
   netEdge: number;
   platformFee: number;
   spreadCost: number;
   slippage: number;
+  marketTypeMultiplier: number;
+  timeWeightMultiplier: number;
+  adjustedRawEdge: number;
 } {
-  const platformFee = rawEdge > 0 ? rawEdge * 0.01 : 0;
+  // Apply whale strategy multipliers to raw edge BEFORE costs
+  let adjustedRawEdge = rawEdge;
+  
+  // 1. Market Type Priority (whale insight: spreads more profitable than ML)
+  let marketTypeMultiplier = 1.0;
+  if (marketType === 'spread') {
+    marketTypeMultiplier = V1_4_GATES.SPREAD_MULTIPLIER;
+  } else if (marketType === 'total') {
+    marketTypeMultiplier = V1_4_GATES.TOTALS_MULTIPLIER;
+  }
+  
+  // 2. Time-based edge weighting (lines softest 2-6h before game)
+  let timeWeightMultiplier = 1.0;
+  if (minutesToStart !== null) {
+    if (minutesToStart >= V1_4_GATES.OPTIMAL_TIME_WINDOW_MIN && minutesToStart <= V1_4_GATES.OPTIMAL_TIME_WINDOW_MAX) {
+      // Optimal window: 2-6 hours before game
+      timeWeightMultiplier = 1.2; // 20% boost for optimal timing
+    } else if (minutesToStart > 12 * 60) {
+      // Late discovery: >12h before game (lines less reliable)
+      timeWeightMultiplier = V1_4_GATES.LATE_TIME_PENALTY;
+    }
+  }
+  
+  adjustedRawEdge = rawEdge * marketTypeMultiplier * timeWeightMultiplier;
+  
+  // Apply standard costs to adjusted edge
+  const platformFee = adjustedRawEdge > 0 ? adjustedRawEdge * 0.01 : 0;
   
   let spreadCost = actualSpreadPct !== null ? actualSpreadPct : 0.03;
   if (actualSpreadPct === null) {
@@ -449,7 +488,15 @@ function calculateNetEdge(
     else if (ratio < 0.02) slippage = 0.02;
   }
   
-  return { netEdge: rawEdge - platformFee - spreadCost - slippage, platformFee, spreadCost, slippage };
+  return { 
+    netEdge: adjustedRawEdge - platformFee - spreadCost - slippage, 
+    platformFee, 
+    spreadCost, 
+    slippage,
+    marketTypeMultiplier,
+    timeWeightMultiplier,
+    adjustedRawEdge
+  };
 }
 
 // ============= MOVEMENT DETECTION FUNCTIONS =============
@@ -648,38 +695,40 @@ function processMovementSnapshots(snapshots: any[]): MovementResult {
 }
 
 // Determine signal tier based on movement + edge + book probability
-// v1.3: Book probability AND movement confirmation required for high tiers
+// v1.4: WHALE-OPTIMIZED - higher edge requirements, sharp book priority
 function calculateSignalTier(
   movementTriggered: boolean,
   netEdge: number,
-  bookProbability: number  // Required for v1.3 compliance
+  bookProbability: number,  // Required for v1.4 compliance
+  sharpBookConfirmation: boolean = false // NEW: Whether sharp books confirm edge
 ): 'elite' | 'strong' | 'static' {
-  // v1.3: Low book probability caps tier at STATIC regardless of edge
+  // v1.4: Low book probability caps tier at STATIC regardless of edge
   // Signals with <45% book prob are fundamentally not tradeable
-  if (bookProbability < V1_3_GATES.S1_BOOK_PROB_MIN) {
-    console.log(`[V1.3] TIER_CAP: bookProb=${(bookProbability * 100).toFixed(1)}% < ${V1_3_GATES.S1_BOOK_PROB_MIN * 100}% floor -> STATIC`);
+  if (bookProbability < V1_4_GATES.S1_BOOK_PROB_MIN) {
+    console.log(`[V1.4] TIER_CAP: bookProb=${(bookProbability * 100).toFixed(1)}% < ${V1_4_GATES.S1_BOOK_PROB_MIN * 100}% floor -> STATIC`);
     return 'static';
   }
   
-  // v1.3: Movement confirmation is REQUIRED for STRONG and ELITE tiers
-  // High edge alone (10%+) is NOT sufficient without movement confirmation
-  // This ensures SMS alerts only go for high-conviction signals
-  if (!movementTriggered) {
-    // Without movement, max tier is STATIC regardless of edge
-    console.log(`[V1.3] TIER_CAP: No movement confirmation -> STATIC (edge=${(netEdge * 100).toFixed(1)}%)`);
+  // v1.4: WHALE INSIGHT - Sharp book confirmation can bypass movement requirement
+  // When Polymarket offers better value than Pinnacle, that's premium regardless of movement
+  const qualifiesForHighTier = movementTriggered || sharpBookConfirmation;
+  
+  if (!qualifiesForHighTier) {
+    // Without movement OR sharp book edge, max tier is STATIC regardless of edge
+    console.log(`[V1.4] TIER_CAP: No movement or sharp confirmation -> STATIC (edge=${(netEdge * 100).toFixed(1)}%)`);
     return 'static';
   }
   
-  // With movement confirmed + valid book prob, tier based on edge magnitude
-  // Book probability must also be >=50% for S2 execution eligibility
-  if (bookProbability >= V1_3_GATES.S2_BOOK_PROB_MIN) {
-    if (netEdge >= 0.05) return 'elite';
-    if (netEdge >= 0.03) return 'strong';
+  // V1.4: RAISED minimum edges (whales don't bother with thin edges)
+  // With movement/sharp confirmation + valid book prob, tier based on edge magnitude
+  if (bookProbability >= V1_4_GATES.S2_BOOK_PROB_MIN) {
+    if (netEdge >= 0.06) return 'elite';     // RAISED from 5% to 6%
+    if (netEdge >= V1_4_GATES.MIN_USEFUL_EDGE) return 'strong';  // 3% minimum
   }
   
-  // Movement confirmed but either edge too small or book prob in S1 range (45-50%)
-  if (netEdge >= 0.05) return 'strong';  // Demoted from elite due to book prob
-  if (netEdge >= 0.03) return 'strong';
+  // Movement/sharp confirmed but either edge too small or book prob in S1 range (45-50%)
+  if (netEdge >= 0.06) return 'strong';  // Demoted from elite due to book prob
+  if (netEdge >= V1_4_GATES.MIN_USEFUL_EDGE) return 'strong';
   return 'static';
 }
 
@@ -1243,7 +1292,14 @@ function calculateConsensusFairProbByName(
       continue;
     }
     
-    const weight = SHARP_BOOKS.includes(bookmaker.key) ? 1.5 : 1.0;
+    // V1.4: WHALE STRATEGY - Weight Pinnacle/Betfair much more heavily (they're the sharpest)
+    let weight = 1.0;
+    const bookKey = bookmaker.key.toLowerCase();
+    if (bookKey === 'pinnacle' || bookKey === 'betfair' || bookKey === 'betfair_ex_eu') {
+      weight = V1_4_GATES.SHARP_BOOK_WEIGHT; // 2.5x weight for sharpest books
+    } else if (SHARP_BOOKS.includes(bookmaker.key)) {
+      weight = 1.8; // Still weight other sharp books higher than average
+    }
     
     weightedProb += fairProb * weight;
     totalWeight += weight;
@@ -1481,6 +1537,107 @@ Deno.serve(async (req) => {
       const games = await fetchBookmakerOdds(endpoint.sport, endpoint.markets, oddsApiKey);
       allBookmakerData.set(sport, games);
       console.log(`[POLY-MONITOR] Loaded ${games.length} ${sport} games`);
+      
+      // V1.4: Populate sharp lines tables for line shopping dashboard
+      try {
+        const sharpBookSnapshots: any[] = [];
+        const sharpConsensusData: any[] = [];
+        
+        for (const game of games) {
+          const eventKey = generateEventKey(game.event_name || `${game.home_team} vs ${game.away_team}`, '');
+          
+          for (const bookmaker of game.bookmakers || []) {
+            // Only store data from sharp books
+            const bookKey = bookmaker.key.toLowerCase();
+            if (!['pinnacle', 'betfair', 'betfair_ex_eu', 'circa', 'betonline', 'bookmaker'].includes(bookKey)) {
+              continue;
+            }
+            
+            const h2hMarket = bookmaker.markets?.find((m: any) => m.key === 'h2h');
+            if (!h2hMarket?.outcomes) continue;
+            
+            // Filter out Draw outcomes
+            const outcomes = h2hMarket.outcomes.filter((o: any) => {
+              const name = (o.name || '').toLowerCase();
+              return !name.includes('draw') && name !== 'tie';
+            });
+            
+            for (const outcome of outcomes) {
+              if (outcome.price && outcome.price > 1) {
+                sharpBookSnapshots.push({
+                  event_key: eventKey,
+                  event_name: game.event_name || `${game.home_team} vs ${game.away_team}`,
+                  outcome: outcome.name,
+                  bookmaker: bookKey,
+                  implied_probability: 1 / outcome.price,
+                  raw_odds: outcome.price,
+                  captured_at: now.toISOString(),
+                  sport: sport
+                });
+              }
+            }
+          }
+          
+          // Calculate sharp consensus for each team
+          const gameOutcomes = new Set<string>();
+          for (const bookmaker of game.bookmakers || []) {
+            const h2hMarket = bookmaker.markets?.find((m: any) => m.key === 'h2h');
+            if (h2hMarket?.outcomes) {
+              h2hMarket.outcomes.forEach((o: any) => {
+                const name = (o.name || '').toLowerCase();
+                if (!name.includes('draw') && name !== 'tie') {
+                  gameOutcomes.add(o.name);
+                }
+              });
+            }
+          }
+          
+          for (const teamName of gameOutcomes) {
+            const consensusProb = calculateConsensusFairProbByName(game, 'h2h', teamName, sport);
+            if (consensusProb !== null) {
+              sharpConsensusData.push({
+                event_key: eventKey,
+                event_name: game.event_name || `${game.home_team} vs ${game.away_team}`,
+                team_name: teamName,
+                sharp_consensus_prob: consensusProb,
+                num_books: game.bookmakers?.length || 0,
+                calculated_at: now.toISOString(),
+                sport: sport,
+                commence_time: game.commence_time
+              });
+            }
+          }
+        }
+        
+        // Batch insert sharp book snapshots
+        if (sharpBookSnapshots.length > 0) {
+          const { error: snapshotError } = await supabase
+            .from('sharp_book_snapshots')
+            .upsert(sharpBookSnapshots, {
+              onConflict: 'event_key,outcome,bookmaker,captured_at'
+            });
+          
+          if (!snapshotError) {
+            console.log(`[V1.4] Stored ${sharpBookSnapshots.length} sharp book snapshots for ${sport}`);
+          }
+        }
+        
+        // Batch insert sharp consensus data
+        if (sharpConsensusData.length > 0) {
+          const { error: consensusError } = await supabase
+            .from('sharp_consensus')
+            .upsert(sharpConsensusData, {
+              onConflict: 'event_key,team_name,calculated_at'
+            });
+          
+          if (!consensusError) {
+            console.log(`[V1.4] Stored ${sharpConsensusData.length} sharp consensus records for ${sport}`);
+          }
+        }
+        
+      } catch (sharpLinesError) {
+        console.error(`[V1.4] Error storing sharp lines for ${sport}:`, sharpLinesError);
+      }
     }
     
     // ============= BUILD CANONICAL BOOK INDEXES (ONCE PER SPORT) =============
@@ -2251,22 +2408,62 @@ Deno.serve(async (req) => {
           }
         }
 
-        // ============= FALLBACK 3: Fuzzy matching (last resort) =============
+        // ============= FALLBACK 3: Enhanced fuzzy matching (improved) =============
         if (!match && bookmakerGames.length > 0) {
-          const fuzzyResult = findDirectOddsApiMatch(event.event_name, bookmakerGames, 0.5);
-          if (fuzzyResult) {
-            match = findBookmakerMatch(
-              event.event_name,
-              event.polymarket_question || '',
-              marketType,
-              [fuzzyResult.game],
-              polyEventDate,
-              polySlug
-            );
-            if (match) {
-              console.log(`[POLY-MONITOR] FUZZY LAST RESORT: "${event.event_name}" found via ${fuzzyResult.homeTeam} vs ${fuzzyResult.awayTeam}`);
-              matchMethod = 'fuzzy_last_resort';
-              funnelStats.fuzzy_last_resort++;
+          // V1.4: Try new fuzzy-team-matcher first (more accurate)
+          if (polyYesTeam && polyNoTeam && sportCode) {
+            const yesMatch = fuzzyMatchTeam(polyYesTeam, sportCode, 0.7);
+            const noMatch = fuzzyMatchTeam(polyNoTeam, sportCode, 0.7);
+            
+            if (yesMatch.match && noMatch.match && yesMatch.confidence >= 80 && noMatch.confidence >= 80) {
+              // Try to find bookmaker game with these resolved team names
+              const enhancedGame = bookmakerGames.find(g => {
+                const gameNorm = normalizeName(`${g.home_team} ${g.away_team}`);
+                const yesNorm = normalizeName(yesMatch.match || '');
+                const noNorm = normalizeName(noMatch.match || '');
+                
+                const yesLastWord = yesNorm.split(' ').pop() || '';
+                const noLastWord = noNorm.split(' ').pop() || '';
+                
+                return (yesLastWord.length > 2 && gameNorm.includes(yesLastWord)) &&
+                       (noLastWord.length > 2 && gameNorm.includes(noLastWord));
+              });
+              
+              if (enhancedGame) {
+                match = findBookmakerMatch(
+                  event.event_name,
+                  event.polymarket_question || '',
+                  marketType,
+                  [enhancedGame],
+                  polyEventDate,
+                  polySlug
+                );
+                if (match) {
+                  console.log(`[POLY-MONITOR] ENHANCED FUZZY: "${event.event_name}" → ${yesMatch.match} vs ${noMatch.match} (${yesMatch.confidence}%/${noMatch.confidence}%)`);
+                  matchMethod = 'enhanced_fuzzy';
+                  funnelStats.tier3_fuzzy++;
+                }
+              }
+            }
+          }
+          
+          // Fallback to original fuzzy logic if enhanced didn't work
+          if (!match) {
+            const fuzzyResult = findDirectOddsApiMatch(event.event_name, bookmakerGames, 0.5);
+            if (fuzzyResult) {
+              match = findBookmakerMatch(
+                event.event_name,
+                event.polymarket_question || '',
+                marketType,
+                [fuzzyResult.game],
+                polyEventDate,
+                polySlug
+              );
+              if (match) {
+                console.log(`[POLY-MONITOR] FUZZY FALLBACK: "${event.event_name}" found via ${fuzzyResult.homeTeam} vs ${fuzzyResult.awayTeam}`);
+                matchMethod = 'fuzzy_fallback';
+                funnelStats.fuzzy_last_resort++;
+              }
             }
           }
         }
@@ -2643,31 +2840,31 @@ Deno.serve(async (req) => {
           console.log(`[POLY-MONITOR] EDGE CALC: ${event.event_name} | YES=${yesTeamName}=${(yesEdge * 100).toFixed(1)}%, NO=${noTeamName}=${(noEdge * 100).toFixed(1)}% -> ${betSide} ${recommendedOutcome} (${(rawEdge * 100).toFixed(1)}% edge)`);
           // ========== END DIRECT EDGE CALCULATION ==========
           
-          // Track edges over threshold (lowered to 3% for signal creation)
-          const MIN_EDGE = 0.03; // 3% for signal creation
+          // Track edges over threshold (V1.4: whale-optimized threshold)
+          const MIN_EDGE = V1_4_GATES.MIN_USEFUL_EDGE; // 3% minimum useful edge (whales don't bother with thin edges)
           if (rawEdge >= MIN_EDGE) {
             funnelStats.edges_over_threshold++;
           }
           
-          // ============= STAGE 3.5: BOOK PROBABILITY GATE (v1.3) =============
+          // ============= STAGE 3.5: BOOK PROBABILITY GATE (v1.4) =============
           // Book probability must meet minimum thresholds for signal quality
           // This prevents low-probability signals from reaching the feed
-          if (recommendedFairProb < V1_3_GATES.S1_BOOK_PROB_MIN) {
-            console.log(`[V1.3] BOOK_PROB_GATE_REJECT: ${event.event_name} - ${(recommendedFairProb * 100).toFixed(1)}% < ${V1_3_GATES.S1_BOOK_PROB_MIN * 100}% floor`);
+          if (recommendedFairProb < V1_4_GATES.S1_BOOK_PROB_MIN) {
+            console.log(`[V1.4] BOOK_PROB_GATE_REJECT: ${event.event_name} - ${(recommendedFairProb * 100).toFixed(1)}% < ${V1_4_GATES.S1_BOOK_PROB_MIN * 100}% floor`);
             continue; // REJECT - book probability too low for any signal
           }
           
           // Determine signal state based on book probability
           let signalState: 'S2_EXECUTION_ELIGIBLE' | 'S1_PROMOTE' | 'WATCH' = 'WATCH';
-          if (recommendedFairProb >= V1_3_GATES.S2_BOOK_PROB_MIN) {
+          if (recommendedFairProb >= V1_4_GATES.S2_BOOK_PROB_MIN) {
             signalState = 'S2_EXECUTION_ELIGIBLE';
-          } else if (recommendedFairProb >= V1_3_GATES.S1_BOOK_PROB_MIN) {
+          } else if (recommendedFairProb >= V1_4_GATES.S1_BOOK_PROB_MIN) {
             signalState = 'S1_PROMOTE';
           }
-          console.log(`[V1.3] GATE_CHECK: ${event.event_name} | bookProb=${(recommendedFairProb * 100).toFixed(1)}% | state=${signalState}`);
+          console.log(`[V1.4] GATE_CHECK: ${event.event_name} | bookProb=${(recommendedFairProb * 100).toFixed(1)}% | state=${signalState}`);
           // ============= END STAGE 3.5 =============
           
-          if (rawEdge >= 0.02) {
+          if (rawEdge >= V1_4_GATES.MIN_USEFUL_EDGE) {
             // CRITICAL FIX #3: Staleness & high-prob edge gating
             // Gate against artifact edges on high-probability outcomes
             const staleness = now.getTime() - new Date(event.last_poly_refresh || now.toISOString()).getTime();
@@ -2685,7 +2882,16 @@ Deno.serve(async (req) => {
               rawEdge = 0.40; // Cap at 40%
             }
             
-            const { netEdge } = calculateNetEdge(rawEdge, liveVolume, stakeAmount, spreadPct);
+            // V1.4: Enhanced net edge calculation with time weighting and market type multipliers
+            const minutesToStart = effectiveStartTime ? Math.floor((effectiveStartTime.getTime() - now.getTime()) / (60 * 1000)) : null;
+            const { netEdge, marketTypeMultiplier, timeWeightMultiplier, adjustedRawEdge } = calculateNetEdge(
+              rawEdge, 
+              liveVolume, 
+              stakeAmount, 
+              spreadPct, 
+              marketType, 
+              minutesToStart
+            );
             
             // ========== DUAL TRIGGER SYSTEM ==========
             // TRIGGER CONDITIONS (either/or):
@@ -2703,8 +2909,13 @@ Deno.serve(async (req) => {
               triggerReason = 'movement';
             }
             
+            // V1.4: Check if sharp books confirm this edge (Pinnacle/Betfair offering worse value than Polymarket)
+            const sharpBookConfirmation = yesFairProb !== null && noFairProb !== null && 
+              ((betSide === 'YES' && yesFairProb > livePolyPrice + 0.02) || 
+               (betSide === 'NO' && noFairProb > (1 - livePolyPrice) + 0.02));
+            
             // Calculate base tier, then apply movement boost
-            let signalTier = calculateSignalTier(movementTriggered, netEdge, recommendedFairProb);
+            let signalTier = calculateSignalTier(movementTriggered, netEdge, recommendedFairProb, sharpBookConfirmation);
             
             // Movement boost can upgrade tier: STATIC -> STRONG -> ELITE
             if (movementBoost >= 2 && signalTier === 'static') {
@@ -2810,7 +3021,50 @@ Deno.serve(async (req) => {
 
             const signalPolyPrice = betSide === 'YES' ? livePolyPrice : (1 - livePolyPrice);
             
-            console.log(`[POLY-MONITOR] SIGNAL CREATE: ${betSide} ${recommendedOutcome} @ ${(signalPolyPrice * 100).toFixed(1)}c | YES=${yesTeamName} @ ${(livePolyPrice * 100).toFixed(1)}c, NO=${noTeamName} @ ${((1-livePolyPrice) * 100).toFixed(1)}c`);
+            // ============= V1.4: KELLY SIZING CALCULATION =============
+            // Calculate optimal position size using Kelly criterion (whale strategy insight)
+            let kellyFraction = 0;
+            let recommendedStake = 0;
+            let kellyBankrollPercent = 0;
+            
+            try {
+              // Kelly formula: f = (bp - q) / b where b = odds received, p = win prob, q = lose prob
+              const winProb = recommendedFairProb;
+              const payoutOdds = 1 / signalPolyPrice; // If we bet $1 and win, we get $payoutOdds back
+              const loseOdds = 1; // If we lose, we lose our entire stake
+              
+              if (winProb > 0 && winProb < 1 && payoutOdds > 1) {
+                const loseProb = 1 - winProb;
+                const rawKelly = (payoutOdds * winProb - loseProb) / payoutOdds;
+                
+                // Apply safety: use half-Kelly with max 5% bankroll risk
+                kellyFraction = Math.max(0, Math.min(0.05, rawKelly * 0.5));
+                kellyBankrollPercent = kellyFraction * 100;
+                recommendedStake = Math.round(stakeAmount * kellyFraction / 0.01); // Convert to actual $ based on stake
+              }
+            } catch (kellyError) {
+              console.log(`[V1.4] Kelly calculation error for ${event.event_name}:`, kellyError);
+            }
+            
+            // ============= V1.4: LINE SHOPPING TIER =============
+            // Determine value tier based on sharp book comparison
+            let lineShoppingTier = 'fair';
+            let sharpConsensusProb = recommendedFairProb;
+            
+            if (sharpBookConfirmation) {
+              const edgeOverSharp = recommendedFairProb - signalPolyPrice;
+              if (edgeOverSharp >= 0.08) {
+                lineShoppingTier = 'premium'; // 8%+ edge over sharp books = whale-tier
+              } else if (edgeOverSharp >= 0.05) {
+                lineShoppingTier = 'value'; // 5%+ edge = strong value
+              } else if (edgeOverSharp >= 0.03) {
+                lineShoppingTier = 'good'; // 3%+ edge = decent value
+              }
+            } else if (rawEdge < 0.02) {
+              lineShoppingTier = 'avoid'; // Poor value compared to sharp books
+            }
+            
+            console.log(`[POLY-MONITOR] SIGNAL CREATE: ${betSide} ${recommendedOutcome} @ ${(signalPolyPrice * 100).toFixed(1)}c | YES=${yesTeamName} @ ${(livePolyPrice * 100).toFixed(1)}c, NO=${noTeamName} @ ${((1-livePolyPrice) * 100).toFixed(1)}c | Kelly=${kellyBankrollPercent.toFixed(1)}%, Tier=${lineShoppingTier}`);
 
             const signalData = {
               polymarket_price: signalPolyPrice, // FIX: Use side-adjusted price
@@ -2832,6 +3086,14 @@ Deno.serve(async (req) => {
               movement_confirmed: movementTriggered,
               movement_velocity: movement.velocity,
               signal_tier: signalTier,
+              // V1.4: Kelly sizing integration
+              kelly_fraction: kellyFraction,
+              recommended_stake: recommendedStake,
+              kelly_bankroll_percent: kellyBankrollPercent,
+              // V1.4: Line shopping tier integration
+              line_shopping_tier: lineShoppingTier,
+              sharp_consensus_prob: sharpConsensusProb,
+              sharp_book_confirmation: sharpBookConfirmation,
               // Version tracking
               core_logic_version: CORE_LOGIC_VERSION,
               signal_factors: {
@@ -2854,6 +3116,14 @@ Deno.serve(async (req) => {
                 signal_tier: signalTier,
                 // Directional labeling
                 bet_direction: betSide === 'YES' ? 'BUY_YES' : 'BUY_NO',
+                // V1.4: Enhanced factors
+                market_type_multiplier: marketTypeMultiplier,
+                time_weight_multiplier: timeWeightMultiplier,
+                adjusted_raw_edge: adjustedRawEdge * 100,
+                minutes_to_start: minutesToStart,
+                kelly_fraction: kellyFraction,
+                line_shopping_tier: lineShoppingTier,
+                sharp_book_confirmation: sharpBookConfirmation,
                 // Version tracking in factors for querying
                 core_logic_version: CORE_LOGIC_VERSION,
               },
@@ -2915,16 +3185,16 @@ Deno.serve(async (req) => {
               funnelStats.signals_created++;
             }
 
-            // Send SMS ONLY for ELITE and STRONG signals (v1.3 compliance)
+            // Send SMS ONLY for ELITE and STRONG signals (v1.4 compliance)
             // STATIC tier signals should never trigger SMS notifications
             if (!signalError && signal && !existingSignal) {
-              const SMS_ELIGIBLE_TIERS: readonly string[] = V1_3_GATES.SMS_TIERS;
+              const SMS_ELIGIBLE_TIERS: readonly string[] = V1_4_GATES.SMS_TIERS;
               
               if (SMS_ELIGIBLE_TIERS.includes(signalTier)) {
-                console.log(`[V1.3] SMS SENDING: tier=${signalTier}, edge=${(rawEdge * 100).toFixed(1)}%, bookProb=${(recommendedFairProb * 100).toFixed(1)}%`);
+                console.log(`[V1.4] SMS SENDING: tier=${signalTier}, edge=${(adjustedRawEdge * 100).toFixed(1)}%, bookProb=${(recommendedFairProb * 100).toFixed(1)}%, kelly=${kellyBankrollPercent.toFixed(1)}%, lineShop=${lineShoppingTier}`);
                 const alertSent = await sendSmsAlert(
                   supabase, event, livePolyPrice, recommendedFairProb,
-                  rawEdge, netEdge, liveVolume, stakeAmount, marketType, recommendedOutcome,
+                  adjustedRawEdge, netEdge, liveVolume, stakeAmount, marketType, recommendedOutcome,
                   signalTier, movement.velocity, betSide, movement.direction
                 );
                 
@@ -2936,7 +3206,7 @@ Deno.serve(async (req) => {
                     .eq('id', event.id);
                 }
               } else {
-                console.log(`[V1.3] SMS BLOCKED: tier=${signalTier} not in [${SMS_ELIGIBLE_TIERS.join(', ')}] - signal created but no SMS`);
+                console.log(`[V1.4] SMS BLOCKED: tier=${signalTier} not in [${SMS_ELIGIBLE_TIERS.join(', ')}] - signal created but no SMS`);
               }
             }
           }

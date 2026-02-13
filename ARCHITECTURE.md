@@ -30,10 +30,14 @@ Execution Decision:
 - min_net_edge_for_bet: 2%
 - min_net_edge_for_strong_bet: 4%
 
-Signal Classification:
-- ELITE: movement_confirmed + net_edge >= 5%
-- STRONG: movement_confirmed + net_edge >= 3%
-- STATIC: no movement or low confidence
+Signal Classification (V1.4 - Whale-Optimized):
+- ELITE: (movement_confirmed OR sharp_book_confirmation) + net_edge >= 6%
+- STRONG: (movement_confirmed OR sharp_book_confirmation) + net_edge >= 3%
+- STATIC: no movement or sharp confirmation, or low confidence
+- MIN_USEFUL_EDGE: 3% (whales don't bother with thin edges)
+- SPREAD_MULTIPLIER: 1.5x (spreads more profitable than moneylines)
+- TOTALS_MULTIPLIER: 1.2x (totals more profitable than moneylines)
+- SHARP_BOOK_WEIGHT: 2.5x (Pinnacle/Betfair weighted much more heavily)
 ```
 
 ---
@@ -183,7 +187,18 @@ max_exposure_per_event: 500
 
 ## Contract Version
 
-**Version**: 1.1  
-**Last Updated**: 2026-01-31
+**Version**: 1.4  
+**Last Updated**: 2026-02-13
+
+**V1.4 Changes (Whale-Optimized Signal Detection):**
+- Raised minimum useful edge from 2% to 3% (whales don't bother with thin edges)
+- Added market type multipliers: spreads 1.5x, totals 1.2x vs moneylines
+- Time-based edge weighting: 2-6h before game = optimal (1.2x), >12h = penalized (0.8x)
+- Sharp book line shopping: Pinnacle/Betfair weighted 2.5x more heavily
+- Sharp book confirmation can bypass movement requirement for high tiers
+- Integrated Kelly sizing calculation and position recommendations
+- Enhanced fuzzy team matching with confidence scoring
+- Populate sharp_book_lines and sharp_consensus tables for dashboard
+- Signal tier requirements: ELITE 6%+, STRONG 3%+ (up from 5% and 3%)
 
 Changes to tiers or thresholds should increment this version.

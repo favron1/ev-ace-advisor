@@ -1,286 +1,213 @@
 /**
- * Sharp Book Aggregator - Cross-Platform Line Shopping
- * Implements whale strategy: compare Polymarket odds against sharp sportsbooks
- * When Polymarket offers better value than Pinnacle/Circa, signal high-confidence edge
+ * Sharp Book Aggregator - Professional Odds Data Processing  
+ * Implements whale strategy insight: Pinnacle and Betfair are the sharpest books
+ * When Polymarket offers better value than these, it's a premium opportunity
  */
 
 export interface SharpBookLine {
-  bookmaker: 'pinnacle' | 'circa' | 'betcris' | 'betfair';
-  sport: string;
-  event_key: string;
-  home_team: string;
-  away_team: string;
-  outcome: string; // team name for H2H
-  decimal_odds: number;
+  bookmaker: string;
+  team_name: string;
   implied_probability: number;
-  market_type: 'h2h' | 'spread' | 'total';
-  timestamp: string;
-  ligne?: number; // spread line for spread markets
+  decimal_odds: number;
+  is_pinnacle: boolean;
+  is_betfair: boolean;
+  weight: number; // Higher weight for sharper books
+  last_updated: string;
 }
 
 export interface LineComparisonResult {
   polymarketBetter: boolean;
   edgeOverSharpest: number;
   sharpestBook: string;
-  sharpestOdds: number;
-  sharpestImpliedProb: number;
-  allSharpLines: SharpBookLine[];
+  sharpestProb: number;
   confidence: 'high' | 'medium' | 'low';
+  allSharpLines: SharpBookLine[];
 }
 
-// Sharp book reliability weights (higher = more trusted)
+export interface SharpMovementResult {
+  movementDetected: boolean;
+  direction: 'shortening' | 'drifting' | null;
+  booksConfirming: number;
+  avgMovement: number;
+  pinnacleMovement?: number;
+  betfairMovement?: number;
+}
+
+// Sharp book weights based on whale research
 const SHARP_BOOK_WEIGHTS = {
-  'pinnacle': 1.0,    // Gold standard
-  'betfair': 0.95,    // Exchange, very efficient
-  'circa': 0.9,       // Sharp US book
-  'betcris': 0.85     // Regional sharp
+  'pinnacle': 3.0,    // Sharpest book - whale research shows this is key
+  'betfair': 2.5,     // Exchange with sophisticated players
+  'circa': 2.0,       // Sharp Vegas book
+  'betonline': 1.8,   // Sharp offshore
+  'bookmaker': 1.5,   // Decent sharp book
+  'default': 1.0      // Standard book weight
 } as const;
 
-// Minimum edge over sharpest book to signal advantage
-const MIN_SHARP_EDGE = 0.03; // 3%
-
 export class SharpBookAggregator {
-  private apiKey: string;
-  private baseUrl: string = 'https://api.the-odds-api.com/v4';
+  private oddsApiKey: string;
+  private cache: Map<string, SharpBookLine[]> = new Map();
+  private cacheExpiry: Map<string, number> = new Map();
 
-  constructor(apiKey: string) {
-    this.apiKey = apiKey;
+  constructor(oddsApiKey: string) {
+    this.oddsApiKey = oddsApiKey;
   }
 
   /**
-   * Fetch lines from multiple sharp books for comparison
+   * Fetch sharp book lines for a sport/event
    */
-  async fetchSharpLines(
-    sport: string, 
-    eventKey: string
-  ): Promise<SharpBookLine[]> {
-    const sharpBooks = ['pinnacle', 'betfair', 'circa', 'betcris'];
-    const lines: SharpBookLine[] = [];
+  async fetchSharpLines(sport: string, eventKey?: string): Promise<SharpBookLine[]> {
+    const cacheKey = `${sport}-${eventKey || 'all'}`;
+    
+    // Check cache first (5 minute expiry)
+    if (this.isValidCache(cacheKey)) {
+      return this.cache.get(cacheKey) || [];
+    }
 
     try {
-      const url = `${this.baseUrl}/sports/${sport}/odds/?apiKey=${this.apiKey}&markets=h2h&bookmakers=${sharpBooks.join(',')}&regions=us,uk,eu&oddsFormat=decimal`;
+      // Map sport codes to Odds API endpoints
+      const sportMapping: Record<string, string> = {
+        'NHL': 'icehockey_nhl',
+        'NBA': 'basketball_nba', 
+        'NCAA': 'basketball_ncaab',
+        'NFL': 'americanfootball_nfl'
+      };
+
+      const oddsApiSport = sportMapping[sport] || sport.toLowerCase();
+      const url = `https://api.the-odds-api.com/v4/sports/${oddsApiSport}/odds/?apiKey=${this.oddsApiKey}&markets=h2h&regions=us,uk,eu&oddsFormat=decimal`;
       
       const response = await fetch(url);
       if (!response.ok) {
-        console.warn(`Sharp book API error: ${response.status}`);
+        console.log(`[SHARP-AGGREGATOR] API error: ${response.status} for ${sport}`);
         return [];
       }
 
-      const events = await response.json();
+      const data = await response.json();
+      const sharpLines = this.processOddsData(data);
       
-      for (const event of events) {
-        if (event.id !== eventKey && !event.sport_title?.includes(eventKey)) continue;
-
-        for (const bookmaker of event.bookmakers || []) {
-          const bookName = bookmaker.key.toLowerCase();
-          
-          // Only process sharp books
-          if (!sharpBooks.includes(bookName)) continue;
-
-          const h2hMarket = bookmaker.markets?.find((m: any) => m.key === 'h2h');
-          if (!h2hMarket?.outcomes) continue;
-
-          // Filter out draws for 2-way comparison
-          const outcomes = h2hMarket.outcomes.filter((o: any) => {
-            const name = (o.name || '').toLowerCase();
-            return !name.includes('draw') && name !== 'tie';
-          });
-
-          for (const outcome of outcomes) {
-            if (!outcome.price || outcome.price <= 1) continue;
-
-            lines.push({
-              bookmaker: bookName as any,
-              sport,
-              event_key: eventKey,
-              home_team: event.home_team,
-              away_team: event.away_team,
-              outcome: outcome.name,
-              decimal_odds: outcome.price,
-              implied_probability: 1 / outcome.price,
-              market_type: 'h2h',
-              timestamp: new Date().toISOString(),
-            });
-          }
-        }
-      }
-
-      console.log(`[SHARP-BOOKS] Fetched ${lines.length} lines for ${eventKey}`);
-      return lines;
+      // Cache for 5 minutes
+      this.cache.set(cacheKey, sharpLines);
+      this.cacheExpiry.set(cacheKey, Date.now() + 5 * 60 * 1000);
+      
+      console.log(`[SHARP-AGGREGATOR] Fetched ${sharpLines.length} sharp lines for ${sport}`);
+      return sharpLines;
+      
     } catch (error) {
-      console.error('[SHARP-BOOKS] Fetch error:', error);
+      console.error('[SHARP-AGGREGATOR] Fetch error:', error);
       return [];
     }
   }
 
   /**
-   * Compare Polymarket price against sharp book consensus
-   * Returns true if Polymarket offers better value than the sharpest book
+   * Compare Polymarket price to sharp books
+   * Returns whether Polymarket offers better value than sharpest books
    */
   async compareToSharpBooks(
-    polyPrice: number,
+    polymarketPrice: number,
     teamName: string,
     sharpLines: SharpBookLine[]
   ): Promise<LineComparisonResult> {
-    // Filter sharp lines for the specific team
-    const relevantLines = sharpLines.filter(line => 
-      this.normalizeTeamName(line.outcome) === this.normalizeTeamName(teamName)
+    
+    // Filter lines for this team
+    const teamLines = sharpLines.filter(line => 
+      this.teamNamesMatch(line.team_name, teamName)
     );
 
-    if (relevantLines.length === 0) {
+    if (teamLines.length === 0) {
       return {
         polymarketBetter: false,
         edgeOverSharpest: 0,
-        sharpestBook: '',
-        sharpestOdds: 0,
-        sharpestImpliedProb: 0,
-        allSharpLines: [],
-        confidence: 'low'
+        sharpestBook: 'none',
+        sharpestProb: 0,
+        confidence: 'low',
+        allSharpLines: []
       };
     }
 
-    // Calculate weighted consensus of sharp books
-    let totalWeight = 0;
-    let weightedProb = 0;
-    let sharpestProb = 0;
-    let sharpestBook = '';
-
-    for (const line of relevantLines) {
-      const weight = SHARP_BOOK_WEIGHTS[line.bookmaker] || 0.5;
-      const impliedProb = line.implied_probability;
-
-      // Remove vig by assuming 2-way market
-      const vigAdjustment = 1.05; // Assume 5% total vig
-      const fairProb = impliedProb / vigAdjustment;
-
-      weightedProb += fairProb * weight;
-      totalWeight += weight;
-
-      // Track sharpest (most efficient) book
-      if (fairProb > sharpestProb || sharpestBook === '') {
-        sharpestProb = fairProb;
-        sharpestBook = line.bookmaker;
+    // Find the sharpest book's price (highest probability = lowest odds = sharpest)
+    const sharpestLine = teamLines.reduce((sharpest, current) => {
+      const sharpestWeight = this.getBookWeight(sharpest.bookmaker);
+      const currentWeight = this.getBookWeight(current.bookmaker);
+      
+      // If weights are equal, use higher probability (sharper price)
+      if (currentWeight > sharpestWeight) {
+        return current;
+      } else if (currentWeight === sharpestWeight && current.implied_probability > sharpest.implied_probability) {
+        return current;
       }
-    }
+      return sharpest;
+    });
 
-    const consensusProb = totalWeight > 0 ? weightedProb / totalWeight : 0;
-    const polyImpliedProb = polyPrice; // Polymarket price is already implied probability
+    const edgeOverSharpest = sharpestLine.implied_probability - polymarketPrice;
+    const polymarketBetter = edgeOverSharpest > 0.02; // Must beat by at least 2%
 
-    // Calculate edge: what we get on Polymarket vs what sharp books think it's worth
-    const edgeOverConsensus = polyImpliedProb - consensusProb;
-    const edgeOverSharpest = polyImpliedProb - sharpestProb;
-
-    // Determine if Polymarket is offering better value
-    const polymarketBetter = edgeOverSharpest > MIN_SHARP_EDGE;
-
-    // Confidence based on number of confirming books and edge size
+    // Calculate confidence based on consensus
     let confidence: 'high' | 'medium' | 'low' = 'low';
-    if (relevantLines.length >= 3 && edgeOverSharpest > 0.05) {
+    const pinnacleConfirms = teamLines.some(line => 
+      line.bookmaker.toLowerCase() === 'pinnacle' && 
+      (line.implied_probability - polymarketPrice) > 0.02
+    );
+    const betfairConfirms = teamLines.some(line => 
+      line.bookmaker.toLowerCase() === 'betfair' && 
+      (line.implied_probability - polymarketPrice) > 0.02
+    );
+
+    if (pinnacleConfirms && betfairConfirms) {
       confidence = 'high';
-    } else if (relevantLines.length >= 2 && edgeOverSharpest > 0.03) {
+    } else if (pinnacleConfirms || betfairConfirms) {
       confidence = 'medium';
     }
-
-    console.log(`[LINE-SHOPPING] ${teamName}: Poly=${(polyImpliedProb*100).toFixed(1)}% vs Sharp=${(consensusProb*100).toFixed(1)}% (edge: ${(edgeOverSharpest*100).toFixed(1)}%)`);
 
     return {
       polymarketBetter,
       edgeOverSharpest,
-      sharpestBook,
-      sharpestOdds: sharpestProb > 0 ? 1/sharpestProb : 0,
-      sharpestImpliedProb: sharpestProb,
-      allSharpLines: relevantLines,
-      confidence
+      sharpestBook: sharpestLine.bookmaker,
+      sharpestProb: sharpestLine.implied_probability,
+      confidence,
+      allSharpLines: teamLines
     };
   }
 
   /**
-   * Normalize team names for matching
-   */
-  private normalizeTeamName(name: string): string {
-    return name
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
-  /**
-   * Check if sharp book data is fresh enough to use
-   */
-  private isDataFresh(timestamp: string): boolean {
-    const age = Date.now() - new Date(timestamp).getTime();
-    return age < 30 * 60 * 1000; // 30 minutes
-  }
-
-  /**
-   * Get consensus fair probability from multiple sharp books
+   * Get sharp book consensus probability for a team
    */
   getSharpConsensusProb(teamName: string, sharpLines: SharpBookLine[]): number {
-    const relevantLines = sharpLines
-      .filter(line => this.normalizeTeamName(line.outcome) === this.normalizeTeamName(teamName))
-      .filter(line => this.isDataFresh(line.timestamp));
+    const teamLines = sharpLines.filter(line => 
+      this.teamNamesMatch(line.team_name, teamName)
+    );
 
-    if (relevantLines.length === 0) return 0;
+    if (teamLines.length === 0) return 0;
 
+    // Weight by book sharpness
     let totalWeight = 0;
-    let weightedProb = 0;
+    let weightedSum = 0;
 
-    for (const line of relevantLines) {
-      const weight = SHARP_BOOK_WEIGHTS[line.bookmaker] || 0.5;
-      const vigAdjustedProb = line.implied_probability * 0.95; // Approximate vig removal
-      
-      weightedProb += vigAdjustedProb * weight;
+    for (const line of teamLines) {
+      const weight = this.getBookWeight(line.bookmaker);
+      weightedSum += line.implied_probability * weight;
       totalWeight += weight;
     }
 
-    return totalWeight > 0 ? weightedProb / totalWeight : 0;
+    return totalWeight > 0 ? weightedSum / totalWeight : 0;
   }
 
   /**
-   * Detect when sharp books are moving in same direction (whale strategy insight)
+   * Detect sharp money movement between current and previous lines
    */
   detectSharpMovement(
     currentLines: SharpBookLine[],
     previousLines: SharpBookLine[],
-    teamName: string
-  ): {
-    movementDetected: boolean;
-    direction: 'shortening' | 'drifting' | null;
-    booksConfirming: number;
-    avgMovement: number;
-  } {
-    const normalizedTeam = this.normalizeTeamName(teamName);
+    teamName: string,
+    threshold: number = 0.03 // 3% movement threshold
+  ): SharpMovementResult {
     
-    const currentRelevant = currentLines.filter(l => 
-      this.normalizeTeamName(l.outcome) === normalizedTeam
+    const currentTeamLines = currentLines.filter(line => 
+      this.teamNamesMatch(line.team_name, teamName)
     );
-    const previousRelevant = previousLines.filter(l => 
-      this.normalizeTeamName(l.outcome) === normalizedTeam
+    const previousTeamLines = previousLines.filter(line => 
+      this.teamNamesMatch(line.team_name, teamName)
     );
 
-    const movements: Array<{book: string, change: number, direction: number}> = [];
-
-    for (const currentLine of currentRelevant) {
-      const previousLine = previousRelevant.find(p => 
-        p.bookmaker === currentLine.bookmaker
-      );
-
-      if (!previousLine) continue;
-
-      const probChange = currentLine.implied_probability - previousLine.implied_probability;
-      
-      // Significant movement threshold (2%+ probability change)
-      if (Math.abs(probChange) >= 0.02) {
-        movements.push({
-          book: currentLine.bookmaker,
-          change: probChange,
-          direction: Math.sign(probChange)
-        });
-      }
-    }
-
-    if (movements.length < 2) {
+    if (currentTeamLines.length === 0 || previousTeamLines.length === 0) {
       return {
         movementDetected: false,
         direction: null,
@@ -289,27 +216,149 @@ export class SharpBookAggregator {
       };
     }
 
-    // Check if movement is coordinated (same direction)
-    const primaryDirection = movements[0].direction;
-    const confirming = movements.filter(m => m.direction === primaryDirection);
+    const movements: number[] = [];
+    let pinnacleMovement: number | undefined;
+    let betfairMovement: number | undefined;
 
-    if (confirming.length >= 2) {
-      const avgMovement = confirming.reduce((sum, m) => sum + Math.abs(m.change), 0) / confirming.length;
-      
+    // Compare each current line to its previous value
+    for (const currentLine of currentTeamLines) {
+      const previousLine = previousTeamLines.find(prev => 
+        prev.bookmaker === currentLine.bookmaker
+      );
+
+      if (previousLine) {
+        const movement = currentLine.implied_probability - previousLine.implied_probability;
+        
+        if (Math.abs(movement) >= threshold) {
+          movements.push(movement);
+          
+          if (currentLine.bookmaker.toLowerCase() === 'pinnacle') {
+            pinnacleMovement = movement;
+          } else if (currentLine.bookmaker.toLowerCase() === 'betfair') {
+            betfairMovement = movement;
+          }
+        }
+      }
+    }
+
+    if (movements.length < 2) {
       return {
-        movementDetected: true,
-        direction: primaryDirection > 0 ? 'shortening' : 'drifting',
-        booksConfirming: confirming.length,
-        avgMovement
+        movementDetected: false,
+        direction: null,
+        booksConfirming: movements.length,
+        avgMovement: movements.length > 0 ? Math.abs(movements[0]) : 0,
+        pinnacleMovement,
+        betfairMovement
       };
     }
 
+    // Check if movements are in same direction
+    const avgMovement = movements.reduce((sum, m) => sum + m, 0) / movements.length;
+    const sameDirection = movements.every(m => Math.sign(m) === Math.sign(avgMovement));
+
     return {
-      movementDetected: false,
-      direction: null,
-      booksConfirming: 0,
-      avgMovement: 0
+      movementDetected: sameDirection && Math.abs(avgMovement) >= threshold,
+      direction: avgMovement > 0 ? 'shortening' : 'drifting',
+      booksConfirming: movements.length,
+      avgMovement: Math.abs(avgMovement),
+      pinnacleMovement,
+      betfairMovement
     };
+  }
+
+  /**
+   * Process raw odds API data into sharp book lines
+   */
+  private processOddsData(data: any[]): SharpBookLine[] {
+    const lines: SharpBookLine[] = [];
+
+    for (const game of data) {
+      const eventName = `${game.home_team} vs ${game.away_team}`;
+      
+      for (const bookmaker of game.bookmakers || []) {
+        // Only process sharp books
+        if (!this.isSharpBook(bookmaker.key)) continue;
+        
+        const h2hMarket = bookmaker.markets?.find((m: any) => m.key === 'h2h');
+        if (!h2hMarket?.outcomes) continue;
+
+        // Filter out Draw outcomes for 2-way markets
+        const outcomes = h2hMarket.outcomes.filter((o: any) => {
+          const name = (o.name || '').toLowerCase();
+          return !name.includes('draw') && name !== 'tie';
+        });
+
+        for (const outcome of outcomes) {
+          if (outcome.price && outcome.price > 1) {
+            lines.push({
+              bookmaker: bookmaker.key,
+              team_name: outcome.name,
+              implied_probability: 1 / outcome.price,
+              decimal_odds: outcome.price,
+              is_pinnacle: bookmaker.key.toLowerCase() === 'pinnacle',
+              is_betfair: bookmaker.key.toLowerCase() === 'betfair',
+              weight: this.getBookWeight(bookmaker.key),
+              last_updated: new Date().toISOString()
+            });
+          }
+        }
+      }
+    }
+
+    return lines;
+  }
+
+  /**
+   * Check if a bookmaker is considered "sharp"
+   */
+  private isSharpBook(bookmakerKey: string): boolean {
+    const sharpBooks = ['pinnacle', 'betfair', 'betfair_ex_eu', 'circa', 'betonline', 'bookmaker'];
+    return sharpBooks.includes(bookmakerKey.toLowerCase());
+  }
+
+  /**
+   * Get weight for a bookmaker based on sharpness
+   */
+  private getBookWeight(bookmakerKey: string): number {
+    const key = bookmakerKey.toLowerCase();
+    return SHARP_BOOK_WEIGHTS[key as keyof typeof SHARP_BOOK_WEIGHTS] || SHARP_BOOK_WEIGHTS.default;
+  }
+
+  /**
+   * Check if two team names match (handles variations)
+   */
+  private teamNamesMatch(name1: string, name2: string): boolean {
+    const normalize = (name: string) => 
+      name.toLowerCase()
+        .replace(/[^a-z0-9\s]/g, '')
+        .trim();
+
+    const norm1 = normalize(name1);
+    const norm2 = normalize(name2);
+
+    // Exact match
+    if (norm1 === norm2) return true;
+
+    // Check if last words match (team nicknames)
+    const words1 = norm1.split(' ').filter(w => w.length > 2);
+    const words2 = norm2.split(' ').filter(w => w.length > 2);
+    
+    if (words1.length > 0 && words2.length > 0) {
+      const nickname1 = words1[words1.length - 1];
+      const nickname2 = words2[words2.length - 1];
+      
+      return nickname1 === nickname2;
+    }
+
+    return false;
+  }
+
+  /**
+   * Check if cached data is still valid
+   */
+  private isValidCache(cacheKey: string): boolean {
+    const expiry = this.cacheExpiry.get(cacheKey);
+    return expiry !== undefined && Date.now() < expiry;
   }
 }
 
