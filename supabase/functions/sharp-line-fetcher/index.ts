@@ -8,6 +8,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders } from '../_shared/cors.ts';
+import { fetchWithKeyRotation } from '../_shared/odds-api-keys.ts';
 
 // Sharp bookmaker APIs and weights
 const SHARP_BOOKMAKERS = {
@@ -156,19 +157,16 @@ async function fetchBookmakerLines(
   bookmaker: string, 
   weight: number
 ): Promise<SharpBookLine[]> {
-  const apiKey = Deno.env.get('ODDS_API_KEY');
-  if (!apiKey) {
-    throw new Error('ODDS_API_KEY not configured');
-  }
-
   // Fetch multiple market types
   const marketTypes = ['h2h', 'spreads', 'totals'];
   const allLines: SharpBookLine[] = [];
 
   for (const marketType of marketTypes) {
     try {
-      const url = `${ODDS_API_BASE}/sports/${sport}/odds/?apiKey=${apiKey}&regions=us,eu&markets=${marketType}&bookmakers=${bookmaker}`;
-      const response = await fetch(url);
+      const { response } = await fetchWithKeyRotation(
+        (key) => `${ODDS_API_BASE}/sports/${sport}/odds/?apiKey=${key}&regions=us,eu&markets=${marketType}&bookmakers=${bookmaker}`,
+        `SHARP-${bookmaker}-${marketType}`
+      );
       
       if (!response.ok) {
         console.warn(`⚠️ ${bookmaker} ${marketType}: HTTP ${response.status}`);

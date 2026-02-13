@@ -2,6 +2,7 @@ import {
   getAllH2HSports,
   getAllOutrightSports,
 } from '../_shared/extended-sports-config.ts';
+import { validateOddsApiKey, fetchWithKeyRotation } from '../_shared/odds-api-keys.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -144,33 +145,19 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const oddsApiKey = Deno.env.get('ODDS_API_KEY');
-    if (!oddsApiKey) {
+    // Validate and select a working API key (auto-rotates on 401/429)
+    let validatedKey: string;
+    try {
+      const validation = await validateOddsApiKey('INGEST-ODDS');
+      validatedKey = validation.apiKey;
+      console.log(`[INGEST-ODDS] Using key #${validation.keyIndex + 1}. Remaining: ${validation.remaining}, Used: ${validation.used}`);
+    } catch (err) {
       return new Response(
-        JSON.stringify({ error: 'ODDS_API_KEY not configured' }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // NEW: Test API key validity with a lightweight call before proceeding
-    const testUrl = `https://api.the-odds-api.com/v4/sports/?apiKey=${oddsApiKey}`;
-    const testResponse = await fetch(testUrl);
-    const remainingRequests = testResponse.headers.get('x-requests-remaining');
-    const usedRequests = testResponse.headers.get('x-requests-used');
-    
-    if (!testResponse.ok) {
-      console.error(`[INGEST-ODDS] API_KEY_INVALID: Status ${testResponse.status}`);
-      return new Response(
-        JSON.stringify({ 
-          error: 'ODDS_API_KEY invalid or quota exceeded',
-          status: testResponse.status,
-          remaining_requests: remainingRequests,
-          used_requests: usedRequests,
-        }),
+        JSON.stringify({ error: 'All Odds API keys exhausted or invalid', details: (err as Error).message }),
         { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
-    console.log(`[INGEST-ODDS] API key valid. Remaining: ${remainingRequests}, Used: ${usedRequests}`);
+    const oddsApiKey = validatedKey;
 
     // Parse request body for configuration
     let body: RequestBody = {};
