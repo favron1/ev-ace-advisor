@@ -246,7 +246,8 @@ const TEAM_ALIASES: Record<string, Record<string, string[]>> = {
 };
 
 // Common pattern replacements
-const PATTERN_REPLACEMENTS: Record<string, RegExp[]> = {
+interface PatternReplacement { pattern: RegExp; replacement: string; }
+const PATTERN_REPLACEMENTS: Record<string, PatternReplacement[]> = {
   common: [
     { pattern: /\bny\b/gi, replacement: 'new york' },
     { pattern: /\bla\b/gi, replacement: 'los angeles' },
@@ -267,17 +268,16 @@ const PATTERN_REPLACEMENTS: Record<string, RegExp[]> = {
     { pattern: /\bloc\b/gi, replacement: 'la clippers' },
     { pattern: /76ers/gi, replacement: 'philadelphia 76ers' }
   ],
-  // Soccer-specific patterns for common abbreviations
   soccer: [
-    { pattern: /\bfc\b/gi, replacement: '' },       // Remove FC
-    { pattern: /\bcf\b/gi, replacement: '' },       // Remove CF  
-    { pattern: /\bafc\b/gi, replacement: '' },      // Remove AFC
-    { pattern: /\bsc\b/gi, replacement: '' },       // Remove SC
-    { pattern: /\bus\b/gi, replacement: '' },       // Remove US
-    { pattern: /\bac\b/gi, replacement: '' },       // Remove AC
-    { pattern: /\bcd\b/gi, replacement: '' },       // Remove CD
-    { pattern: /\brcd\b/gi, replacement: '' },      // Remove RCD
-    { pattern: /\bssc\b/gi, replacement: '' },      // Remove SSC
+    { pattern: /\bfc\b/gi, replacement: '' },
+    { pattern: /\bcf\b/gi, replacement: '' },
+    { pattern: /\bafc\b/gi, replacement: '' },
+    { pattern: /\bsc\b/gi, replacement: '' },
+    { pattern: /\bus\b/gi, replacement: '' },
+    { pattern: /\bac\b/gi, replacement: '' },
+    { pattern: /\bcd\b/gi, replacement: '' },
+    { pattern: /\brcd\b/gi, replacement: '' },
+    { pattern: /\bssc\b/gi, replacement: '' },
     { pattern: /\breal\s+madrid/gi, replacement: 'real madrid' },
     { pattern: /\bman\s+city/gi, replacement: 'manchester city' },
     { pattern: /\bman\s+united/gi, replacement: 'manchester united' }

@@ -119,10 +119,10 @@ export const EXTENDED_SPORTS_CONFIG: Record<string, SportConfig> = {
     oddsApiMarkets: 'h2h',
     oddsApiOutright: 'soccer_france_ligue_one_winner',
     teamMap: {
-      'psg': 'PSG', 'mar': 'Marseille', 'mon': 'Monaco', 'lyo': 'Lyon',
+      'psg': 'PSG', 'mar': 'Marseille', 'mnc': 'Monaco', 'lyo': 'Lyon',
       'nic': 'Nice', 'ren': 'Rennes', 'lil': 'Lille', 'len': 'Lens',
       'str': 'Strasbourg', 'rei': 'Reims', 'lor': 'Lorient', 'bre': 'Brest',
-      'mon': 'Montpelier', 'cle': 'Clermont', 'tro': 'Troyes', 'met': 'Metz',
+      'mtp': 'Montpellier', 'cle': 'Clermont', 'tro': 'Troyes', 'met': 'Metz',
       'ang': 'Angers', 'bor': 'Bordeaux', 'nan': 'Nantes', 'tou': 'Toulouse',
     },
     detectionPatterns: [
@@ -165,7 +165,7 @@ export const EXTENDED_SPORTS_CONFIG: Record<string, SportConfig> = {
       'por': 'Porto', 'ben': 'Benfica', 'spo': 'Sporting CP', 'bra': 'Braga',
       'vit': 'Vitoria Guimaraes', 'boa': 'Boavista', 'mor': 'Moreirense',
       'ave': 'Avs', 'est': 'Estoril', 'far': 'Famalicao', 'rio': 'Rio Ave',
-      'aro': 'Arouca', 'cas': 'Casa Pia', 'gil': 'Gil Vicente', 'por': 'Portimonense',
+      'aro': 'Arouca', 'cas': 'Casa Pia', 'gil': 'Gil Vicente', 'ptm': 'Portimonense',
       'cha': 'Chaves', 'viz': 'Vizela', 'ton': 'Tondela', 'mar': 'Maritimo',
     },
     detectionPatterns: [
@@ -290,8 +290,8 @@ export {
   SPORT_CODES as CORE_SPORT_CODES,
   SPORT_NAMES as CORE_SPORT_NAMES,
   ALLOWED_SPORTS as CORE_ALLOWED_SPORTS,
-  SportCode as CoreSportCode,
 } from './sports-config.ts';
+export type { SportCode as CoreSportCode } from './sports-config.ts';
 
 /**
  * Check if a sport is a whale-traded sport (in extended config)
