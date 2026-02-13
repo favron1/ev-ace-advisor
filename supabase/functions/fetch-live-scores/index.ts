@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { fetchWithKeyRotation } from '../_shared/odds-api-keys.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -119,11 +120,6 @@ serve(async (req) => {
   }
 
   try {
-    const ODDS_API_KEY = Deno.env.get('ODDS_API_KEY');
-    if (!ODDS_API_KEY) {
-      throw new Error('ODDS_API_KEY not configured');
-    }
-
     const { event_names } = await req.json() as ScoreRequest;
     
     if (!event_names || event_names.length === 0) {
@@ -143,15 +139,16 @@ serve(async (req) => {
 
     console.log('Sports to query:', Array.from(sportsToQuery));
 
-    // Fetch scores for each sport
+    // Fetch scores for each sport with key rotation
     const allApiScores: OddsApiScore[] = [];
     
     for (const sport of sportsToQuery) {
       try {
-        const url = `https://api.the-odds-api.com/v4/sports/${sport}/scores/?apiKey=${ODDS_API_KEY}&daysFrom=1`;
         console.log(`Fetching ${sport} scores...`);
-        
-        const response = await fetch(url);
+        const { response } = await fetchWithKeyRotation(
+          (key) => `https://api.the-odds-api.com/v4/sports/${sport}/scores/?apiKey=${key}&daysFrom=1`,
+          `LIVE-SCORES-${sport}`
+        );
         
         if (response.ok) {
           const scores = await response.json() as OddsApiScore[];
