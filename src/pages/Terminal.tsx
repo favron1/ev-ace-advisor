@@ -39,6 +39,10 @@ import { useWatchState } from '@/hooks/useWatchState';
 import { useAutoPolling } from '@/hooks/useAutoPolling';
 import { useNotifications } from '@/hooks/useNotifications';
 import { useOvernightStats } from '@/hooks/useOvernightStats';
+import { useWhaleActivity } from '@/hooks/useWhaleActivity';
+import { useLineShoppingData } from '@/hooks/useLineShoppingData';
+import { useMultiLegOpportunities } from '@/hooks/useMultiLegOpportunities';
+import { usePortfolioData } from '@/hooks/usePortfolioData';
 import { arbitrageApi } from '@/lib/api/arbitrage';
 import { toast } from '@/hooks/use-toast';
 import type { SignalLog } from '@/types/arbitrage';
@@ -62,6 +66,7 @@ export default function Terminal() {
     getFilteredSignals,
     fetchSignals,
     refreshSignals,
+    runDetection,
   } = useSignals();
 
   const {
@@ -84,6 +89,12 @@ export default function Terminal() {
   } = useWatchState({});
 
   const { stats: overnightStats } = useOvernightStats();
+
+  // New data hooks
+  const { positions: whalePositions, loading: whaleLoading } = useWhaleActivity();
+  const { comparisons: lineComparisons, loading: lineLoading } = useLineShoppingData();
+  const { opportunities: multiLegOpportunities, loading: multiLegLoading } = useMultiLegOpportunities();
+  const { stats: portfolioStats, loading: portfolioLoading } = usePortfolioData();
 
   // Notifications hook
   const {
@@ -122,20 +133,21 @@ export default function Terminal() {
     arbitrageApi.getSignalLogs(100).then(setLogs).catch(console.error);
   }, []);
 
-  // One-click scan that triggers full pipeline
+  // One-click scan that triggers full pipeline using real edge functions
   const handleFullScan = async () => {
     try {
-      toast({ title: 'Scanning Markets', description: 'Running discovery + matching + signal detection...' });
+      toast({ title: 'Scanning Markets', description: 'Running Polymarket sync + edge detection...' });
       
-      // Run full pipeline: discover → match → detect signals
-      await runManualScan();
-      await fetchSignals();
+      // Use the real signal detection from useSignals (polymarket-sync-24h + polymarket-monitor)
+      const detectionResult = await runDetection();
       
-      toast({ 
-        title: 'Scan Complete', 
-        description: `Found ${signals.length} opportunities`,
-        duration: 3000 
-      });
+      if (detectionResult) {
+        toast({ 
+          title: 'Scan Complete', 
+          description: `Found ${detectionResult.signals_surfaced || 0} tradeable edges from ${detectionResult.movements_detected || 0} markets`,
+          duration: 3000 
+        });
+      }
     } catch (error) {
       toast({ 
         title: 'Scan Failed', 
@@ -145,35 +157,7 @@ export default function Terminal() {
     }
   };
 
-  // Mock data for demonstration - in real app this would come from backend
-  const mockWhaleActivity = [
-    { wallet: 'kch123', event: 'Lakers vs Warriors', side: 'YES Lakers', stake: '$150k', odds: '1.85', edge: '+4.2%', tier: 'Tier 1' },
-    { wallet: 'SeriouslySirius', event: 'Cowboys -3.5', side: 'YES', stake: '$89k', odds: '1.91', edge: '+2.1%', tier: 'Tier 2' },
-    { wallet: 'DrPufferfish', event: 'Over 225.5', side: 'YES', stake: '$45k', odds: '1.88', edge: '+1.8%', tier: 'Tier 3' }
-  ];
-
-  const mockLineComparisons = [
-    { event: 'Hawks vs Celtics', polymarket: '0.65', pinnacle: '0.62', edge: '+4.8%', volume: '$125k', time: '2h 15m' },
-    { event: 'Rangers -1.5', polymarket: '0.45', pinnacle: '0.42', edge: '+7.1%', volume: '$89k', time: '45m' },
-    { event: 'Over 6.5 Goals', polymarket: '0.38', pinnacle: '0.41', edge: '-7.9%', volume: '$67k', time: '1h 30m' }
-  ];
-
-  const mockMultiLegOps = [
-    { 
-      event: 'Lakers vs Warriors', 
-      legs: ['Lakers ML', 'Lakers -3.5', 'Over 225'], 
-      combinedEdge: '+8.9%', 
-      correlationStrength: 'High',
-      totalStake: '$200k'
-    },
-    { 
-      event: 'Cowboys vs Giants', 
-      legs: ['Cowboys -7', 'Under 45.5'], 
-      combinedEdge: '+5.3%', 
-      correlationStrength: 'Medium',
-      totalStake: '$150k'
-    }
-  ];
+  // All data now comes from real Supabase hooks
 
   if (!user) {
     return null;
@@ -213,7 +197,12 @@ export default function Terminal() {
               {/* Portfolio Summary - Hidden on very small screens */}
               <div className="text-right hidden sm:block">
                 <div className="text-xs sm:text-sm text-slate-400">24h P&L</div>
-                <div className="text-sm sm:text-lg font-bold text-green-400">+$12,450</div>
+                <div className={cn(
+                  "text-sm sm:text-lg font-bold",
+                  portfolioStats.pnl24h >= 0 ? "text-green-400" : "text-red-400"
+                )}>
+                  {portfolioStats.pnl24h >= 0 ? '+' : ''}${portfolioStats.pnl24h.toLocaleString()}
+                </div>
               </div>
               
               {/* Notifications */}
@@ -409,50 +398,70 @@ export default function Terminal() {
                   </CardHeader>
                   <CardContent>
                     <ScrollArea className="h-[350px] lg:h-[calc(100vh-350px)]">
-                      <div className="space-y-3">
-                        {mockWhaleActivity.map((whale, idx) => (
-                          <div key={idx} className="bg-slate-800/50 border border-slate-700 rounded-lg p-4">
-                            <div className="flex items-start justify-between mb-3">
-                              <div>
-                                <div className="flex items-center gap-2 mb-1">
-                                  <Badge variant="outline" className="bg-purple-500/20 text-purple-400 border-purple-500/50">
-                                    {whale.wallet}
-                                  </Badge>
-                                  <Badge variant="outline" className={cn(
-                                    whale.tier === 'Tier 1' ? 'bg-green-500/20 text-green-400 border-green-500/50' :
-                                    whale.tier === 'Tier 2' ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/50' :
-                                    'bg-orange-500/20 text-orange-400 border-orange-500/50'
-                                  )}>
-                                    {whale.tier}
-                                  </Badge>
+                      {whaleLoading ? (
+                        <div className="p-6 text-center text-slate-400">
+                          <RefreshCw className="h-8 w-8 animate-spin mx-auto mb-2" />
+                          Loading whale activity...
+                        </div>
+                      ) : whalePositions.length === 0 ? (
+                        <div className="p-6 text-center text-slate-400">
+                          <Wallet className="h-12 w-12 mx-auto mb-4 opacity-30" />
+                          <p className="text-lg font-medium mb-2">No whale activity detected</p>
+                          <p className="text-sm">Monitoring whale wallets for new positions</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {whalePositions.map((position, idx) => (
+                            <div key={position.id} className="bg-slate-800/50 border border-slate-700 rounded-lg p-4">
+                              <div className="flex items-start justify-between mb-3">
+                                <div>
+                                  <div className="flex items-center gap-2 mb-1">
+                                    <Badge variant="outline" className="bg-purple-500/20 text-purple-400 border-purple-500/50">
+                                      {position.wallet_display_name || `Whale ${position.wallet_id.slice(-6)}`}
+                                    </Badge>
+                                    <Badge variant="outline" className={cn(
+                                      position.wallet_confidence_tier === 'tier_1' || position.wallet_confidence_tier === '1' ? 'bg-green-500/20 text-green-400 border-green-500/50' :
+                                      position.wallet_confidence_tier === 'tier_2' || position.wallet_confidence_tier === '2' ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/50' :
+                                      'bg-orange-500/20 text-orange-400 border-orange-500/50'
+                                    )}>
+                                      Tier {position.wallet_confidence_tier || '3'}
+                                    </Badge>
+                                  </div>
+                                  <h3 className="font-semibold text-white text-sm">{position.event_name}</h3>
+                                  <p className="text-xs text-slate-400">{position.side}</p>
                                 </div>
-                                <h3 className="font-semibold text-white text-sm">{whale.event}</h3>
-                                <p className="text-xs text-slate-400">{whale.side}</p>
+                                <div className="text-right">
+                                  <div className={cn(
+                                    "text-lg font-bold",
+                                    (position.unrealized_pnl || 0) >= 0 ? "text-green-400" : "text-red-400"
+                                  )}>
+                                    {position.unrealized_pnl ? 
+                                      `${position.unrealized_pnl >= 0 ? '+' : ''}${position.unrealized_pnl.toFixed(1)}%` : 
+                                      '+0.0%'}
+                                  </div>
+                                  <div className="text-xs text-slate-400">P&L</div>
+                                </div>
                               </div>
-                              <div className="text-right">
-                                <div className="text-lg font-bold text-green-400">{whale.edge}</div>
-                                <div className="text-xs text-slate-400">edge</div>
+                              
+                              <div className="grid grid-cols-3 gap-3 text-xs">
+                                <div>
+                                  <div className="text-slate-400">Position</div>
+                                  <div className="font-semibold text-white">${position.size.toLocaleString()}</div>
+                                </div>
+                                <div>
+                                  <div className="text-slate-400">Avg Price</div>
+                                  <div className="font-semibold text-white">{(position.avg_price * 100).toFixed(0)}¢</div>
+                                </div>
+                                <div>
+                                  <Button size="sm" variant="outline" className="w-full text-xs">
+                                    Copy Trade
+                                  </Button>
+                                </div>
                               </div>
                             </div>
-                            
-                            <div className="grid grid-cols-3 gap-3 text-xs">
-                              <div>
-                                <div className="text-slate-400">Stake</div>
-                                <div className="font-semibold text-white">{whale.stake}</div>
-                              </div>
-                              <div>
-                                <div className="text-slate-400">Odds</div>
-                                <div className="font-semibold text-white">{whale.odds}</div>
-                              </div>
-                              <div>
-                                <Button size="sm" variant="outline" className="w-full text-xs">
-                                  Copy Trade
-                                </Button>
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                          ))}
+                        </div>
+                      )}
                     </ScrollArea>
                   </CardContent>
                 </Card>
@@ -469,57 +478,76 @@ export default function Terminal() {
                   </CardHeader>
                   <CardContent>
                     <ScrollArea className="h-[350px] lg:h-[calc(100vh-350px)]">
-                      <div className="space-y-3">
-                        {mockLineComparisons.map((line, idx) => (
-                          <div key={idx} className="bg-slate-800/50 border border-slate-700 rounded-lg p-4">
-                            <div className="flex items-start justify-between mb-3">
-                              <div>
-                                <h3 className="font-semibold text-white text-sm mb-1">{line.event}</h3>
-                                <div className="flex items-center gap-2 text-xs">
-                                  <span className="text-slate-400">Vol: {line.volume}</span>
-                                  <span className="text-slate-400">
-                                    <Clock className="h-3 w-3 inline mr-1" />
-                                    {line.time} left
-                                  </span>
+                      {lineLoading ? (
+                        <div className="p-6 text-center text-slate-400">
+                          <RefreshCw className="h-8 w-8 animate-spin mx-auto mb-2" />
+                          Loading line comparisons...
+                        </div>
+                      ) : lineComparisons.length === 0 ? (
+                        <div className="p-6 text-center text-slate-400">
+                          <LineChart className="h-12 w-12 mx-auto mb-4 opacity-30" />
+                          <p className="text-lg font-medium mb-2">No line data available</p>
+                          <p className="text-sm">Run "Scan Markets" to populate sharp book comparisons</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {lineComparisons.map((line, idx) => (
+                            <div key={idx} className="bg-slate-800/50 border border-slate-700 rounded-lg p-4">
+                              <div className="flex items-start justify-between mb-3">
+                                <div>
+                                  <h3 className="font-semibold text-white text-sm mb-1">{line.event_name}</h3>
+                                  <div className="flex items-center gap-2 text-xs">
+                                    <span className="text-slate-400">Vol: ${line.polymarket_volume?.toLocaleString() || '0'}</span>
+                                    <span className="text-slate-400">
+                                      <Clock className="h-3 w-3 inline mr-1" />
+                                      {line.time_until_start || 'Started'}
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="text-right">
+                                  <div className={cn(
+                                    "text-lg font-bold",
+                                    (line.edge_percent || 0) >= 0 ? 'text-green-400' : 'text-red-400'
+                                  )}>
+                                    {line.edge_percent ? 
+                                      `${line.edge_percent >= 0 ? '+' : ''}${line.edge_percent.toFixed(1)}%` : 
+                                      '0.0%'}
+                                  </div>
+                                  <div className="text-xs text-slate-400">vs Pinnacle</div>
                                 </div>
                               </div>
-                              <div className="text-right">
-                                <div className={cn(
-                                  "text-lg font-bold",
-                                  line.edge.startsWith('+') ? 'text-green-400' : 'text-red-400'
-                                )}>
-                                  {line.edge}
+                              
+                              <div className="grid grid-cols-3 gap-3 text-xs">
+                                <div>
+                                  <div className="text-slate-400">Polymarket</div>
+                                  <div className="font-semibold text-white">
+                                    {line.polymarket_price ? (line.polymarket_price * 100).toFixed(0) + '¢' : 'N/A'}
+                                  </div>
                                 </div>
-                                <div className="text-xs text-slate-400">vs Pinnacle</div>
+                                <div>
+                                  <div className="text-slate-400">Pinnacle</div>
+                                  <div className="font-semibold text-white">
+                                    {line.pinnacle_price ? (line.pinnacle_price * 100).toFixed(0) + '¢' : 'N/A'}
+                                  </div>
+                                </div>
+                                <div>
+                                  <Button 
+                                    size="sm" 
+                                    variant={(line.edge_percent || 0) > 0 ? 'default' : 'outline'}
+                                    className={cn(
+                                      "w-full text-xs",
+                                      (line.edge_percent || 0) > 0 ? 'bg-green-600 hover:bg-green-700' : ''
+                                    )}
+                                    disabled={(line.edge_percent || 0) <= 0}
+                                  >
+                                    {(line.edge_percent || 0) > 0 ? 'Bet' : 'Skip'}
+                                  </Button>
+                                </div>
                               </div>
                             </div>
-                            
-                            <div className="grid grid-cols-3 gap-3 text-xs">
-                              <div>
-                                <div className="text-slate-400">Polymarket</div>
-                                <div className="font-semibold text-white">{line.polymarket}</div>
-                              </div>
-                              <div>
-                                <div className="text-slate-400">Pinnacle</div>
-                                <div className="font-semibold text-white">{line.pinnacle}</div>
-                              </div>
-                              <div>
-                                <Button 
-                                  size="sm" 
-                                  variant={line.edge.startsWith('+') ? 'default' : 'outline'}
-                                  className={cn(
-                                    "w-full text-xs",
-                                    line.edge.startsWith('+') ? 'bg-green-600 hover:bg-green-700' : ''
-                                  )}
-                                  disabled={line.edge.startsWith('-')}
-                                >
-                                  {line.edge.startsWith('+') ? 'Bet' : 'Skip'}
-                                </Button>
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                          ))}
+                        </div>
+                      )}
                     </ScrollArea>
                   </CardContent>
                 </Card>
@@ -536,46 +564,70 @@ export default function Terminal() {
                   </CardHeader>
                   <CardContent>
                     <ScrollArea className="h-[350px] lg:h-[calc(100vh-350px)]">
-                      <div className="space-y-4">
-                        {mockMultiLegOps.map((opp, idx) => (
-                          <div key={idx} className="bg-slate-800/50 border border-slate-700 rounded-lg p-4">
-                            <div className="flex items-start justify-between mb-3">
-                              <div>
-                                <h3 className="font-semibold text-white text-sm mb-2">{opp.event}</h3>
-                                <div className="space-y-1">
-                                  {opp.legs.map((leg, legIdx) => (
-                                    <div key={legIdx} className="flex items-center gap-2">
+                      {multiLegLoading ? (
+                        <div className="p-6 text-center text-slate-400">
+                          <RefreshCw className="h-8 w-8 animate-spin mx-auto mb-2" />
+                          Loading multi-leg opportunities...
+                        </div>
+                      ) : multiLegOpportunities.length === 0 ? (
+                        <div className="p-6 text-center text-slate-400">
+                          <BarChart3 className="h-12 w-12 mx-auto mb-4 opacity-30" />
+                          <p className="text-lg font-medium mb-2">No multi-leg opportunities found</p>
+                          <p className="text-sm">Correlation analysis ongoing - opportunities will appear here</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-4">
+                          {multiLegOpportunities.map((opp, idx) => (
+                            <div key={opp.id} className="bg-slate-800/50 border border-slate-700 rounded-lg p-4">
+                              <div className="flex items-start justify-between mb-3">
+                                <div>
+                                  <h3 className="font-semibold text-white text-sm mb-2">{opp.event_name}</h3>
+                                  <div className="space-y-1">
+                                    {Array.isArray(opp.legs) ? opp.legs.map((leg: any, legIdx: number) => (
+                                      <div key={legIdx} className="flex items-center gap-2">
+                                        <Badge variant="outline" className="bg-blue-500/20 text-blue-400 border-blue-500/50 text-xs">
+                                          {typeof leg === 'string' ? leg : leg.description || 'Leg ' + (legIdx + 1)}
+                                        </Badge>
+                                      </div>
+                                    )) : (
                                       <Badge variant="outline" className="bg-blue-500/20 text-blue-400 border-blue-500/50 text-xs">
-                                        {leg}
+                                        Multi-leg opportunity
                                       </Badge>
-                                    </div>
-                                  ))}
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="text-right">
+                                  <div className="text-lg font-bold text-green-400">
+                                    +{opp.combined_edge ? (opp.combined_edge * 100).toFixed(1) : '0.0'}%
+                                  </div>
+                                  <div className="text-xs text-slate-400">combined edge</div>
                                 </div>
                               </div>
-                              <div className="text-right">
-                                <div className="text-lg font-bold text-green-400">{opp.combinedEdge}</div>
-                                <div className="text-xs text-slate-400">combined edge</div>
+                              
+                              <div className="grid grid-cols-3 gap-3 text-xs mb-3">
+                                <div>
+                                  <div className="text-slate-400">Correlation</div>
+                                  <div className="font-semibold text-white">
+                                    {opp.correlation_score ? 
+                                      opp.correlation_score > 0.7 ? 'High' : 
+                                      opp.correlation_score > 0.4 ? 'Medium' : 'Low' : 
+                                      'Unknown'}
+                                  </div>
+                                </div>
+                                <div>
+                                  <div className="text-slate-400">Sport</div>
+                                  <div className="font-semibold text-white">{opp.sport || 'N/A'}</div>
+                                </div>
+                                <div>
+                                  <Button size="sm" className="bg-orange-600 hover:bg-orange-700 text-white w-full text-xs">
+                                    Execute All
+                                  </Button>
+                                </div>
                               </div>
                             </div>
-                            
-                            <div className="grid grid-cols-3 gap-3 text-xs mb-3">
-                              <div>
-                                <div className="text-slate-400">Correlation</div>
-                                <div className="font-semibold text-white">{opp.correlationStrength}</div>
-                              </div>
-                              <div>
-                                <div className="text-slate-400">Total Stake</div>
-                                <div className="font-semibold text-white">{opp.totalStake}</div>
-                              </div>
-                              <div>
-                                <Button size="sm" className="bg-orange-600 hover:bg-orange-700 text-white w-full text-xs">
-                                  Execute All
-                                </Button>
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                          ))}
+                        </div>
+                      )}
                     </ScrollArea>
                   </CardContent>
                 </Card>
@@ -591,39 +643,72 @@ export default function Terminal() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-                      <Card className="bg-slate-800/50 border-slate-700">
-                        <CardContent className="p-4">
-                          <div className="text-2xl font-bold text-green-400">$12,450</div>
-                          <div className="text-xs text-slate-400">24h P&L</div>
-                        </CardContent>
-                      </Card>
-                      <Card className="bg-slate-800/50 border-slate-700">
-                        <CardContent className="p-4">
-                          <div className="text-2xl font-bold text-blue-400">$89,320</div>
-                          <div className="text-xs text-slate-400">30d P&L</div>
-                        </CardContent>
-                      </Card>
-                      <Card className="bg-slate-800/50 border-slate-700">
-                        <CardContent className="p-4">
-                          <div className="text-2xl font-bold text-white">23</div>
-                          <div className="text-xs text-slate-400">Active Bets</div>
-                        </CardContent>
-                      </Card>
-                      <Card className="bg-slate-800/50 border-slate-700">
-                        <CardContent className="p-4">
-                          <div className="text-2xl font-bold text-yellow-400">67.8%</div>
-                          <div className="text-xs text-slate-400">Win Rate</div>
-                        </CardContent>
-                      </Card>
-                    </div>
+                    {portfolioLoading ? (
+                      <div className="p-6 text-center text-slate-400">
+                        <RefreshCw className="h-8 w-8 animate-spin mx-auto mb-2" />
+                        Loading portfolio data...
+                      </div>
+                    ) : (
+                      <>
+                        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                          <Card className="bg-slate-800/50 border-slate-700">
+                            <CardContent className="p-4">
+                              <div className={cn(
+                                "text-2xl font-bold",
+                                portfolioStats.pnl24h >= 0 ? "text-green-400" : "text-red-400"
+                              )}>
+                                {portfolioStats.pnl24h >= 0 ? '+' : ''}${portfolioStats.pnl24h.toLocaleString()}
+                              </div>
+                              <div className="text-xs text-slate-400">24h P&L</div>
+                            </CardContent>
+                          </Card>
+                          <Card className="bg-slate-800/50 border-slate-700">
+                            <CardContent className="p-4">
+                              <div className={cn(
+                                "text-2xl font-bold",
+                                portfolioStats.pnl30d >= 0 ? "text-green-400" : "text-red-400"
+                              )}>
+                                {portfolioStats.pnl30d >= 0 ? '+' : ''}${portfolioStats.pnl30d.toLocaleString()}
+                              </div>
+                              <div className="text-xs text-slate-400">30d P&L</div>
+                            </CardContent>
+                          </Card>
+                          <Card className="bg-slate-800/50 border-slate-700">
+                            <CardContent className="p-4">
+                              <div className="text-2xl font-bold text-white">{portfolioStats.activeBets}</div>
+                              <div className="text-xs text-slate-400">Active Bets</div>
+                            </CardContent>
+                          </Card>
+                          <Card className="bg-slate-800/50 border-slate-700">
+                            <CardContent className="p-4">
+                              <div className={cn(
+                                "text-2xl font-bold",
+                                portfolioStats.winRate >= 50 ? "text-green-400" : 
+                                portfolioStats.winRate >= 40 ? "text-yellow-400" : "text-red-400"
+                              )}>
+                                {portfolioStats.totalBets > 0 ? `${portfolioStats.winRate.toFixed(1)}%` : '--'}
+                              </div>
+                              <div className="text-xs text-slate-400">Win Rate</div>
+                            </CardContent>
+                          </Card>
+                        </div>
+                      </>
+                    )}
                     
                     <ScrollArea className="h-[200px] lg:h-[calc(100vh-500px)]">
-                      <div className="text-center py-8 text-slate-400">
-                        <BarChart3 className="h-12 w-12 mx-auto mb-4 opacity-30" />
-                        <p className="text-lg font-medium mb-2">Portfolio Analytics</p>
-                        <p className="text-sm">Detailed P&L tracking coming soon</p>
-                      </div>
+                      {!portfolioLoading && portfolioStats.totalBets === 0 ? (
+                        <div className="text-center py-8 text-slate-400">
+                          <BarChart3 className="h-12 w-12 mx-auto mb-4 opacity-30" />
+                          <p className="text-lg font-medium mb-2">No betting history</p>
+                          <p className="text-sm">Execute some signals to see your P&L tracking here</p>
+                        </div>
+                      ) : (
+                        <div className="text-center py-8 text-slate-400">
+                          <BarChart3 className="h-12 w-12 mx-auto mb-4 opacity-30" />
+                          <p className="text-lg font-medium mb-2">Portfolio Analytics</p>
+                          <p className="text-sm">Charts and detailed analysis coming soon</p>
+                        </div>
+                      )}
                     </ScrollArea>
                   </CardContent>
                 </Card>
