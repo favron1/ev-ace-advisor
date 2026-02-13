@@ -14,6 +14,14 @@ import {
   detectSportFromText,
   type SportCode,
 } from '../_shared/sports-config.ts';
+import {
+  ALL_SPORTS_CONFIG,
+  ALL_SPORT_CODES,
+  ALL_SPORT_NAMES,
+  detectAllSportFromText,
+  getAllSportCodeFromLeague,
+  type AllSportCode,
+} from '../_shared/extended-sports-config.ts';
 import { 
   scrapeAllSports, 
   type ParsedGame,
@@ -59,12 +67,12 @@ function categorizeEventPriority(hoursUntilEvent: number): EventPriority {
 // Sport detection now uses shared config - this wrapper maintains backward compat
 
 // Detect sport from title/question using keywords
-// Uses shared config for pattern matching
+// Uses ALL sports config for pattern matching (core + extended)
 function detectSport(title: string, question: string): string | null {
   const combined = `${title} ${question}`;
   
-  // Use shared detection first
-  const detected = detectSportFromText(combined);
+  // Use extended detection first (includes all whale leagues)
+  const detected = detectAllSportFromText(combined);
   if (detected) return detected;
   
   // No fallback patterns needed - using shared config for core 4 sports only
@@ -668,9 +676,9 @@ Deno.serve(async (req) => {
         // CRITICAL FIX: Use event-level sport for ALL markets, with fallback to market-level detection
         const marketSport = eventLevelSport || detectSport(title, market.question || '') || 'Sports';
         
-        // SPORT FOCUS: Only process NHL, NBA, NCAA, NFL markets
-        if (!ALLOWED_SPORTS.some(s => marketSport.toUpperCase().includes(s))) {
-          continue; // Skip non-focused sports (Tennis, UFC, Soccer, etc.)
+        // WHALE LEAGUES: Process ALL leagues that Polymarket whales trade on
+        if (!ALL_SPORT_NAMES.some(s => marketSport.toUpperCase().includes(s.toUpperCase()))) {
+          continue; // Skip non-whale sports (only process leagues from extended config)
         }
         
         qualifying.push({

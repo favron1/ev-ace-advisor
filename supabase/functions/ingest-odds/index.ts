@@ -1,3 +1,8 @@
+import {
+  getAllH2HSports,
+  getAllOutrightSports,
+} from '../_shared/extended-sports-config.ts';
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -185,28 +190,11 @@ Deno.serve(async (req) => {
     const now = new Date();
     const horizonCutoff = new Date(now.getTime() + eventHorizonHours * 60 * 60 * 1000);
 
-    // Outright/futures sports (championship winners)
-    const outrightSports = [
-      'soccer_epl_winner',
-      'soccer_uefa_champs_league_winner',
-      'basketball_nba_championship_winner',
-      'americanfootball_nfl_super_bowl_winner',
-      'icehockey_nhl_championship_winner',
-    ];
+    // Dynamically get all outright/futures sports from extended config
+    const outrightSports = getAllOutrightSports();
 
-    // H2H sports for individual match betting - US sports + major soccer leagues
-    const h2hSports = [
-      'basketball_nba',
-      'basketball_ncaab',
-      'americanfootball_nfl',
-      'icehockey_nhl',
-      // Soccer leagues
-      'soccer_epl',
-      'soccer_spain_la_liga',
-      'soccer_italy_serie_a',
-      'soccer_germany_bundesliga',
-      'soccer_uefa_champs_league',
-    ];
+    // Dynamically get all H2H sports from extended config (includes whale leagues)
+    const h2hSports = getAllH2HSports();
 
     const allSignals: any[] = [];
     const sharpBookSnapshots: SharpBookSnapshot[] = [];

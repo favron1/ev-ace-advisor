@@ -14,6 +14,13 @@ import {
   getSportCodeFromLeague,
   SportCode,
 } from '../_shared/sports-config.ts';
+import {
+  buildAllSportEndpoints,
+  detectAllSportFromText,
+  ALL_SPORTS_CONFIG,
+  getAllSportCodeFromLeague,
+  AllSportCode,
+} from '../_shared/extended-sports-config.ts';
 import { indexBookmakerEvents, BookEvent } from '../_shared/book-index.ts';
 import { matchPolyMarket, MatchResult } from '../_shared/match-poly-to-book.ts';
 import { splitTeams } from '../_shared/canonicalize.ts';
@@ -30,8 +37,8 @@ const CLOB_API_BASE = 'https://clob.polymarket.com';
 // Odds API for bookmaker data
 const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
 
-// Build sport endpoints dynamically from unified config
-const SPORT_ENDPOINTS = buildSportEndpoints();
+// Build sport endpoints dynamically from ALL configs (core + extended)
+const SPORT_ENDPOINTS = buildAllSportEndpoints();
 
 // Sharp books for weighting
 const SHARP_BOOKS = ['pinnacle', 'betfair', 'betfair_ex_eu'];
@@ -91,7 +98,7 @@ function daysDiffUTC(a: Date, b: Date): number {
 // Build reverse nickname map: "flyers" -> "Philadelphia Flyers", "bruins" -> "Boston Bruins"
 function buildNicknameMap(sportCode: string): Map<string, string> {
   const map = new Map<string, string>();
-  const config = SPORTS_CONFIG[sportCode as keyof typeof SPORTS_CONFIG];
+  const config = ALL_SPORTS_CONFIG[sportCode as keyof typeof ALL_SPORTS_CONFIG];
   if (!config?.teamMap) return map;
   
   // Add abbreviation -> full name
@@ -118,7 +125,7 @@ function expandTeamNamesLocally(
   eventName: string,
   sport: string
 ): { homeTeam: string; awayTeam: string } | null {
-  const sportCode = getSportCodeFromLeague(sport);
+  const sportCode = getAllSportCodeFromLeague(sport);
   if (!sportCode) return null;
   
   const nicknameMap = buildNicknameMap(sportCode);
@@ -394,12 +401,12 @@ function normalizeName(name: string): string {
     .trim();
 }
 
-// Detect sport from text - uses shared config
+// Detect sport from text - uses ALL sports config (core + extended)
 function detectSportFromTextLocal(title: string, question: string): string | null {
   const combined = `${title} ${question}`;
   
-  // Use shared detection first
-  const detected = detectSportFromText(combined);
+  // Use extended detection first (includes all whale leagues)
+  const detected = detectAllSportFromText(combined);
   if (detected) return detected;
   
   // No fallback patterns needed - using shared config for core 4 sports only
@@ -1644,9 +1651,9 @@ Deno.serve(async (req) => {
     // This is the key optimization: O(1) lookups instead of O(n) per market
     const bookIndexes = new Map<string, Map<string, BookEvent[]>>();
     for (const [sport, games] of allBookmakerData) {
-      const sportCode = getSportCodeFromLeague(sport);
+      const sportCode = getAllSportCodeFromLeague(sport);
       if (sportCode) {
-        const teamMap = SPORTS_CONFIG[sportCode].teamMap;
+        const teamMap = ALL_SPORTS_CONFIG[sportCode].teamMap;
         const bookIndex = indexBookmakerEvents(games as BookEvent[], sportCode, teamMap);
         bookIndexes.set(sport, bookIndex);
         console.log(`[POLY-MONITOR] Built book index for ${sport}: ${bookIndex.size} unique matchups`);
@@ -2269,8 +2276,8 @@ Deno.serve(async (req) => {
         const isPlaceholderTime = polyEventDate ? isPlaceholderPolymarketTime(polyEventDate) : false;
         
         // Get the canonical book index for this sport
-        const sportCode = getSportCodeFromLeague(sport);
-        const teamMap = sportCode ? SPORTS_CONFIG[sportCode].teamMap : {};
+        const sportCode = getAllSportCodeFromLeague(sport);
+        const teamMap = sportCode ? ALL_SPORTS_CONFIG[sportCode].teamMap : {};
         const bookIndex = bookIndexes.get(sport);
         
         // Parse Polymarket title for team names

@@ -9,6 +9,7 @@
 // ============================================================================
 
 import { SPORTS_CONFIG, SportCode } from './sports-config.ts';
+import { ALL_SPORTS_CONFIG, AllSportCode } from './extended-sports-config.ts';
 
 // Enhanced match result with confidence scoring
 export interface FuzzyMatchResult {
@@ -113,6 +114,134 @@ const TEAM_ALIASES: Record<string, Record<string, string[]>> = {
     'chicago bears': ['bears', 'chi', 'chicago'],
     'minnesota vikings': ['vikings', 'min', 'minnesota', 'vikes'],
     'washington commanders': ['commanders', 'was', 'washington']
+  },
+
+  // Soccer - English Premier League (EPL)
+  epl: {
+    'arsenal': ['arsenal', 'ars', 'gunners'],
+    'aston villa': ['aston villa', 'avl', 'villa'],
+    'bournemouth': ['bournemouth', 'bou', 'cherries'],
+    'brentford': ['brentford', 'bre', 'bees'],
+    'brighton': ['brighton', 'bha', 'seagulls', 'brighton & hove albion'],
+    'chelsea': ['chelsea', 'che', 'blues'],
+    'crystal palace': ['crystal palace', 'cry', 'palace', 'eagles'],
+    'everton': ['everton', 'eve', 'toffees'],
+    'fulham': ['fulham', 'ful', 'cottagers'],
+    'ipswich': ['ipswich', 'ips', 'ipswich town', 'tractor boys'],
+    'leicester': ['leicester', 'lei', 'leicester city', 'foxes'],
+    'liverpool': ['liverpool', 'liv', 'reds'],
+    'manchester city': ['manchester city', 'mci', 'man city', 'city', 'citizens'],
+    'manchester united': ['manchester united', 'mun', 'man united', 'united', 'red devils'],
+    'newcastle': ['newcastle', 'new', 'newcastle united', 'magpies'],
+    'nottingham forest': ['nottingham forest', 'nfo', 'forest', 'nottm forest'],
+    'southampton': ['southampton', 'sou', 'saints'],
+    'tottenham': ['tottenham', 'tot', 'spurs', 'tottenham hotspur'],
+    'west ham': ['west ham', 'whu', 'west ham united', 'hammers'],
+    'wolverhampton': ['wolverhampton', 'wol', 'wolves', 'wolverhampton wanderers']
+  },
+
+  // Soccer - La Liga (Spanish)
+  laliga: {
+    'real madrid': ['real madrid', 'rma', 'madrid', 'real'],
+    'barcelona': ['barcelona', 'bar', 'barca', 'fc barcelona'],
+    'atletico madrid': ['atletico madrid', 'atm', 'atletico', 'atleti'],
+    'sevilla': ['sevilla', 'sev', 'fc sevilla'],
+    'villarreal': ['villarreal', 'vil', 'yellow submarine'],
+    'real betis': ['real betis', 'bet', 'betis'],
+    'real sociedad': ['real sociedad', 'soc', 'sociedad'],
+    'athletic bilbao': ['athletic bilbao', 'ath', 'bilbao', 'athletic'],
+    'valencia': ['valencia', 'val', 'cf valencia'],
+    'getafe': ['getafe', 'get', 'cf getafe'],
+    'osasuna': ['osasuna', 'osa', 'ca osasuna'],
+    'celta vigo': ['celta vigo', 'cel', 'celta', 'vigo'],
+    'rayo vallecano': ['rayo vallecano', 'ray', 'rayo'],
+    'mallorca': ['mallorca', 'mal', 'rcd mallorca'],
+    'alaves': ['alaves', 'ala', 'deportivo alaves'],
+    'las palmas': ['las palmas', 'las', 'ud las palmas'],
+    'girona': ['girona', 'gir', 'girona fc'],
+    'espanyol': ['espanyol', 'esp', 'rcd espanyol'],
+    'leganes': ['leganes', 'leg', 'cd leganes'],
+    'valladolid': ['valladolid', 'vld', 'real valladolid']
+  },
+
+  // Soccer - Serie A (Italian)
+  seriea: {
+    'juventus': ['juventus', 'juv', 'juve', 'bianconeri'],
+    'inter milan': ['inter milan', 'int', 'inter', 'internazionale'],
+    'ac milan': ['ac milan', 'mil', 'milan', 'rossoneri'],
+    'napoli': ['napoli', 'nap', 'ssc napoli'],
+    'roma': ['roma', 'rom', 'as roma', 'giallorossi'],
+    'lazio': ['lazio', 'laz', 'ss lazio', 'biancocelesti'],
+    'fiorentina': ['fiorentina', 'fio', 'acf fiorentina', 'viola'],
+    'atalanta': ['atalanta', 'ata', 'atalanta bc'],
+    'bologna': ['bologna', 'bol', 'bologna fc'],
+    'torino': ['torino', 'tor', 'torino fc'],
+    'udinese': ['udinese', 'udi', 'udinese calcio'],
+    'sassuolo': ['sassuolo', 'sas', 'us sassuolo'],
+    'empoli': ['empoli', 'emp', 'empoli fc'],
+    'verona': ['verona', 'ver', 'hellas verona'],
+    'lecce': ['lecce', 'lec', 'us lecce'],
+    'monza': ['monza', 'mon', 'ac monza'],
+    'genoa': ['genoa', 'gen', 'genoa cfc'],
+    'cagliari': ['cagliari', 'cal', 'cagliari calcio'],
+    'como': ['como', 'com', 'como 1907'],
+    'parma': ['parma', 'par', 'parma calcio'],
+    'venezia': ['venezia', 'ven', 'venezia fc']
+  },
+
+  // Soccer - Bundesliga (German)
+  bundesliga: {
+    'bayern munich': ['bayern munich', 'bay', 'bayern', 'fc bayern'],
+    'borussia dortmund': ['borussia dortmund', 'bvb', 'dortmund'],
+    'rb leipzig': ['rb leipzig', 'rbl', 'leipzig'],
+    'bayer leverkusen': ['bayer leverkusen', 'lev', 'leverkusen'],
+    'eintracht frankfurt': ['eintracht frankfurt', 'fra', 'frankfurt'],
+    'vfl wolfsburg': ['vfl wolfsburg', 'wob', 'wolfsburg'],
+    'borussia monchengladbach': ['borussia monchengladbach', 'bmg', 'gladbach', 'monchengladbach'],
+    'sc freiburg': ['sc freiburg', 'fre', 'freiburg'],
+    'tsg hoffenheim': ['tsg hoffenheim', 'hof', 'hoffenheim'],
+    'fsv mainz': ['fsv mainz', 'mai', 'mainz', 'mainz 05'],
+    'fc augsburg': ['fc augsburg', 'aug', 'augsburg'],
+    'union berlin': ['union berlin', 'uni', 'fc union berlin'],
+    'fc koln': ['fc koln', 'koe', 'koln', 'cologne'],
+    'werder bremen': ['werder bremen', 'wer', 'bremen'],
+    'vfl bochum': ['vfl bochum', 'boc', 'bochum'],
+    'fc heidenheim': ['fc heidenheim', 'hei', 'heidenheim'],
+    'vfb stuttgart': ['vfb stuttgart', 'stg', 'stuttgart'],
+    'holstein kiel': ['holstein kiel', 'hol', 'kiel'],
+    'fc st pauli': ['fc st pauli', 'stm', 'st pauli']
+  },
+
+  // MLS (Major League Soccer)
+  mls: {
+    'atlanta united': ['atlanta united', 'atl', 'atlanta', 'united'],
+    'austin fc': ['austin fc', 'aus', 'austin'],
+    'charlotte fc': ['charlotte fc', 'cha', 'charlotte'],
+    'chicago fire': ['chicago fire', 'chi', 'fire'],
+    'fc cincinnati': ['fc cincinnati', 'cin', 'cincinnati'],
+    'colorado rapids': ['colorado rapids', 'col', 'rapids'],
+    'columbus crew': ['columbus crew', 'clb', 'crew'],
+    'fc dallas': ['fc dallas', 'dal', 'dallas'],
+    'dc united': ['dc united', 'dc', 'united'],
+    'houston dynamo': ['houston dynamo', 'hou', 'dynamo'],
+    'lafc': ['lafc', 'la', 'los angeles fc'],
+    'la galaxy': ['la galaxy', 'lag', 'galaxy'],
+    'inter miami': ['inter miami', 'mia', 'miami'],
+    'minnesota united': ['minnesota united', 'min', 'minnesota', 'loons'],
+    'cf montreal': ['cf montreal', 'mon', 'montreal', 'impact'],
+    'nashville sc': ['nashville sc', 'nsh', 'nashville'],
+    'new england revolution': ['new england revolution', 'ne', 'revolution', 'revs'],
+    'new york city fc': ['new york city fc', 'nyc', 'nycfc', 'city'],
+    'new york red bulls': ['new york red bulls', 'ny', 'red bulls', 'rbny'],
+    'orlando city': ['orlando city', 'orl', 'orlando'],
+    'philadelphia union': ['philadelphia union', 'phi', 'union'],
+    'portland timbers': ['portland timbers', 'por', 'timbers'],
+    'real salt lake': ['real salt lake', 'rsl', 'salt lake'],
+    'san jose earthquakes': ['san jose earthquakes', 'sj', 'earthquakes', 'quakes'],
+    'seattle sounders': ['seattle sounders', 'sea', 'sounders'],
+    'sporting kansas city': ['sporting kansas city', 'skc', 'sporting kc'],
+    'toronto fc': ['toronto fc', 'tor', 'toronto'],
+    'vancouver whitecaps': ['vancouver whitecaps', 'van', 'whitecaps']
   }
 };
 
@@ -137,15 +266,30 @@ const PATTERN_REPLACEMENTS: Record<string, RegExp[]> = {
     { pattern: /\bgsw\b/gi, replacement: 'golden state warriors' },
     { pattern: /\bloc\b/gi, replacement: 'la clippers' },
     { pattern: /76ers/gi, replacement: 'philadelphia 76ers' }
+  ],
+  // Soccer-specific patterns for common abbreviations
+  soccer: [
+    { pattern: /\bfc\b/gi, replacement: '' },       // Remove FC
+    { pattern: /\bcf\b/gi, replacement: '' },       // Remove CF  
+    { pattern: /\bafc\b/gi, replacement: '' },      // Remove AFC
+    { pattern: /\bsc\b/gi, replacement: '' },       // Remove SC
+    { pattern: /\bus\b/gi, replacement: '' },       // Remove US
+    { pattern: /\bac\b/gi, replacement: '' },       // Remove AC
+    { pattern: /\bcd\b/gi, replacement: '' },       // Remove CD
+    { pattern: /\brcd\b/gi, replacement: '' },      // Remove RCD
+    { pattern: /\bssc\b/gi, replacement: '' },      // Remove SSC
+    { pattern: /\breal\s+madrid/gi, replacement: 'real madrid' },
+    { pattern: /\bman\s+city/gi, replacement: 'manchester city' },
+    { pattern: /\bman\s+united/gi, replacement: 'manchester united' }
   ]
 };
 
 /**
- * Main fuzzy matching function with confidence scoring
+ * Main fuzzy matching function with confidence scoring (supports all sport codes)
  */
 export function fuzzyMatchTeam(
   input: string, 
-  sportCode: SportCode,
+  sportCode: SportCode | AllSportCode,
   threshold: number = 0.7
 ): FuzzyMatchResult {
   
@@ -195,10 +339,10 @@ export function fuzzyMatchTeam(
 }
 
 /**
- * Try exact match using existing sports config
+ * Try exact match using ALL sports config (core + extended)
  */
-function tryExactMatch(input: string, sportCode: SportCode): string | null {
-  const config = SPORTS_CONFIG[sportCode];
+function tryExactMatch(input: string, sportCode: SportCode | AllSportCode): string | null {
+  const config = ALL_SPORTS_CONFIG[sportCode];
   if (!config?.teamMap) return null;
   
   // Try abbreviation lookup
