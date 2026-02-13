@@ -1,58 +1,30 @@
 
 
-# Create Remaining Migration Tables
+## Deploy Edge Functions and Run Polymarket Sync
 
-Run the remaining parts of the `20260213_sharp_lines.sql` migration that haven't been applied yet.
+### Step 1: Deploy All Updated Edge Functions
+Deploy the key edge functions that have been updated, particularly:
+- `polymarket-sync-24h` (main sync with token repair)
+- `polymarket-monitor` (self-healing token repair)
+- `tokenize-market` (token ID resolution)
+- `correlated-leg-detector` (just fixed the import issue)
+- All other functions to ensure everything is current
 
-## What Already Exists
-- `sharp_book_lines` table (created)
-- `sharp_consensus` table (created)
-- Related indexes for those two tables
+### Step 2: Run Polymarket Sync
+After deployment, invoke the `polymarket-sync-24h` function to pull fresh market data, token IDs, and volumes into the cache.
 
-## What Needs to Be Created
+### Step 3: Verify the UI
+Check where the "Sync Polymarket" button exists in the app:
+- The `ScanControlPanel` component has a "Sync Polymarket" button on the Terminal page (route `/`)
+- The Pipeline Discover page may also have sync functionality
 
-### 1. New Tables
-- **`whale_wallets`** - Tracks known profitable Polymarket whale wallets (kch123, SeriouslySirius, DrPufferfish, etc.) with profit stats, win rates, and specializations
-- **`whale_positions`** - Tracks current positions held by whale wallets, with foreign key to `whale_wallets`
-- **`multi_leg_opportunities`** - Stores correlated betting opportunities across multiple markets for the same event
+### Step 4: Test the Flow
+1. Trigger the sync via the edge function directly
+2. Navigate to the Terminal and verify data loads
+3. Check the Pipeline Discover view for updated markets
 
-### 2. New Columns on `signal_opportunities`
-Ten new columns for line shopping and Kelly sizing:
-- `sharp_consensus_prob`, `sharp_line_edge`, `line_shopping_tier`
-- `market_priority_score`, `market_type_bonus`, `liquidity_penalty`
-- `kelly_fraction`, `suggested_stake_cents`, `max_kelly_stake_cents`, `bankroll_percentage`
-
-### 3. Database View
-- **`line_shopping_opportunities`** - Joins `signal_opportunities` with `sharp_consensus` to show real-time price discrepancies and line shopping tiers
-
-### 4. Database Functions
-- **`update_market_priority_scores()`** - Scores active signals based on market type (spreads get 1.5x, totals 1.2x)
-- **`cleanup_old_sharp_lines()`** - Deletes sharp lines and consensus data older than 7 days
-
-### 5. Seed Data
-- Insert 5 known whale wallets (kch123, SeriouslySirius, DrPufferfish, gmanas, simonbanza)
-
-### 6. RLS Policies
-- Public read access on all new tables
-- Service role write access on all new tables (same pattern as existing tables)
-
-## Technical Details
-
-The migration will be a single SQL script containing:
-
-```text
-1. CREATE TABLE whale_wallets (with CHECK constraints for confidence_tier)
-2. CREATE TABLE whale_positions (with FK to whale_wallets, CHECK constraints)
-3. CREATE TABLE multi_leg_opportunities (with CHECK on status)
-4. ALTER TABLE signal_opportunities ADD COLUMN x10
-5. CREATE indexes for whale_positions and multi_leg_opportunities
-6. CREATE VIEW line_shopping_opportunities
-7. CREATE FUNCTION update_market_priority_scores()
-8. CREATE FUNCTION cleanup_old_sharp_lines()
-9. ENABLE RLS + policies on all 3 new tables
-10. INSERT seed whale wallets data
-11. TABLE COMMENTS
-```
-
-No code changes needed beyond the migration -- the existing edge functions (`whale-tracker`, `correlated-leg-detector`, `line-shopping-detector`) and library files already reference these table structures.
+### Technical Notes
+- Edge functions deploy automatically when code changes are saved, but we will explicitly trigger deployment to ensure the latest code is live
+- The `polymarket-sync-24h` function handles: Gamma API discovery, Firecrawl scraping, token resolution, and CLOB price refresh
+- Based on recent logs, the sync is already finding 523 events and caching 9 markets with CLOB price validation
 
