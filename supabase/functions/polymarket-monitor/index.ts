@@ -51,8 +51,8 @@ const CORE_LOGIC_VERSION = 'v1.4';
 // ============= CORE LOGIC v1.4 THRESHOLDS (WHALE-OPTIMIZED) =============
 // These constants implement whale strategies: higher edge requirements, sharp book priority, time-based weighting
 const V1_4_GATES = {
-  S2_BOOK_PROB_MIN: 0.50,    // 50% minimum for execution-eligible (S2)
-  S1_BOOK_PROB_MIN: 0.45,    // 45% minimum for any signal (S1)
+  S2_BOOK_PROB_MIN: 0.40,    // 40% minimum for execution-eligible (S2) — V1.5: lowered from 50% to capture underdog value
+  S1_BOOK_PROB_MIN: 0.20,    // 20% minimum for any signal (S1) — V1.5: lowered from 45% — whales bet underdogs heavily
   S2_CONFIDENCE_MIN: 55,      // Confidence floor for S2
   S2_TIME_TO_START_MIN: 10,   // Minutes to event start for S2
   SMS_TIERS: ['elite', 'strong'] as const,  // Only these tiers get SMS
@@ -3023,9 +3023,10 @@ Deno.serve(async (req) => {
             
             // ========== DUAL TRIGGER SYSTEM ==========
             // TRIGGER CONDITIONS (either/or):
-            // 1. Edge Trigger: raw_edge >= 5% (high static edge)
+            // 1. Edge Trigger: raw_edge >= 3% net edge (whale-calibrated — thin but real edges matter at scale)
             // 2. Movement Trigger: 2+ sharp books moved same direction
-            const edgeTriggered = rawEdge >= 0.05;
+            // V1.5: Lowered from 5% to 3% — kch123/top whales profit on 1-3% edges with volume
+            const edgeTriggered = netEdge >= 0.03;
             const movementTriggered = movement.triggered && movement.booksConfirming >= 2;
             
             let triggerReason: 'edge' | 'movement' | 'both' | null = null;
