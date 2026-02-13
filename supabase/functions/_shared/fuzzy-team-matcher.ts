@@ -490,7 +490,7 @@ function tryFuzzyMatch(input: string, sportCode: SportCode, threshold: number): 
  * Calculate string similarity using normalized Levenshtein distance
  */
 function calculateSimilarity(str1: string, str2: string): number {
-  const matrix = [];
+  const matrix: number[][] = [];
   const len1 = str1.length;
   const len2 = str2.length;
   
@@ -605,9 +605,11 @@ export function batchFuzzyMatch(
  * Get match quality statistics for monitoring
  */
 export function getMatchQualityStats(results: FuzzyMatchResult[]) {
+  const total = results.length;
+  const successful = results.filter(r => r.match !== null).length;
   const stats = {
-    total: results.length,
-    successful: results.filter(r => r.match !== null).length,
+    total,
+    successful,
     by_method: {
       exact: results.filter(r => r.method === 'exact').length,
       alias: results.filter(r => r.method === 'alias').length,
@@ -618,10 +620,9 @@ export function getMatchQualityStats(results: FuzzyMatchResult[]) {
     avg_confidence: results
       .filter(r => r.confidence > 0)
       .reduce((sum, r) => sum + r.confidence, 0) / Math.max(1, results.filter(r => r.confidence > 0).length),
-    low_confidence: results.filter(r => r.confidence > 0 && r.confidence < 80).length
+    low_confidence: results.filter(r => r.confidence > 0 && r.confidence < 80).length,
+    success_rate: total > 0 ? (successful / total) * 100 : 0
   };
-  
-  stats.success_rate = (stats.successful / stats.total) * 100;
   
   return stats;
 }
