@@ -45,8 +45,8 @@ export function QuickExecutionPanel({
 
   // Calculate Kelly percentage and sizing
   const polymarketPrice = signal.polymarket_price || 0;
-  const bookFairProb = signal.book_probability || 0;
-  const edge = signal.edge_percentage || 0;
+  const bookFairProb = signal.bookmaker_probability || 0;
+  const edge = signal.edge_percent || 0;
   
   // Kelly formula: (bp - q) / b where b = odds-1, p = true prob, q = 1-p
   const odds = polymarketPrice > 0 ? 1 / polymarketPrice : 0;
@@ -97,7 +97,7 @@ export function QuickExecutionPanel({
           <h3 className="font-semibold text-white text-sm mb-2">{signal.event_name}</h3>
           <div className="flex items-center gap-2 text-xs">
             <Badge variant="outline" className="bg-blue-500/20 text-blue-400 border-blue-500/50">
-              {signal.league || 'Unknown League'}
+              {signal.urgency || 'Unknown'}
             </Badge>
             {hoursToEvent !== null && (
               <span className="text-slate-400">
