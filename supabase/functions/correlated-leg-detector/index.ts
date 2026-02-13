@@ -8,7 +8,15 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders } from '../_shared/cors.ts';
-import { calculateKellySizing, BankrollConfig } from '../../../src/lib/kelly-sizing.ts';
+// BankrollConfig inlined to avoid importing from src/ (not available in edge runtime)
+interface BankrollConfig {
+  total_bankroll: number;
+  max_position_pct: number;
+  max_total_exposure_pct: number;
+  kelly_multiplier: number;
+  min_edge_for_kelly: number;
+  correlation_reduction: number;
+}
 
 // Correlation scoring thresholds
 const CORRELATION_LEVELS = {
