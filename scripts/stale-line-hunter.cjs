@@ -21,7 +21,7 @@ const FUNDER = '0xFaC31C44748daf2d09c6aA26C62E06306B106d9F';
 const ODDS_API_KEY = '9e9724f2663bc69badbecfe4daf61534';
 
 const MIN_EDGE = 3.0;
-const SPORT_SLUGS = /^(nba|nhl|epl|sea|bun|lla|ucl|ufc|cbb)/;
+const SPORT_SLUGS = /^(nba|nhl|epl|sea|bun|lal|ucl|ufc|cbb|crint|atp|mlb|codmw|bundesliga|french)/;
 const SPORTS = [
   'soccer_epl', 'soccer_italy_serie_a', 'soccer_germany_bundesliga',
   'soccer_spain_la_liga', 'soccer_uefa_champs_league',

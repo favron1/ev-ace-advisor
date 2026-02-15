@@ -23,7 +23,7 @@ const MIN_SIZE = 5;
 const MAX_SIZE = 10;
 const SPREAD_CENTS = 0.03;
 const REFRESH_MS = 5 * 60 * 1000;
-const SPORT_SLUGS = /^(nba|nhl|epl|sea|bun|lla|ucl|ufc|cbb)/;
+const SPORT_SLUGS = /^(nba|nhl|epl|sea|bun|lal|ucl|ufc|cbb|crint|atp|mlb|codmw|bundesliga|french)/;
 
 const DATA_DIR = path.join(__dirname, 'data');
 const REBATE_LOG = path.join(DATA_DIR, 'mm-rebates.jsonl');
