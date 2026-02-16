@@ -127,45 +127,52 @@ class EdgeScanner {
   }
 
   async getPolymarketGameMarkets() {
-    // Use EVENTS endpoint with pagination — each event groups all markets for a game
-    // Slug prefixes identify sport: nba, nhl, epl, sea (Serie A), bun (Bundesliga), 
-    // ucl (Champions League), lla (La Liga), ufc, cbb (college basketball), etc.
-    const SPORT_SLUGS = /^(nba|nhl|nfl|epl|sea|bun|lla|ser|cbb|ufc|mlb|mls|ucl|lig)/;
+    // Use tag_slug to query each sport — this is how Polymarket's sports UI works.
+    // The generic /events endpoint doesn't reliably return game markets via slug regex.
+    const SPORT_TAGS = ['nba', 'nhl', 'ncaab', 'epl', 'serie-a', 'bundesliga', 'la-liga', 'ucl', 'ufc', 'ligue-1', 'mls', 'mlb', 'atp', 'cricket'];
     let allMarkets = [];
     
-    for (let offset = 0; offset < 500; offset += 100) {
-      const resp = await fetch(`https://gamma-api.polymarket.com/events?closed=false&limit=100&order=volume24hr&ascending=false&offset=${offset}`);
-      const events = await resp.json();
-      if (!events.length) break;
-      
-      const gameEvents = events.filter(e => {
-        if (!e.title || !(e.title.includes(' vs ') || e.title.includes(' vs. '))) return false;
-        const slug = e.slug || '';
-        return SPORT_SLUGS.test(slug); // Only real sports, not esports
-      });
-      
-      for (const event of gameEvents) {
-        if (!event.markets) continue;
-        for (const m of event.markets) {
-          if (!m.clobTokenIds) continue;
-          allMarkets.push({
-            id: m.id,
-            conditionId: m.conditionId,
-            question: m.question,
-            eventTitle: event.title,
-            eventSlug: event.slug,
-            outcomes: JSON.parse(m.outcomes || '[]'),
-            prices: JSON.parse(m.outcomePrices || '[]').map(Number),
-            tokenIds: JSON.parse(m.clobTokenIds || '[]'),
-            volume24h: parseFloat(m.volume24hr || 0),
-            bestBid: m.bestBid || 0,
-            bestAsk: m.bestAsk || 0
+    for (const tag of SPORT_TAGS) {
+      for (let offset = 0; offset < 500; offset += 50) {
+        try {
+          const resp = await fetch(`https://gamma-api.polymarket.com/events?tag_slug=${tag}&limit=50&active=true&closed=false&offset=${offset}`);
+          const events = await resp.json();
+          if (!events.length) break;
+          
+          // Filter to actual game events (vs futures/props)
+          const gameEvents = events.filter(e => {
+            const title = e.title || '';
+            return title.includes(' vs ') || title.includes(' vs. ');
           });
+          
+          for (const event of gameEvents) {
+            if (!event.markets) continue;
+            for (const m of event.markets) {
+              if (!m.clobTokenIds) continue;
+              allMarkets.push({
+                id: m.id,
+                conditionId: m.conditionId,
+                question: m.question,
+                eventTitle: event.title,
+                eventSlug: event.slug,
+                sport: tag,
+                outcomes: JSON.parse(m.outcomes || '[]'),
+                prices: JSON.parse(m.outcomePrices || '[]').map(Number),
+                tokenIds: JSON.parse(m.clobTokenIds || '[]'),
+                volume24h: parseFloat(m.volume24hr || 0),
+                bestBid: m.bestBid || 0,
+                bestAsk: m.bestAsk || 0
+              });
+            }
+          }
+        } catch (e) {
+          console.error(`Error fetching ${tag} offset ${offset}:`, e.message);
+          break;
         }
       }
     }
     
-    console.log(`📡 Found ${allMarkets.length} markets across sports game events`);
+    console.log(`📡 Found ${allMarkets.length} markets across ${SPORT_TAGS.length} sports`);
     return allMarkets;
   }
 
