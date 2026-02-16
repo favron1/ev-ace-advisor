@@ -623,6 +623,227 @@ export type Database = {
         }
         Relationships: []
       }
+      ps_api_keys: {
+        Row: {
+          created_at: string | null
+          key_hash: string
+          last_request: string | null
+          requests_today: number | null
+          tier: string
+          user_email: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          key_hash: string
+          last_request?: string | null
+          requests_today?: number | null
+          tier?: string
+          user_email?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          key_hash?: string
+          last_request?: string | null
+          requests_today?: number | null
+          tier?: string
+          user_email?: string | null
+        }
+        Relationships: []
+      }
+      ps_events: {
+        Row: {
+          away_team: string
+          created_at: string | null
+          home_team: string
+          id: string
+          polymarket_event_id: string | null
+          polymarket_slug: string | null
+          sport_slug: string
+          start_time: string
+          status: string
+          updated_at: string | null
+        }
+        Insert: {
+          away_team: string
+          created_at?: string | null
+          home_team: string
+          id: string
+          polymarket_event_id?: string | null
+          polymarket_slug?: string | null
+          sport_slug: string
+          start_time: string
+          status?: string
+          updated_at?: string | null
+        }
+        Update: {
+          away_team?: string
+          created_at?: string | null
+          home_team?: string
+          id?: string
+          polymarket_event_id?: string | null
+          polymarket_slug?: string | null
+          sport_slug?: string
+          start_time?: string
+          status?: string
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ps_events_sport_slug_fkey"
+            columns: ["sport_slug"]
+            isOneToOne: false
+            referencedRelation: "ps_sports"
+            referencedColumns: ["slug"]
+          },
+        ]
+      }
+      ps_markets: {
+        Row: {
+          condition_id: string | null
+          event_id: string
+          id: string
+          liquidity: number | null
+          no_price: number | null
+          outcomes: string | null
+          polymarket_url: string | null
+          question: string | null
+          token_ids: string[] | null
+          updated_at: string | null
+          volume: number | null
+          yes_price: number | null
+        }
+        Insert: {
+          condition_id?: string | null
+          event_id: string
+          id: string
+          liquidity?: number | null
+          no_price?: number | null
+          outcomes?: string | null
+          polymarket_url?: string | null
+          question?: string | null
+          token_ids?: string[] | null
+          updated_at?: string | null
+          volume?: number | null
+          yes_price?: number | null
+        }
+        Update: {
+          condition_id?: string | null
+          event_id?: string
+          id?: string
+          liquidity?: number | null
+          no_price?: number | null
+          outcomes?: string | null
+          polymarket_url?: string | null
+          question?: string | null
+          token_ids?: string[] | null
+          updated_at?: string | null
+          volume?: number | null
+          yes_price?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ps_markets_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "ps_events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      ps_odds_snapshots: {
+        Row: {
+          captured_at: string | null
+          id: number
+          market_id: string
+          no_price: number
+          volume: number | null
+          yes_price: number
+        }
+        Insert: {
+          captured_at?: string | null
+          id?: number
+          market_id: string
+          no_price: number
+          volume?: number | null
+          yes_price: number
+        }
+        Update: {
+          captured_at?: string | null
+          id?: number
+          market_id?: string
+          no_price?: number
+          volume?: number | null
+          yes_price?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ps_odds_snapshots_market_id_fkey"
+            columns: ["market_id"]
+            isOneToOne: false
+            referencedRelation: "ps_markets"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      ps_sharp_odds: {
+        Row: {
+          away_odds: number
+          captured_at: string | null
+          event_id: string
+          home_odds: number
+          id: number
+          source: string
+        }
+        Insert: {
+          away_odds: number
+          captured_at?: string | null
+          event_id: string
+          home_odds: number
+          id?: number
+          source?: string
+        }
+        Update: {
+          away_odds?: number
+          captured_at?: string | null
+          event_id?: string
+          home_odds?: number
+          id?: number
+          source?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ps_sharp_odds_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "ps_events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      ps_sports: {
+        Row: {
+          created_at: string | null
+          icon: string | null
+          name: string
+          slug: string
+          sport_type: string
+        }
+        Insert: {
+          created_at?: string | null
+          icon?: string | null
+          name: string
+          slug: string
+          sport_type: string
+        }
+        Update: {
+          created_at?: string | null
+          icon?: string | null
+          name?: string
+          slug?: string
+          sport_type?: string
+        }
+        Relationships: []
+      }
       scan_config: {
         Row: {
           active_poll_interval_seconds: number | null
