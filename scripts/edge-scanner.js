@@ -188,12 +188,43 @@ class EdgeScanner {
     }
   }
 
+  /**
+   * Normalize team name — extract significant words (>3 chars), strip FC/SC/etc.
+   * Unified with /v1/edges endpoint matching logic.
+   */
+  normalizeTeam(name) {
+    const stripped = name
+      .replace(/\b(FC|CF|SC|SK|SFP|FK|KV|BC|AC|AS|BV|SL)\b/gi, '')
+      .replace(/[^a-zA-Z\s]/g, '')
+      .trim();
+    return stripped.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+  }
+
+  /**
+   * Strict match: BOTH teams must appear in the event title.
+   * Uses normalizeTeam to avoid false positives (e.g. "Madrid" matching any Madrid team).
+   */
   fuzzyMatch(pinnacleGame, polyMarket) {
-    // Match against both question and event title for better coverage
-    const searchText = `${polyMarket.question} ${polyMarket.eventTitle || ''}`.toLowerCase();
-    const home = pinnacleGame.home.toLowerCase().split(' ').pop();
-    const away = pinnacleGame.away.toLowerCase().split(' ').pop();
-    return searchText.includes(home) && searchText.includes(away);
+    const titleLower = (polyMarket.eventTitle || '').toLowerCase();
+    const homeWords = this.normalizeTeam(pinnacleGame.home);
+    const awayWords = this.normalizeTeam(pinnacleGame.away);
+    const homeMatch = homeWords.some(w => titleLower.includes(w));
+    const awayMatch = awayWords.some(w => titleLower.includes(w));
+    return homeMatch && awayMatch;
+  }
+
+  /**
+   * Find the specific "will X win" market for a team within matched event markets.
+   */
+  findTeamWinMarket(markets, teamName) {
+    const teamWords = this.normalizeTeam(teamName);
+    for (const m of markets) {
+      const q = m.question.toLowerCase();
+      if (!q.includes('win')) continue;
+      if (q.includes('draw') || q.includes('trophy') || q.includes('season') || q.includes('champion')) continue;
+      if (teamWords.some(w => q.includes(w))) return m;
+    }
+    return null;
   }
 
   async placeTrade(opportunity) {
