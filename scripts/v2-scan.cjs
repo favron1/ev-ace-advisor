@@ -299,6 +299,56 @@ async function main() {
     console.log(`  ✅ [${e.sport.toUpperCase()}] ${e.side} @ ${(e.polyPrice*100).toFixed(1)}¢ | Edge: ${e.edge.toFixed(1)}% | ${e.hoursAway.toFixed(0)}h | Liq: $${e.liquidity.toFixed(0)}`);
   }
   
+  // === STAKE STRATEGY ===
+  // Based on sharp confidence + edge size + book agreement
+  // Higher confidence = bigger bet. Scale with bankroll.
+  const BANKROLL = 350; // Update this or pass via env
+  const MAX_DEPLOYED_PCT = 0.75; // Never deploy more than 75%
+  const maxDeploy = BANKROLL * MAX_DEPLOYED_PCT;
+  
+  console.log(`\n${"=".repeat(60)}`);
+  console.log(`STAKE STRATEGY (Bankroll: $${BANKROLL})`);
+  console.log(`${"=".repeat(60)}\n`);
+  
+  for (const e of bettable) {
+    // Tier 1: Sharp ≥60% AND edge ≥10% → 12-15% bankroll
+    // Tier 2: Sharp ≥55% AND edge ≥5% → 8-10% bankroll
+    // Tier 3: Sharp ≥50% AND edge ≥3% → 5-7% bankroll
+    // Tier 4: Edge ≥1.5% → 3-4% bankroll
+    let pct, tier;
+    if (e.sharpProb >= 0.60 && e.edge >= 10) {
+      pct = 0.12 + Math.min(e.edge / 100, 0.03); // 12-15%
+      tier = "🔥 TIER 1 (HIGH CONVICTION)";
+    } else if (e.sharpProb >= 0.55 && e.edge >= 5) {
+      pct = 0.08 + Math.min(e.edge / 200, 0.02); // 8-10%
+      tier = "⚡ TIER 2 (STRONG)";
+    } else if (e.sharpProb >= 0.50 && e.edge >= 3) {
+      pct = 0.05 + Math.min(e.edge / 200, 0.02); // 5-7%
+      tier = "📊 TIER 3 (MODERATE)";
+    } else {
+      pct = 0.03 + Math.min(e.edge / 300, 0.01); // 3-4%
+      tier = "📉 TIER 4 (LEAN)";
+    }
+    
+    // Book agreement bonus: >15 books = +1%, >20 books = +2%
+    if (e.books >= 20) pct += 0.02;
+    else if (e.books >= 15) pct += 0.01;
+    
+    const stake = Math.min(Math.round(BANKROLL * pct), maxDeploy * 0.25); // Cap single bet at 25% of max
+    const shares = Math.floor(stake / e.polyPrice);
+    
+    e.stake = stake;
+    e.shares = shares;
+    e.tier = tier;
+    
+    console.log(`${tier}`);
+    console.log(`  ${e.sport.toUpperCase()} | ${e.side} | Sharp: ${(e.sharpProb*100).toFixed(1)}% | Poly: ${(e.polyPrice*100).toFixed(1)}¢ | Edge: ${e.edge.toFixed(1)}% | ${e.books} books`);
+    console.log(`  → $${stake} (${(pct*100).toFixed(1)}% bankroll) = ${shares}sh @ ${(e.polyPrice*100).toFixed(1)}¢\n`);
+  }
+  
+  const totalStake = bettable.reduce((s, e) => s + (e.stake || 0), 0);
+  console.log(`Total recommended: $${totalStake} / $${maxDeploy.toFixed(0)} max (${(totalStake/BANKROLL*100).toFixed(1)}% of bankroll)`);
+
   // Save results
   fs.writeFileSync("/tmp/poly-scan/v2-results.json", JSON.stringify({ allEdges, bettable, timestamp: new Date().toISOString() }, null, 2));
   console.log("\nSaved to /tmp/poly-scan/v2-results.json");
