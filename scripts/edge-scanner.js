@@ -10,9 +10,10 @@ import * as path from 'path';
 
 // API Keys and Config
 const ODDS_API_KEY = '9e9724f2663bc69badbecfe4daf61534';
-const MIN_EDGE_PCT = 2.0;
-const MAX_BET_SIZE = 10; // Max $10 per bet
-const MAX_TOTAL_PER_RUN = 50; // Max $50 total per scan run
+const MIN_EDGE_PCT = 3.0; // Only 3%+ edges worth the variance
+const MIN_SHARP_PROB = 0.50; // FAVOURITES ONLY — sharp book must say >50% to win
+const MAX_BET_SIZE = 25; // Bigger size on high-confidence favourite bets
+const MAX_TOTAL_PER_RUN = 75; // More capital per run since we're betting favourites
 const MIN_LIQUIDITY_RATIO = 0.5; // Best bid must be >= 50% of entry price
 
 // Sport timing preferences (hours before game time)
@@ -369,6 +370,11 @@ class EdgeScanner {
         
         const polyPrice = polyMatch.prices[polyIdx];
         const edge = (pin.impliedProb - polyPrice) * 100;
+        
+        // FAVOURITES ONLY: skip if sharp book says <50% chance of winning
+        if (pin.impliedProb < MIN_SHARP_PROB) continue;
+        // Skip draws entirely
+        if (pin.name === 'Draw') continue;
         
         if (edge >= MIN_EDGE_PCT) {
           opportunities.push({
