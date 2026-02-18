@@ -78,24 +78,81 @@ class EdgeScanner {
     }
   }
 
-  async getPinnacleOdds() {
+  /**
+   * Calculate weighted consensus probability from all bookmakers.
+   * Weight = 1 / vig_percentage (sharper books get more weight).
+   */
+  calculateConsensus(bookmakers, outcomeCount) {
+    if (!bookmakers || bookmakers.length === 0) return null;
+
+    const weightedSums = new Array(outcomeCount).fill(0);
+    const totalWeights = new Array(outcomeCount).fill(0);
+    const allFairProbs = Array.from({ length: outcomeCount }, () => []);
+    let betfairProbs = new Array(outcomeCount).fill(null);
+    let pinnacleProbs = new Array(outcomeCount).fill(null);
+    let validBooks = 0;
+
+    for (const book of bookmakers) {
+      const h2h = book.markets?.find(m => m.key === 'h2h');
+      if (!h2h || h2h.outcomes.length !== outcomeCount) continue;
+
+      const rawProbs = h2h.outcomes.map(o => 1 / o.price);
+      const overround = rawProbs.reduce((a, b) => a + b, 0);
+      const vigPct = (overround - 1) * 100;
+      if (vigPct <= 0) continue;
+
+      const weight = 1 / Math.max(vigPct, 0.1);
+      validBooks++;
+
+      for (let i = 0; i < outcomeCount; i++) {
+        const fairProb = rawProbs[i] / overround;
+        weightedSums[i] += fairProb * weight;
+        totalWeights[i] += weight;
+        allFairProbs[i].push(fairProb);
+      }
+
+      const key = book.key.toLowerCase();
+      if (key.includes('betfair') && key.includes('exchange')) {
+        for (let i = 0; i < outcomeCount; i++) betfairProbs[i] = rawProbs[i] / overround;
+      }
+      if (key === 'pinnacle') {
+        for (let i = 0; i < outcomeCount; i++) pinnacleProbs[i] = rawProbs[i] / overround;
+      }
+    }
+
+    if (validBooks === 0) return null;
+
+    const fairProbs = weightedSums.map((s, i) => s / totalWeights[i]);
+    const spread = allFairProbs.map(probs => {
+      if (probs.length < 2) return 0;
+      return (Math.max(...probs) - Math.min(...probs)) * 100;
+    });
+
+    return { fairProbs, bookCount: validBooks, spread, betfairProbs, pinnacleProbs };
+  }
+
+  async getSharpConsensus() {
     const allGames = [];
     const now = Date.now();
     
     for (const sport of SPORTS) {
       try {
         const resp = await fetch(
-          `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h&bookmakers=pinnacle&oddsFormat=decimal`
+          `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${ODDS_API_KEY}&regions=us,eu,uk,au&markets=h2h&oddsFormat=decimal`
         );
         const data = await resp.json();
         if (!Array.isArray(data)) continue;
         
         for (const g of data) {
-          const pin = g.bookmakers?.find(b => b.key === 'pinnacle');
-          if (!pin) continue;
-          const h2h = pin.markets?.find(m => m.key === 'h2h');
-          if (!h2h) continue;
-          
+          if (!g.bookmakers || g.bookmakers.length === 0) continue;
+
+          // Get outcome count from first book with h2h
+          const firstH2h = g.bookmakers
+            .map(b => b.markets?.find(m => m.key === 'h2h'))
+            .find(m => m);
+          if (!firstH2h) continue;
+          const outcomeCount = firstH2h.outcomes.length;
+
           const gameTime = new Date(g.commence_time);
           const hoursUntil = (gameTime - now) / 3600000;
           
@@ -105,10 +162,9 @@ class EdgeScanner {
           // Apply sport-specific timing preferences
           const timing = SPORT_TIMING[sport];
           if (hoursUntil < timing.min || hoursUntil > timing.max) continue;
-          
-          // Strip vig: raw implied probs sum to >100%, divide by total to get fair probs
-          const rawProbs = h2h.outcomes.map(o => 1 / o.price);
-          const overround = rawProbs.reduce((a, b) => a + b, 0);
+
+          const consensus = this.calculateConsensus(g.bookmakers, outcomeCount);
+          if (!consensus) continue;
           
           allGames.push({
             sport,
@@ -117,10 +173,15 @@ class EdgeScanner {
             commence: g.commence_time,
             hoursUntil: hoursUntil.toFixed(1),
             gameTime: gameTime.toISOString(),
-            outcomes: h2h.outcomes.map((o, idx) => ({
+            bookCount: consensus.bookCount,
+            consensusSpread: consensus.spread,
+            outcomes: firstH2h.outcomes.map((o, idx) => ({
               name: o.name,
               decimal: o.price,
-              impliedProb: rawProbs[idx] / overround // VIG-ADJUSTED fair probability
+              impliedProb: consensus.fairProbs[idx],
+              betfairProb: consensus.betfairProbs[idx],
+              pinnacleProb: consensus.pinnacleProbs[idx],
+              spread: consensus.spread[idx]
             }))
           });
         }
@@ -352,11 +413,11 @@ class EdgeScanner {
     }
 
     const [pinnacle, polyMarkets] = await Promise.all([
-      this.getPinnacleOdds(),
+      this.getSharpConsensus(),
       this.getPolymarketGameMarkets()
     ]);
     
-    console.log(`📊 Pinnacle: ${pinnacle.length} games in optimal timing windows`);
+    console.log(`📊 Sharp consensus: ${pinnacle.length} games in optimal timing windows`);
     console.log(`📊 Polymarket: ${polyMarkets.length} game markets\n`);
     
     const opportunities = [];
@@ -387,9 +448,13 @@ class EdgeScanner {
             gameTime: game.gameTime,
             hoursUntil: game.hoursUntil,
             outcome: pin.name,
-            pinnacleImplied: (pin.impliedProb * 100).toFixed(1) + '%',
+            consensusProb: (pin.impliedProb * 100).toFixed(1) + '%',
+            pinnacleProb: pin.pinnacleProb ? (pin.pinnacleProb * 100).toFixed(1) + '%' : 'n/a',
+            betfairProb: pin.betfairProb ? (pin.betfairProb * 100).toFixed(1) + '%' : 'n/a',
             polyPrice: (polyPrice * 100).toFixed(1) + '%',
             edge: edge.toFixed(1) + '%',
+            bookCount: game.bookCount,
+            spread: pin.spread?.toFixed(1) + '%',
             tokenId: polyMatch.tokenIds[polyIdx],
             marketId: polyMatch.id,
             side: 'BUY',
@@ -406,7 +471,7 @@ class EdgeScanner {
       
       for (const opp of opportunities) {
         console.log(`[${opp.sport}] ${opp.game} (${opp.hoursUntil}h away)`);
-        console.log(`  ${opp.outcome}: Pinnacle ${opp.pinnacleImplied} vs Poly ${opp.polyPrice} → EDGE: ${opp.edge}`);
+        console.log(`  ${opp.outcome}: Consensus ${opp.consensusProb} (${opp.bookCount} books, spread ${opp.spread}) vs Poly ${opp.polyPrice} → EDGE: ${opp.edge}`);
         
         // Place trade if CLOB is available and within limits
         if (this.clobClient && this.totalSpentThisRun < MAX_TOTAL_PER_RUN) {
