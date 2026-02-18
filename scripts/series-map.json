@@ -1,0 +1,14 @@
+{
+  "nba": {"seriesId": "2", "oddsKey": "basketball_nba", "binary": true},
+  "nhl": {"seriesId": "4", "oddsKey": "icehockey_nhl", "binary": true},
+  "ncaab": {"seriesId": "10470", "oddsKey": "basketball_ncaab", "binary": true},
+  "ufc": {"seriesId": "38", "oddsKey": "mma_mixed_martial_arts", "binary": true},
+  "epl": {"seriesId": "36", "oddsKey": "soccer_epl", "binary": false},
+  "laliga": {"seriesId": null, "tagSlug": "la-liga", "oddsKey": "soccer_spain_la_liga", "binary": false},
+  "seriea": {"seriesId": "10203", "oddsKey": "soccer_italy_serie_a", "binary": false},
+  "bundesliga": {"seriesId": "10194", "oddsKey": "soccer_germany_bundesliga", "binary": false},
+  "ligue1": {"seriesId": "10195", "oddsKey": "soccer_france_ligue_one", "binary": false},
+  "mls": {"seriesId": "10189", "oddsKey": "soccer_usa_mls", "binary": false},
+  "ucl": {"seriesId": "10003", "oddsKey": "soccer_uefa_champs_league", "binary": false},
+  "aleague": {"seriesId": "10438", "oddsKey": null, "binary": false}
+}
