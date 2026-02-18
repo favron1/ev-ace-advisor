@@ -106,6 +106,10 @@ class EdgeScanner {
           const timing = SPORT_TIMING[sport];
           if (hoursUntil < timing.min || hoursUntil > timing.max) continue;
           
+          // Strip vig: raw implied probs sum to >100%, divide by total to get fair probs
+          const rawProbs = h2h.outcomes.map(o => 1 / o.price);
+          const overround = rawProbs.reduce((a, b) => a + b, 0);
+          
           allGames.push({
             sport,
             home: g.home_team,
@@ -113,10 +117,10 @@ class EdgeScanner {
             commence: g.commence_time,
             hoursUntil: hoursUntil.toFixed(1),
             gameTime: gameTime.toISOString(),
-            outcomes: h2h.outcomes.map(o => ({
+            outcomes: h2h.outcomes.map((o, idx) => ({
               name: o.name,
               decimal: o.price,
-              impliedProb: 1 / o.price
+              impliedProb: rawProbs[idx] / overround // VIG-ADJUSTED fair probability
             }))
           });
         }
