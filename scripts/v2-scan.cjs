@@ -59,6 +59,7 @@ function isMoneylineMarket(question) {
   if (q.includes("ko or tko") || q.includes("knockout") || q.includes("by ko") || q.includes("by tko")) return false;
   if (q.includes("submission") || q.includes("decision") || q.includes("by points")) return false;
   if (q.includes("o/u") || q.includes("over/under") || q.includes("spread")) return false;
+  if (q.includes("1h moneyline") || q.includes("1h ") || q.includes("first half") || q.includes("1st half")) return false;
   if (q.includes("both teams") || q.includes("btts")) return false;
   if (q.includes("draw")) return false;
   if (q.includes("manager") || q.includes("champion") || q.includes("relegated") || q.includes("trophy")) return false;
@@ -139,7 +140,7 @@ async function scanSport(sport, cfg) {
   for (const game of oddsGames) {
     const gameStart = new Date(game.commence_time);
     const hoursAway = (gameStart - Date.now()) / 3600000;
-    if (hoursAway < 0 || hoursAway > 168) continue;
+    if (hoursAway < 0 || hoursAway > 48) continue; // HARD LIMIT: never scan games >48h away
     
     // Find matching Poly event — BOTH teams must be in event title or market questions
     for (const event of polyEvents) {
